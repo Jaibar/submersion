@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -399,6 +400,59 @@ void main() {
 
         final history = service.getBackupHistory();
         expect(history, isEmpty);
+      });
+    });
+
+    group('validateBackupFile', () {
+      test('returns invalid for non-existent file', () async {
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+
+        final result = await service.validateBackupFile(
+          '/nonexistent/file.sqlite',
+        );
+        expect(result.isValid, false);
+        expect(result.error, contains('not found'));
+      });
+
+      test('returns invalid for wrong extension', () async {
+        final tempDir = await Directory.systemTemp.createTemp('backup_test_');
+        final badFile = File('${tempDir.path}/not_a_backup.txt');
+        await badFile.writeAsString('not a database');
+
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+
+        try {
+          final result = await service.validateBackupFile(badFile.path);
+          expect(result.isValid, false);
+          expect(result.error, contains('extension'));
+        } finally {
+          await tempDir.delete(recursive: true);
+        }
+      });
+
+      test('returns invalid for empty file', () async {
+        final tempDir = await Directory.systemTemp.createTemp('backup_test_');
+        final emptyFile = File('${tempDir.path}/empty.sqlite');
+        await emptyFile.create();
+
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+
+        try {
+          final result = await service.validateBackupFile(emptyFile.path);
+          expect(result.isValid, false);
+          expect(result.error, contains('empty'));
+        } finally {
+          await tempDir.delete(recursive: true);
+        }
       });
     });
 

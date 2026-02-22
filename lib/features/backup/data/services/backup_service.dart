@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:drift/native.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -130,6 +131,61 @@ class BackupService {
 
     _log.info('Backup completed: ${record.filename} (${record.formattedSize})');
     return record;
+  }
+
+  /// Validate whether a file is a valid Submersion backup.
+  ///
+  /// Checks: file exists, has correct extension, is a valid SQLite database,
+  /// and contains expected Submersion tables.
+  Future<BackupValidationResult> validateBackupFile(String filePath) async {
+    final file = File(filePath);
+
+    // Check file exists
+    if (!await file.exists()) {
+      return const BackupValidationResult.invalid('File not found');
+    }
+
+    // Check extension
+    final ext = p.extension(filePath).toLowerCase();
+    if (ext != '.sqlite' && ext != '.db') {
+      return BackupValidationResult.invalid(
+        'Invalid file extension "$ext". Expected .sqlite or .db',
+      );
+    }
+
+    // Check file size
+    final sizeBytes = await file.length();
+    if (sizeBytes == 0) {
+      return const BackupValidationResult.invalid('File is empty');
+    }
+
+    // Try opening as SQLite and check for expected tables
+    try {
+      final testDb = AppDatabase(NativeDatabase(file, logStatements: false));
+      try {
+        // Verify it's a valid SQLite database
+        await testDb.customSelect('SELECT 1').getSingle();
+
+        // Check for expected Submersion tables
+        final tables = await testDb
+            .customSelect(
+              "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('dives', 'dive_sites')",
+            )
+            .get();
+
+        if (tables.isEmpty) {
+          return const BackupValidationResult.invalid(
+            'File does not appear to be a Submersion backup (missing expected tables)',
+          );
+        }
+
+        return BackupValidationResult.valid(sizeBytes: sizeBytes);
+      } finally {
+        await testDb.close();
+      }
+    } catch (e) {
+      return BackupValidationResult.invalid('File is not a valid database: $e');
+    }
   }
 
   // ===========================================================================
@@ -339,4 +395,25 @@ class BackupException implements Exception {
 
   @override
   String toString() => 'BackupException: $message';
+}
+
+/// Result of validating a backup file
+class BackupValidationResult {
+  final bool isValid;
+  final String? error;
+  final int? sizeBytes;
+
+  const BackupValidationResult({
+    required this.isValid,
+    this.error,
+    this.sizeBytes,
+  });
+
+  const BackupValidationResult.valid({this.sizeBytes})
+    : isValid = true,
+      error = null;
+
+  const BackupValidationResult.invalid(String this.error)
+    : isValid = false,
+      sizeBytes = null;
 }
