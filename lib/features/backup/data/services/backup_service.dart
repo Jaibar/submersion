@@ -80,7 +80,7 @@ class BackupService {
     _log.info('Starting backup (automatic: $isAutomatic)');
 
     final filename = _generateFilename();
-    final localDir = await getLocalBackupsDirectory();
+    final localDir = await getBackupsDirectory();
     final localPath = p.join(localDir, filename);
 
     // Copy the database file
@@ -382,6 +382,19 @@ class BackupService {
   // ===========================================================================
   // File System Helpers
   // ===========================================================================
+
+  /// Get the active backups directory (custom or default), creating it if needed.
+  Future<String> getBackupsDirectory() async {
+    final settings = _preferences.getSettings();
+    if (settings.backupLocation != null) {
+      final customDir = Directory(settings.backupLocation!);
+      if (!await customDir.exists()) {
+        await customDir.create(recursive: true);
+      }
+      return customDir.path;
+    }
+    return getLocalBackupsDirectory();
+  }
 
   /// Get the local backups directory, creating it if needed.
   Future<String> getLocalBackupsDirectory() async {

@@ -596,6 +596,40 @@ void main() {
       });
     });
 
+    group('performBackup with custom location', () {
+      test('uses custom backup location from settings', () async {
+        final tempDir = await Directory.systemTemp.createTemp('backup_test_');
+
+        await preferences.setBackupLocation(tempDir.path);
+
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+
+        try {
+          await service.performBackup();
+
+          expect(fakeDb.lastBackupPath, startsWith(tempDir.path));
+        } finally {
+          await tempDir.delete(recursive: true);
+        }
+      });
+
+      test('falls back to default location when no custom location', () async {
+        final service = BackupService(
+          dbAdapter: fakeDb,
+          preferences: preferences,
+        );
+
+        await service.performBackup();
+
+        // Default location uses the _localBackupFolder path
+        expect(fakeDb.lastBackupPath, contains('Submersion'));
+        expect(fakeDb.lastBackupPath, contains('Backups'));
+      });
+    });
+
     group('BackupSettings integration', () {
       test('isBackupDue returns true when never backed up', () {
         const settings = BackupSettings(enabled: true);
