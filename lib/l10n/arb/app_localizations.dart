@@ -6370,6 +6370,12 @@ abstract class AppLocalizations {
   /// **'Ceiling'**
   String get diveLog_legend_label_ceiling;
 
+  /// No description provided for @diveLog_legend_label_cns.
+  ///
+  /// In en, this message translates to:
+  /// **'CNS%'**
+  String get diveLog_legend_label_cns;
+
   /// No description provided for @diveLog_legend_label_depth.
   ///
   /// In en, this message translates to:
@@ -6429,6 +6435,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'NDL'**
   String get diveLog_legend_label_ndl;
+
+  /// No description provided for @diveLog_legend_label_otu.
+  ///
+  /// In en, this message translates to:
+  /// **'OTU'**
+  String get diveLog_legend_label_otu;
 
   /// No description provided for @diveLog_legend_label_ppHe.
   ///
@@ -7804,6 +7816,12 @@ abstract class AppLocalizations {
   /// **'Ceiling'**
   String get diveLog_tooltip_ceiling;
 
+  /// No description provided for @diveLog_tooltip_cns.
+  ///
+  /// In en, this message translates to:
+  /// **'CNS'**
+  String get diveLog_tooltip_cns;
+
   /// No description provided for @diveLog_tooltip_density.
   ///
   /// In en, this message translates to:
@@ -7851,6 +7869,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'NDL'**
   String get diveLog_tooltip_ndl;
+
+  /// No description provided for @diveLog_tooltip_otu.
+  ///
+  /// In en, this message translates to:
+  /// **'OTU'**
+  String get diveLog_tooltip_otu;
 
   /// No description provided for @diveLog_tooltip_ppHe.
   ///

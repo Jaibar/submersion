@@ -40,6 +40,8 @@ class ProfileLegendState {
   final bool showSurfaceGf;
   final bool showMeanDepth;
   final bool showTts;
+  final bool showCns;
+  final bool showOtu;
 
   // Per-tank pressure visibility (keyed by tank ID)
   final Map<String, bool> showTankPressure;
@@ -66,6 +68,8 @@ class ProfileLegendState {
     this.showSurfaceGf = false,
     this.showMeanDepth = false,
     this.showTts = false,
+    this.showCns = false,
+    this.showOtu = false,
     this.showTankPressure = const {},
   });
 
@@ -89,6 +93,8 @@ class ProfileLegendState {
     if (showSurfaceGf) count++;
     if (showMeanDepth) count++;
     if (showTts) count++;
+    if (showCns) count++;
+    if (showOtu) count++;
     count += showTankPressure.values.where((v) => v).length;
     return count;
   }
@@ -119,6 +125,8 @@ class ProfileLegendState {
     bool? showSurfaceGf,
     bool? showMeanDepth,
     bool? showTts,
+    bool? showCns,
+    bool? showOtu,
     Map<String, bool>? showTankPressure,
   }) {
     return ProfileLegendState(
@@ -145,6 +153,8 @@ class ProfileLegendState {
       showSurfaceGf: showSurfaceGf ?? this.showSurfaceGf,
       showMeanDepth: showMeanDepth ?? this.showMeanDepth,
       showTts: showTts ?? this.showTts,
+      showCns: showCns ?? this.showCns,
+      showOtu: showOtu ?? this.showOtu,
       showTankPressure: showTankPressure ?? this.showTankPressure,
     );
   }
@@ -175,6 +185,8 @@ class ProfileLegendState {
           showSurfaceGf == other.showSurfaceGf &&
           showMeanDepth == other.showMeanDepth &&
           showTts == other.showTts &&
+          showCns == other.showCns &&
+          showOtu == other.showOtu &&
           mapEquals(showTankPressure, other.showTankPressure);
 
   @override
@@ -200,6 +212,8 @@ class ProfileLegendState {
     showSurfaceGf,
     showMeanDepth,
     showTts,
+    showCns,
+    showOtu,
     ...showTankPressure.entries,
   ]);
 }
@@ -342,6 +356,14 @@ class ProfileLegend extends _$ProfileLegend {
 
   void toggleTts() {
     state = state.copyWith(showTts: !state.showTts);
+  }
+
+  void toggleCns() {
+    state = state.copyWith(showCns: !state.showCns);
+  }
+
+  void toggleOtu() {
+    state = state.copyWith(showOtu: !state.showOtu);
   }
 
   /// Toggle visibility for a specific tank's pressure line

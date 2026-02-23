@@ -34,6 +34,7 @@ This document contains only the features and tasks that are **not yet completed*
 ### 2.1 Profile Options
 - [ ] Re-enable profile "Range Analysis"
 - [ ] Re-enable profile "Playback"
+- [ ] Display CNS on dive profile graph
 
 ### 2.2 Multi-Profile Support
 | Feature | Notes |

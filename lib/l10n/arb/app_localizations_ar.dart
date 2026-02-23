@@ -3639,6 +3639,9 @@ class AppLocalizationsAr extends AppLocalizations {
   String get diveLog_legend_label_ceiling => 'السقف';
 
   @override
+  String get diveLog_legend_label_cns => 'CNS%';
+
+  @override
   String get diveLog_legend_label_depth => 'العمق';
 
   @override
@@ -3667,6 +3670,9 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get diveLog_legend_label_ndl => 'NDL';
+
+  @override
+  String get diveLog_legend_label_otu => 'OTU';
 
   @override
   String get diveLog_legend_label_ppHe => 'ppHe';
@@ -4428,6 +4434,9 @@ class AppLocalizationsAr extends AppLocalizations {
   String get diveLog_tooltip_ceiling => 'السقف';
 
   @override
+  String get diveLog_tooltip_cns => 'CNS';
+
+  @override
   String get diveLog_tooltip_density => 'الكثافة';
 
   @override
@@ -4450,6 +4459,9 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get diveLog_tooltip_ndl => 'NDL';
+
+  @override
+  String get diveLog_tooltip_otu => 'OTU';
 
   @override
   String get diveLog_tooltip_ppHe => 'ppHe';

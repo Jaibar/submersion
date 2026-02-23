@@ -248,6 +248,12 @@ class ProfileAnalysis {
   /// Time To Surface at each profile point (seconds)
   final List<int>? ttsCurve;
 
+  /// Cumulative CNS% at each profile point (includes residual from prior dives)
+  final List<double>? cnsCurve;
+
+  /// Cumulative OTU at each profile point
+  final List<double>? otuCurve;
+
   /// Maximum depth reached (meters)
   final double maxDepth;
 
@@ -281,6 +287,8 @@ class ProfileAnalysis {
     this.surfaceGfCurve,
     this.meanDepthCurve,
     this.ttsCurve,
+    this.cnsCurve,
+    this.otuCurve,
     required this.maxDepth,
     required this.averageDepth,
     required this.maxDepthTimestamp,
@@ -337,6 +345,12 @@ class ProfileAnalysis {
 
   /// Whether TTS curve data is available
   bool get hasTtsData => ttsCurve != null && ttsCurve!.isNotEmpty;
+
+  /// Whether CNS curve data is available
+  bool get hasCnsData => cnsCurve != null && cnsCurve!.isNotEmpty;
+
+  /// Whether OTU curve data is available
+  bool get hasOtuData => otuCurve != null && otuCurve!.isNotEmpty;
 
   /// Create an empty analysis
   factory ProfileAnalysis.empty() {
@@ -612,6 +626,15 @@ class ProfileAnalysisService {
     final surfaceGfCurve = _calculateSurfaceGfCurve(decoStatuses);
     final meanDepthCurve = _calculateMeanDepthCurve(depths);
     final ttsCurve = decoStatuses.map((s) => s.ttsSeconds).toList();
+    final cnsCurve = _calculateCnsCurve(
+      ppO2Curve: ppO2Curve,
+      timestamps: timestamps,
+      startCns: startCns,
+    );
+    final otuCurve = _calculateOtuCurve(
+      ppO2Curve: ppO2Curve,
+      timestamps: timestamps,
+    );
 
     return ProfileAnalysis(
       ascentRates: ascentRates,
@@ -634,6 +657,8 @@ class ProfileAnalysisService {
       surfaceGfCurve: surfaceGfCurve,
       meanDepthCurve: meanDepthCurve,
       ttsCurve: ttsCurve,
+      cnsCurve: cnsCurve,
+      otuCurve: otuCurve,
       maxDepth: maxDepth,
       averageDepth: averageDepth,
       maxDepthTimestamp: maxDepthTimestamp,
@@ -1399,6 +1424,73 @@ class ProfileAnalysisService {
     }
 
     return meanDepths;
+  }
+
+  /// Calculate cumulative CNS% curve from ppO2 data.
+  ///
+  /// Returns a list where each value is the total CNS% accumulated
+  /// from dive start (including residual from prior dives) to that point.
+  List<double> _calculateCnsCurve({
+    required List<double> ppO2Curve,
+    required List<int> timestamps,
+    required double startCns,
+  }) {
+    if (ppO2Curve.isEmpty || ppO2Curve.length != timestamps.length) {
+      return [];
+    }
+
+    final cnsCurve = <double>[startCns];
+    double cumulativeCns = startCns;
+
+    for (int i = 1; i < ppO2Curve.length; i++) {
+      final duration = timestamps[i] - timestamps[i - 1];
+      if (duration <= 0) {
+        cnsCurve.add(cumulativeCns);
+        continue;
+      }
+
+      final avgPpO2 = (ppO2Curve[i - 1] + ppO2Curve[i]) / 2.0;
+      cumulativeCns += _o2ToxicityCalculator.calculateCnsForSegment(
+        avgPpO2,
+        duration,
+      );
+      cnsCurve.add(cumulativeCns);
+    }
+
+    return cnsCurve;
+  }
+
+  /// Calculate cumulative OTU curve from ppO2 data.
+  ///
+  /// Returns a list where each value is the total OTU accumulated
+  /// from dive start to that point.
+  List<double> _calculateOtuCurve({
+    required List<double> ppO2Curve,
+    required List<int> timestamps,
+  }) {
+    if (ppO2Curve.isEmpty || ppO2Curve.length != timestamps.length) {
+      return [];
+    }
+
+    final otuCurve = <double>[0.0];
+    double cumulativeOtu = 0.0;
+
+    for (int i = 1; i < ppO2Curve.length; i++) {
+      final duration = timestamps[i] - timestamps[i - 1];
+      if (duration <= 0) {
+        otuCurve.add(cumulativeOtu);
+        continue;
+      }
+
+      final avgPpO2 = (ppO2Curve[i - 1] + ppO2Curve[i]) / 2.0;
+      cumulativeOtu += _o2ToxicityCalculator.calculateOtuForSegment(
+        avgPpO2,
+        duration,
+      );
+      otuCurve.add(cumulativeOtu);
+    }
+
+    return otuCurve;
   }
 
   /// Get analysis at a specific timestamp.

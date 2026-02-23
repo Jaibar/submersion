@@ -883,6 +883,8 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                       surfaceGfCurve: analysis?.surfaceGfCurve,
                       meanDepthCurve: analysis?.meanDepthCurve,
                       ttsCurve: analysis?.ttsCurve,
+                      cnsCurve: analysis?.cnsCurve,
+                      otuCurve: analysis?.otuCurve,
                       tankVolume: dive.tanks
                           .where((t) => t.volume != null && t.volume! > 0)
                           .map((t) => t.volume!)
@@ -3859,6 +3861,8 @@ class _FullscreenProfilePageState
                       surfaceGfCurve: widget.analysis?.surfaceGfCurve,
                       meanDepthCurve: widget.analysis?.meanDepthCurve,
                       ttsCurve: widget.analysis?.ttsCurve,
+                      cnsCurve: widget.analysis?.cnsCurve,
+                      otuCurve: widget.analysis?.otuCurve,
                       tankVolume: dive.tanks
                           .where((t) => t.volume != null && t.volume! > 0)
                           .map((t) => t.volume!)
@@ -4191,6 +4195,22 @@ class _FullscreenProfilePageState
       depthTimeItems.add((context.l10n.diveLog_legend_label_tts, ttsValue));
     }
 
+    final cnsValue = getCurveValue(
+      analysis?.cnsCurve,
+      (v) => '${v.toStringAsFixed(1)}%',
+    );
+    if (cnsValue != null) {
+      depthTimeItems.add((context.l10n.diveLog_legend_label_cns, cnsValue));
+    }
+
+    final otuValue = getCurveValue(
+      analysis?.otuCurve,
+      (v) => v.toStringAsFixed(0),
+    );
+    if (otuValue != null) {
+      depthTimeItems.add((context.l10n.diveLog_legend_label_otu, otuValue));
+    }
+
     if (depthTimeItems.isNotEmpty) {
       rows.add(_buildMetricRow(context, depthTimeItems));
     }
@@ -4439,6 +4459,36 @@ class _FullscreenProfilePageState
           context,
           context.l10n.diveLog_tooltip_tts,
           ttsValue,
+        ),
+      );
+    }
+
+    // CNS%
+    final cnsValue = getCurveValue(
+      analysis?.cnsCurve,
+      (v) => '${v.toStringAsFixed(1)}%',
+    );
+    if (cnsValue != null) {
+      metrics.add(
+        _buildCompactMetricRow(
+          context,
+          context.l10n.diveLog_tooltip_cns,
+          cnsValue,
+        ),
+      );
+    }
+
+    // OTU
+    final otuValue = getCurveValue(
+      analysis?.otuCurve,
+      (v) => v.toStringAsFixed(0),
+    );
+    if (otuValue != null) {
+      metrics.add(
+        _buildCompactMetricRow(
+          context,
+          context.l10n.diveLog_tooltip_otu,
+          otuValue,
         ),
       );
     }

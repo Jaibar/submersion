@@ -96,6 +96,20 @@ enum ProfileRightAxisMetric {
     color: Color(0xFFAD1457), // Pink 800 - distinct from pressure orange
     unitSuffix: 'min',
     category: ProfileMetricCategory.decompression,
+  ),
+  cns(
+    displayName: 'CNS%',
+    shortName: 'CNS',
+    color: Color(0xFFE65100), // Orange 900
+    unitSuffix: '%',
+    category: ProfileMetricCategory.decompression,
+  ),
+  otu(
+    displayName: 'OTU',
+    shortName: 'OTU',
+    color: Color(0xFF6D4C41), // Brown 600
+    unitSuffix: null, // Unit is the name itself; avoids "OTU (OTU)" on axis
+    category: ProfileMetricCategory.decompression,
   );
 
   final String displayName;

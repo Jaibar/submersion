@@ -119,6 +119,12 @@ class DiveProfileChart extends ConsumerStatefulWidget {
   /// TTS (Time To Surface) curve in seconds
   final List<int>? ttsCurve;
 
+  /// Cumulative CNS% curve (includes residual from prior dives)
+  final List<double>? cnsCurve;
+
+  /// Cumulative OTU curve
+  final List<double>? otuCurve;
+
   /// Returns responsive left axis reserved size based on available chart width.
   /// Tick labels are plain numbers (e.g. "30", "60") so don't need much space.
   static double leftAxisSize(double availableWidth) =>
@@ -165,6 +171,8 @@ class DiveProfileChart extends ConsumerStatefulWidget {
     this.surfaceGfCurve,
     this.meanDepthCurve,
     this.ttsCurve,
+    this.cnsCurve,
+    this.otuCurve,
   });
 
   @override
@@ -204,6 +212,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
   bool _showSurfaceGf = false;
   bool _showMeanDepth = false;
   bool _showTts = false;
+  bool _showCns = false;
+  bool _showOtu = false;
 
   // Helper getters for marker availability
   bool get _hasMaxDepthMarker =>
@@ -411,6 +421,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     _showSurfaceGf = legendState.showSurfaceGf;
     _showMeanDepth = legendState.showMeanDepth;
     _showTts = legendState.showTts;
+    _showCns = legendState.showCns;
+    _showOtu = legendState.showOtu;
     // Sync per-tank pressure visibility
     for (final entry in legendState.showTankPressure.entries) {
       _showTankPressure[entry.key] = entry.value;
@@ -433,6 +445,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     final hasMeanDepthData =
         widget.meanDepthCurve != null && widget.meanDepthCurve!.isNotEmpty;
     final hasTtsData = widget.ttsCurve != null && widget.ttsCurve!.isNotEmpty;
+    final hasCnsData = widget.cnsCurve != null && widget.cnsCurve!.isNotEmpty;
+    final hasOtuData = widget.otuCurve != null && widget.otuCurve!.isNotEmpty;
 
     // Build legend config based on available data
     final legendConfig = ProfileLegendConfig(
@@ -461,6 +475,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       hasSurfaceGfData: hasSurfaceGfData,
       hasMeanDepthData: hasMeanDepthData,
       hasTtsData: hasTtsData,
+      hasCnsData: hasCnsData,
+      hasOtuData: hasOtuData,
     );
 
     return Column(
@@ -954,6 +970,14 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
               if (_showTts && widget.ttsCurve != null)
                 _buildTtsLine(totalMaxDepth),
 
+              // CNS% curve (if showing)
+              if (_showCns && widget.cnsCurve != null)
+                _buildCnsLine(totalMaxDepth),
+
+              // OTU curve (if showing)
+              if (_showOtu && widget.otuCurve != null)
+                _buildOtuLine(totalMaxDepth),
+
               // Profile markers (max depth, pressure thresholds)
               ..._buildMarkerLines(
                 units,
@@ -1375,6 +1399,36 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
                         context.l10n.diveLog_tooltip_tts,
                         ttsValue,
                         const Color(0xFFAD1457),
+                      );
+                    }
+
+                    // CNS% (if enabled)
+                    if (_showCns) {
+                      String cnsValue = '\u2014';
+                      if (widget.cnsCurve != null &&
+                          spot.spotIndex < widget.cnsCurve!.length) {
+                        final cns = widget.cnsCurve![spot.spotIndex];
+                        cnsValue = '${cns.toStringAsFixed(1)}%';
+                      }
+                      addRow(
+                        context.l10n.diveLog_tooltip_cns,
+                        cnsValue,
+                        const Color(0xFFE65100),
+                      );
+                    }
+
+                    // OTU (if enabled)
+                    if (_showOtu) {
+                      String otuValue = '\u2014';
+                      if (widget.otuCurve != null &&
+                          spot.spotIndex < widget.otuCurve!.length) {
+                        final otu = widget.otuCurve![spot.spotIndex];
+                        otuValue = otu.toStringAsFixed(0);
+                      }
+                      addRow(
+                        context.l10n.diveLog_tooltip_otu,
+                        otuValue,
+                        const Color(0xFF6D4C41),
                       );
                     }
 
@@ -2314,6 +2368,74 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     );
   }
 
+  /// Compute dynamic max scale for CNS curve based on actual data.
+  double _getCnsMaxScale() {
+    if (widget.cnsCurve == null || widget.cnsCurve!.isEmpty) return 100.0;
+    final actualMax = widget.cnsCurve!.reduce(math.max);
+    return math.max(actualMax * 1.25, 10.0); // 25% headroom, min 10%
+  }
+
+  /// Compute dynamic max scale for OTU curve based on actual data.
+  double _getOtuMaxScale() {
+    if (widget.otuCurve == null || widget.otuCurve!.isEmpty) return 100.0;
+    final actualMax = widget.otuCurve!.reduce(math.max);
+    return math.max(actualMax * 1.25, 20.0); // 25% headroom, min 20 OTU
+  }
+
+  /// Build cumulative CNS% line
+  LineChartBarData _buildCnsLine(double chartMaxDepth) {
+    final cnsData = widget.cnsCurve!;
+    const cnsColor = Color(0xFFE65100); // Orange 900
+
+    const minCns = 0.0;
+    final maxCns = _getCnsMaxScale();
+
+    final spots = <FlSpot>[];
+    for (int i = 0; i < widget.profile.length && i < cnsData.length; i++) {
+      final cns = cnsData[i].clamp(minCns, maxCns);
+      final yValue = _mapValueToDepth(cns, chartMaxDepth, minCns, maxCns);
+      spots.add(FlSpot(widget.profile[i].timestamp.toDouble(), -yValue));
+    }
+
+    return LineChartBarData(
+      spots: spots,
+      isCurved: true,
+      curveSmoothness: 0.2,
+      color: cnsColor,
+      barWidth: 2,
+      isStrokeCapRound: true,
+      dotData: const FlDotData(show: false),
+      dashArray: [6, 3],
+    );
+  }
+
+  /// Build cumulative OTU line
+  LineChartBarData _buildOtuLine(double chartMaxDepth) {
+    final otuData = widget.otuCurve!;
+    const otuColor = Color(0xFF6D4C41); // Brown 600
+
+    const minOtu = 0.0;
+    final maxOtu = _getOtuMaxScale();
+
+    final spots = <FlSpot>[];
+    for (int i = 0; i < widget.profile.length && i < otuData.length; i++) {
+      final otu = otuData[i].clamp(minOtu, maxOtu);
+      final yValue = _mapValueToDepth(otu, chartMaxDepth, minOtu, maxOtu);
+      spots.add(FlSpot(widget.profile[i].timestamp.toDouble(), -yValue));
+    }
+
+    return LineChartBarData(
+      spots: spots,
+      isCurved: true,
+      curveSmoothness: 0.2,
+      color: otuColor,
+      barWidth: 2,
+      isStrokeCapRound: true,
+      dotData: const FlDotData(show: false),
+      dashArray: [4, 4],
+    );
+  }
+
   /// Build vertical line for playback cursor
   List<VerticalLine> _buildPlaybackCursor(ColorScheme colorScheme) {
     final timestamp = widget.playbackTimestamp;
@@ -2494,6 +2616,10 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
             widget.meanDepthCurve!.isNotEmpty;
       case ProfileRightAxisMetric.tts:
         return widget.ttsCurve != null && widget.ttsCurve!.isNotEmpty;
+      case ProfileRightAxisMetric.cns:
+        return widget.cnsCurve != null && widget.cnsCurve!.isNotEmpty;
+      case ProfileRightAxisMetric.otu:
+        return widget.otuCurve != null && widget.otuCurve!.isNotEmpty;
     }
   }
 
@@ -2585,6 +2711,14 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
 
       case ProfileRightAxisMetric.tts:
         return (min: 0.0, max: 3600.0); // 0-60 minutes
+
+      case ProfileRightAxisMetric.cns:
+        if (widget.cnsCurve == null || widget.cnsCurve!.isEmpty) return null;
+        return (min: 0.0, max: _getCnsMaxScale());
+
+      case ProfileRightAxisMetric.otu:
+        if (widget.otuCurve == null || widget.otuCurve!.isEmpty) return null;
+        return (min: 0.0, max: _getOtuMaxScale());
     }
   }
 
@@ -2624,6 +2758,9 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       case ProfileRightAxisMetric.ndl:
       case ProfileRightAxisMetric.tts:
         return (value / 60).round().toString();
+      case ProfileRightAxisMetric.cns:
+      case ProfileRightAxisMetric.otu:
+        return value.toStringAsFixed(0);
     }
   }
 

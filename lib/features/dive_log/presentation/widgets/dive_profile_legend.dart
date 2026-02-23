@@ -35,6 +35,8 @@ class ProfileLegendConfig {
   final bool hasSurfaceGfData;
   final bool hasMeanDepthData;
   final bool hasTtsData;
+  final bool hasCnsData;
+  final bool hasOtuData;
 
   const ProfileLegendConfig({
     this.hasTemperatureData = false,
@@ -60,6 +62,8 @@ class ProfileLegendConfig {
     this.hasSurfaceGfData = false,
     this.hasMeanDepthData = false,
     this.hasTtsData = false,
+    this.hasCnsData = false,
+    this.hasOtuData = false,
   });
 
   /// Whether any secondary toggles should be shown
@@ -81,7 +85,9 @@ class ProfileLegendConfig {
       hasGfData ||
       hasSurfaceGfData ||
       hasMeanDepthData ||
-      hasTtsData;
+      hasTtsData ||
+      hasCnsData ||
+      hasOtuData;
 }
 
 /// Legend widget for the dive profile chart.
@@ -305,6 +311,8 @@ class _MoreOptionsButton extends StatelessWidget {
     if (config.hasSurfaceGfData && legendState.showSurfaceGf) count++;
     if (config.hasMeanDepthData && legendState.showMeanDepth) count++;
     if (config.hasTtsData && legendState.showTts) count++;
+    if (config.hasCnsData && legendState.showCns) count++;
+    if (config.hasOtuData && legendState.showOtu) count++;
 
     // Count active tank pressure toggles
     if (config.hasMultiTankPressure && config.tankPressures != null) {
@@ -502,7 +510,9 @@ class _MoreOptionsButton extends StatelessWidget {
         config.hasGfData ||
         config.hasSurfaceGfData ||
         config.hasMeanDepthData ||
-        config.hasTtsData;
+        config.hasTtsData ||
+        config.hasCnsData ||
+        config.hasOtuData;
 
     if (hasAdvancedOptions && items.isNotEmpty) {
       items.add(const PopupMenuDivider());
@@ -634,6 +644,32 @@ class _MoreOptionsButton extends StatelessWidget {
           color: const Color(0xFFAD1457), // Pink 800
           isEnabled: legendState.showTts,
           onTap: legendNotifier.toggleTts,
+        ),
+      );
+    }
+
+    // CNS%
+    if (config.hasCnsData) {
+      items.add(
+        _buildToggleMenuItem(
+          context,
+          label: context.l10n.diveLog_legend_label_cns,
+          color: const Color(0xFFE65100), // Orange 900
+          isEnabled: legendState.showCns,
+          onTap: legendNotifier.toggleCns,
+        ),
+      );
+    }
+
+    // OTU
+    if (config.hasOtuData) {
+      items.add(
+        _buildToggleMenuItem(
+          context,
+          label: context.l10n.diveLog_legend_label_otu,
+          color: const Color(0xFF6D4C41), // Brown 600
+          isEnabled: legendState.showOtu,
+          onTap: legendNotifier.toggleOtu,
         ),
       );
     }
