@@ -119,6 +119,12 @@ class MediaListNotifier extends StateNotifier<AsyncValue<List<MediaItem>>> {
     await refresh();
   }
 
+  /// Delete multiple media items at once
+  Future<void> deleteMultipleMedia(List<String> ids) async {
+    await _repository.deleteMultipleMedia(ids);
+    await refresh();
+  }
+
   /// Mark a media item as orphaned (photo deleted from gallery)
   Future<void> markAsOrphaned(String id) async {
     await _repository.markAsOrphaned(id);
