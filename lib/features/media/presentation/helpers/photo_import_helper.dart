@@ -31,11 +31,19 @@ class PhotoImportHelper {
     final diveDuration = dive.calculatedDuration ?? const Duration(hours: 1);
     final diveEnd = dive.exitTime ?? diveStart.add(diveDuration);
 
-    // Open photo picker
+    // Get already-linked asset IDs for this dive
+    final mediaRepo = ref.read(mediaRepositoryProvider);
+    final alreadyLinkedIds = await mediaRepo.getLinkedAssetIdsForDive(dive.id);
+
+    // Check context is still valid after async gap
+    if (!context.mounted) return false;
+
+    // Open photo picker with already-linked IDs
     final selectedAssets = await showPhotoPicker(
       context: context,
       diveStartTime: diveStart,
       diveEndTime: diveEnd,
+      alreadyLinkedIds: alreadyLinkedIds,
     );
 
     // User cancelled or context no longer valid

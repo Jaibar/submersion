@@ -18,6 +18,9 @@ class PhotoPickerPage extends ConsumerStatefulWidget {
   /// End of the date range (dive end plus buffer).
   final DateTime endTime;
 
+  /// Asset IDs already linked to this dive (shown dimmed, non-selectable).
+  final Set<String> alreadyLinkedIds;
+
   /// Called when user confirms selection with the selected assets.
   final void Function(List<AssetInfo> selectedAssets)? onSelectionConfirmed;
 
@@ -25,6 +28,7 @@ class PhotoPickerPage extends ConsumerStatefulWidget {
     super.key,
     required this.startTime,
     required this.endTime,
+    this.alreadyLinkedIds = const {},
     this.onSelectionConfirmed,
   });
 
@@ -45,6 +49,9 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
     final notifier = ref.read(photoPickerNotifierProvider.notifier);
     await notifier.checkPermission();
 
+    // Set already-linked IDs so they appear dimmed and non-selectable
+    notifier.setAlreadyLinkedIds(widget.alreadyLinkedIds);
+
     final state = ref.read(photoPickerNotifierProvider);
     if (state.hasPermission) {
       _loadAssets();
@@ -63,11 +70,15 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
       );
       if (mounted) {
         setState(() => _assets = assets);
-        // Auto-select all picked files on desktop
+        // Auto-select all picked files on desktop, excluding already-linked
         if (assets.isNotEmpty) {
+          final selectableIds = assets
+              .where((a) => !widget.alreadyLinkedIds.contains(a.id))
+              .map((a) => a.id)
+              .toList();
           ref
               .read(photoPickerNotifierProvider.notifier)
-              .selectAll(assets.map((a) => a.id).toList());
+              .selectAll(selectableIds);
         }
       }
       return;
@@ -138,9 +149,11 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
 
   void _syncSelectionToNotifier(Set<int> indices) {
     if (_assets == null) return;
+    final state = ref.read(photoPickerNotifierProvider);
     final ids = indices
         .where((i) => i < _assets!.length)
         .map((i) => _assets![i].id)
+        .where((id) => !state.alreadyLinkedIds.contains(id))
         .toList();
     ref.read(photoPickerNotifierProvider.notifier).selectAll(ids);
   }
@@ -182,11 +195,17 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
         if (state.selectionCount > 0)
           _SelectionToolbar(
             selectedCount: state.selectionCount,
-            totalCount: _assets!.length,
+            totalCount: _assets!
+                .where((a) => !state.alreadyLinkedIds.contains(a.id))
+                .length,
             onSelectAll: () {
+              final selectableIds = _assets!
+                  .where((a) => !state.alreadyLinkedIds.contains(a.id))
+                  .map((a) => a.id)
+                  .toList();
               ref
                   .read(photoPickerNotifierProvider.notifier)
-                  .selectAll(_assets!.map((a) => a.id).toList());
+                  .selectAll(selectableIds);
             },
             onClearSelection: () {
               ref.read(photoPickerNotifierProvider.notifier).clearSelection();
@@ -216,7 +235,12 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
               mainAxisSpacing: 4,
             ),
             itemBuilder: (context, asset, isSelected) {
-              return _PhotoThumbnail(asset: asset, isSelected: isSelected);
+              final alreadyLinked = state.alreadyLinkedIds.contains(asset.id);
+              return _PhotoThumbnail(
+                asset: asset,
+                isSelected: isSelected,
+                alreadyLinked: alreadyLinked,
+              );
             },
           ),
         ),
@@ -328,7 +352,12 @@ class _SelectionToolbar extends StatelessWidget {
 class _PhotoThumbnail extends ConsumerWidget {
   final AssetInfo asset;
   final bool isSelected;
-  const _PhotoThumbnail({required this.asset, required this.isSelected});
+  final bool alreadyLinked;
+  const _PhotoThumbnail({
+    required this.asset,
+    required this.isSelected,
+    this.alreadyLinked = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -426,6 +455,18 @@ class _PhotoThumbnail extends ConsumerWidget {
                     ],
                   ],
                 ),
+              ),
+            ),
+
+          // Already-linked overlay (dimmed with link icon)
+          if (alreadyLinked)
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Center(
+                child: Icon(Icons.link, color: Colors.white70, size: 20),
               ),
             ),
         ],
@@ -578,6 +619,7 @@ Future<List<AssetInfo>?> showPhotoPicker({
   required BuildContext context,
   required DateTime diveStartTime,
   required DateTime diveEndTime,
+  Set<String> alreadyLinkedIds = const {},
   Duration buffer = const Duration(minutes: 30),
 }) {
   final startTime = diveStartTime.subtract(buffer);
@@ -586,8 +628,11 @@ Future<List<AssetInfo>?> showPhotoPicker({
   return Navigator.of(context).push<List<AssetInfo>>(
     MaterialPageRoute(
       fullscreenDialog: true,
-      builder: (context) =>
-          PhotoPickerPage(startTime: startTime, endTime: endTime),
+      builder: (context) => PhotoPickerPage(
+        startTime: startTime,
+        endTime: endTime,
+        alreadyLinkedIds: alreadyLinkedIds,
+      ),
     ),
   );
 }

@@ -96,6 +96,9 @@ class PhotoPickerState {
   /// Currently selected asset IDs.
   final Set<String> selectedIds;
 
+  /// Asset IDs already linked to this dive (shown dimmed, non-selectable).
+  final Set<String> alreadyLinkedIds;
+
   /// Whether permission has been requested.
   final bool permissionRequested;
 
@@ -110,6 +113,7 @@ class PhotoPickerState {
 
   const PhotoPickerState({
     this.selectedIds = const {},
+    this.alreadyLinkedIds = const {},
     this.permissionRequested = false,
     this.permissionStatus,
     this.isLoading = false,
@@ -118,6 +122,7 @@ class PhotoPickerState {
 
   PhotoPickerState copyWith({
     Set<String>? selectedIds,
+    Set<String>? alreadyLinkedIds,
     bool? permissionRequested,
     PhotoPermissionStatus? permissionStatus,
     bool? isLoading,
@@ -125,6 +130,7 @@ class PhotoPickerState {
   }) {
     return PhotoPickerState(
       selectedIds: selectedIds ?? this.selectedIds,
+      alreadyLinkedIds: alreadyLinkedIds ?? this.alreadyLinkedIds,
       permissionRequested: permissionRequested ?? this.permissionRequested,
       permissionStatus: permissionStatus ?? this.permissionStatus,
       isLoading: isLoading ?? this.isLoading,
@@ -176,8 +182,15 @@ class PhotoPickerNotifier extends StateNotifier<PhotoPickerState> {
     }
   }
 
+  /// Set already-linked asset IDs (shown dimmed, non-selectable).
+  void setAlreadyLinkedIds(Set<String> ids) {
+    state = state.copyWith(alreadyLinkedIds: ids);
+  }
+
   /// Toggle selection of an asset.
   void toggleSelection(String assetId) {
+    if (state.alreadyLinkedIds.contains(assetId)) return;
+
     final newSelection = Set<String>.from(state.selectedIds);
     if (newSelection.contains(assetId)) {
       newSelection.remove(assetId);
