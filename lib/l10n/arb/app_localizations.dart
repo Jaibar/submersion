@@ -14635,6 +14635,12 @@ abstract class AppLocalizations {
   /// **'Cancel'**
   String get media_diveMediaSection_cancelButton;
 
+  /// No description provided for @media_diveMediaSection_cancelSelectionButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get media_diveMediaSection_cancelSelectionButton;
+
   /// No description provided for @media_diveMediaSection_emptyState.
   ///
   /// In en, this message translates to:
@@ -14647,10 +14653,22 @@ abstract class AppLocalizations {
   /// **'Error loading media'**
   String get media_diveMediaSection_errorLoading;
 
+  /// No description provided for @media_diveMediaSection_selectAllButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Select All'**
+  String get media_diveMediaSection_selectAllButton;
+
+  /// No description provided for @media_diveMediaSection_selectedCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} selected'**
+  String media_diveMediaSection_selectedCount(int count);
+
   /// No description provided for @media_diveMediaSection_thumbnailLabel.
   ///
   /// In en, this message translates to:
-  /// **'View photo. Long press to unlink'**
+  /// **'View photo. Long press to select'**
   String get media_diveMediaSection_thumbnailLabel;
 
   /// No description provided for @media_diveMediaSection_title.
@@ -14682,6 +14700,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Failed to unlink: {error}'**
   String media_diveMediaSection_unlinkError(Object error);
+
+  /// No description provided for @media_diveMediaSection_unlinkSelectedButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Unlink {count}'**
+  String media_diveMediaSection_unlinkSelectedButton(int count);
+
+  /// No description provided for @media_diveMediaSection_unlinkSelectedContent.
+  ///
+  /// In en, this message translates to:
+  /// **'This will remove {count} media items from this dive. The original files won\'t be deleted.'**
+  String media_diveMediaSection_unlinkSelectedContent(int count);
+
+  /// No description provided for @media_diveMediaSection_unlinkSelectedSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Unlinked {count} items'**
+  String media_diveMediaSection_unlinkSelectedSuccess(int count);
+
+  /// No description provided for @media_diveMediaSection_unlinkSelectedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Unlink {count} items?'**
+  String media_diveMediaSection_unlinkSelectedTitle(int count);
 
   /// No description provided for @media_diveMediaSection_unlinkSuccess.
   ///
@@ -14767,6 +14809,12 @@ abstract class AppLocalizations {
   /// **'Select Photos'**
   String get media_photoPicker_appBarTitle;
 
+  /// No description provided for @media_photoPicker_clearSelectionButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Clear'**
+  String get media_photoPicker_clearSelectionButton;
+
   /// No description provided for @media_photoPicker_closeTooltip.
   ///
   /// In en, this message translates to:
@@ -14837,6 +14885,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Photo Access Required'**
   String get media_photoPicker_permissionTitle;
+
+  /// No description provided for @media_photoPicker_selectAllButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Select All'**
+  String get media_photoPicker_selectAllButton;
+
+  /// No description provided for @media_photoPicker_selectedCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} selected'**
+  String media_photoPicker_selectedCount(int count);
 
   /// No description provided for @media_photoPicker_showingPhotosFromRange.
   ///

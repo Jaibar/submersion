@@ -5,6 +5,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/media/data/services/photo_picker_service.dart';
 import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/drag_select_grid_view.dart';
 
 /// Page for selecting photos from the device gallery within a date range.
 ///
@@ -124,6 +125,26 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
     );
   }
 
+  Set<int> _computeSelectedIndices(Set<String> selectedIds) {
+    if (_assets == null) return {};
+    final indices = <int>{};
+    for (var i = 0; i < _assets!.length; i++) {
+      if (selectedIds.contains(_assets![i].id)) {
+        indices.add(i);
+      }
+    }
+    return indices;
+  }
+
+  void _syncSelectionToNotifier(Set<int> indices) {
+    if (_assets == null) return;
+    final ids = indices
+        .where((i) => i < _assets!.length)
+        .map((i) => _assets![i].id)
+        .toList();
+    ref.read(photoPickerNotifierProvider.notifier).selectAll(ids);
+  }
+
   Widget _buildBody(
     BuildContext context,
     PhotoPickerState state,
@@ -157,15 +178,47 @@ class _PhotoPickerPageState extends ConsumerState<PhotoPickerPage> {
       children: [
         // Date range header
         _DateRangeHeader(startTime: widget.startTime, endTime: widget.endTime),
-        // Photo grid
-        Expanded(
-          child: _PhotoGrid(
-            assets: _assets!,
-            selectedIds: state.selectedIds,
-            onToggleSelection: (assetId) {
+        // Selection toolbar (shown when items are selected)
+        if (state.selectionCount > 0)
+          _SelectionToolbar(
+            selectedCount: state.selectionCount,
+            totalCount: _assets!.length,
+            onSelectAll: () {
               ref
                   .read(photoPickerNotifierProvider.notifier)
-                  .toggleSelection(assetId);
+                  .selectAll(_assets!.map((a) => a.id).toList());
+            },
+            onClearSelection: () {
+              ref.read(photoPickerNotifierProvider.notifier).clearSelection();
+            },
+          ),
+        // Photo grid
+        Expanded(
+          child: DragSelectGridView<AssetInfo>(
+            items: _assets!,
+            startInSelectionMode: state.selectionCount > 0,
+            initialSelection: _computeSelectedIndices(state.selectedIds),
+            onSelectionChanged: (indices) {
+              _syncSelectionToNotifier(indices);
+            },
+            onSelectionModeChanged: (_) {},
+            onItemTap: (index) {
+              ref
+                  .read(photoPickerNotifierProvider.notifier)
+                  .toggleSelection(_assets![index].id);
+            },
+            padding: const EdgeInsets.all(4),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 4,
+              crossAxisSpacing: 4,
+              mainAxisSpacing: 4,
+            ),
+            itemBuilder: (context, asset, isSelected) {
+              return _PhotoThumbnail(
+                asset: asset,
+                isSelected: isSelected,
+                onTap: () {}, // Handled by DragSelectGridView
+              );
             },
           ),
         ),
@@ -222,36 +275,53 @@ class _DateRangeHeader extends StatelessWidget {
   }
 }
 
-/// Grid of photo thumbnails with selection support.
-class _PhotoGrid extends StatelessWidget {
-  final List<AssetInfo> assets;
-  final Set<String> selectedIds;
-  final void Function(String assetId) onToggleSelection;
+/// Toolbar showing selection count with Select All and Clear buttons.
+class _SelectionToolbar extends StatelessWidget {
+  final int selectedCount;
+  final int totalCount;
+  final VoidCallback onSelectAll;
+  final VoidCallback onClearSelection;
 
-  const _PhotoGrid({
-    required this.assets,
-    required this.selectedIds,
-    required this.onToggleSelection,
+  const _SelectionToolbar({
+    required this.selectedCount,
+    required this.totalCount,
+    required this.onSelectAll,
+    required this.onClearSelection,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GridView.builder(
-      padding: const EdgeInsets.all(4),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 4,
-        crossAxisSpacing: 4,
-        mainAxisSpacing: 4,
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: colorScheme.primaryContainer.withValues(alpha: 0.3),
+        border: Border(
+          bottom: BorderSide(color: colorScheme.outlineVariant, width: 0.5),
+        ),
       ),
-      itemCount: assets.length,
-      itemBuilder: (context, index) {
-        final asset = assets[index];
-        return _PhotoThumbnail(
-          asset: asset,
-          isSelected: selectedIds.contains(asset.id),
-          onTap: () => onToggleSelection(asset.id),
-        );
-      },
+      child: Row(
+        children: [
+          const SizedBox(width: 8),
+          Text(
+            context.l10n.media_photoPicker_selectedCount(selectedCount),
+            style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w500),
+          ),
+          const Spacer(),
+          if (selectedCount < totalCount)
+            TextButton(
+              onPressed: onSelectAll,
+              child: Text(context.l10n.media_photoPicker_selectAllButton),
+            ),
+          TextButton(
+            onPressed: onClearSelection,
+            child: Text(context.l10n.media_photoPicker_clearSelectionButton),
+          ),
+        ],
+      ),
     );
   }
 }
