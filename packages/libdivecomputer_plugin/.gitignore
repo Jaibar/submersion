@@ -16,3 +16,7 @@ pubspec.lock
 macos/build/
 ios/build/
 android/.gradle/
+
+# Swift Package Manager
+darwin/.build/
+.swiftpm/
