@@ -11,6 +11,13 @@ import 'package:submersion/features/dive_log/domain/services/computer_cns_extrac
 import 'package:submersion/features/dive_log/domain/services/profile_event_mapper.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_legend_provider.dart';
+
+/// Reports which data source was actually used for each metric in the current profile.
+/// Updated as a side-effect of profileAnalysisProvider.
+final metricSourceInfoProvider = StateProvider<MetricSourceInfo?>(
+  (ref) => null,
+);
 
 /// Provider that loads dive computer events from the database and maps them
 /// to domain [ProfileEvent] instances.
@@ -329,10 +336,14 @@ final profileAnalysisProvider = FutureProvider.family<ProfileAnalysis?, String>(
         heFraction = primaryTank.gasMix.he / 100.0;
       }
 
-      // Check if dive computer CNS data should be used
-      final settings = ref.watch(settingsProvider);
-      final useComputerCns =
-          settings.defaultCnsSource == MetricDataSource.computer;
+      // Read per-metric source preferences from legend state
+      final legendState = ref.watch(profileLegendProvider);
+      final ndlSource = legendState.ndlSource;
+      final ceilingSource = legendState.ceilingSource;
+      final ttsSource = legendState.ttsSource;
+      final cnsSource = legendState.cnsSource;
+
+      final useComputerCns = cnsSource == MetricDataSource.computer;
       final computerCns = useComputerCns
           ? extractComputerCns(dive.profile)
           : null;
@@ -367,16 +378,17 @@ final profileAnalysisProvider = FutureProvider.family<ProfileAnalysis?, String>(
       );
 
       // Overlay computer-reported deco data where available
-      final (overlaid, _) = overlayComputerDecoData(
+      final (overlaid, sourceInfo) = overlayComputerDecoData(
         analysis,
         dive.profile,
-        cnsSource: useComputerCns
-            ? MetricDataSource.computer
-            : MetricDataSource.calculated,
-        ndlSource: MetricDataSource.computer,
-        ceilingSource: MetricDataSource.computer,
-        ttsSource: MetricDataSource.computer,
+        ndlSource: ndlSource,
+        ceilingSource: ceilingSource,
+        ttsSource: ttsSource,
+        cnsSource: cnsSource,
       );
+
+      // Publish actual source info for legend badge display
+      ref.read(metricSourceInfoProvider.notifier).state = sourceInfo;
 
       // Override o2Exposure with computer-reported CNS start/end
       final withCns = computerCns != null
@@ -419,11 +431,11 @@ Future<double> _computeResidualCns(Ref ref, String diveId) async {
     final previousDive = await repository.getPreviousDive(diveId);
     if (previousDive == null) return 0.0;
 
-    // Short-circuit: if the setting is on and the previous dive has computer
-    // CNS, use its last CNS sample directly instead of full analysis.
-    final settings = ref.watch(settingsProvider);
-    final useComputerCns =
-        settings.defaultCnsSource == MetricDataSource.computer;
+    // Short-circuit: if the legend's CNS source is set to computer and the
+    // previous dive has computer CNS, use its last CNS sample directly
+    // instead of full analysis.
+    final legendState = ref.watch(profileLegendProvider);
+    final useComputerCns = legendState.cnsSource == MetricDataSource.computer;
     if (useComputerCns) {
       final prevComputerCns = extractComputerCns(previousDive.profile);
       if (prevComputerCns != null) {
@@ -466,13 +478,10 @@ final residualCnsProvider = FutureProvider.family<double, String>((
 
 /// Provider for profile analysis using a Dive object directly.
 ///
-/// Note: This synchronous provider does NOT merge DB events (dive computer
-/// imported events). Use [profileAnalysisProvider] (by diveId) for the full
-/// event set including dive-computer-imported events.
-///
-/// Note: This synchronous provider does NOT respect the defaultCnsSource
-/// setting for CNS overlay or o2Exposure. Use [profileAnalysisProvider] (by diveId)
-/// for setting-aware CNS handling.
+/// Note: This synchronous provider always uses [MetricDataSource.computer]
+/// for all four metrics (NDL, ceiling, TTS, CNS) when data is present.
+/// It does not read per-metric source preferences from the legend state.
+/// Use [profileAnalysisProvider] (by diveId) for preference-aware handling.
 final diveProfileAnalysisProvider = Provider.family<ProfileAnalysis?, Dive>((
   ref,
   dive,
