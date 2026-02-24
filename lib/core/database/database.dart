@@ -565,6 +565,11 @@ class DiverSettings extends Table {
   RealColumn get decoStopIncrement => real().withDefault(const Constant(3.0))();
   BoolColumn get useDiveComputerCnsData =>
       boolean().withDefault(const Constant(false))();
+  IntColumn get defaultNdlSource => integer().withDefault(const Constant(1))();
+  IntColumn get defaultCeilingSource =>
+      integer().withDefault(const Constant(1))();
+  IntColumn get defaultTtsSource => integer().withDefault(const Constant(1))();
+  IntColumn get defaultCnsSource => integer().withDefault(const Constant(1))();
   // Appearance settings
   BoolColumn get showDepthColoredDiveCards =>
       boolean().withDefault(const Constant(false))();
@@ -1105,7 +1110,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 41;
+  int get schemaVersion => 42;
 
   @override
   MigrationStrategy get migration {
@@ -1979,6 +1984,25 @@ class AppDatabase extends _$AppDatabase {
         if (from < 41) {
           await customStatement(
             'ALTER TABLE diver_settings ADD COLUMN use_dive_computer_cns_data INTEGER NOT NULL DEFAULT 0',
+          );
+        }
+        if (from < 42) {
+          // Add per-metric data source columns
+          await customStatement(
+            'ALTER TABLE diver_settings ADD COLUMN default_ndl_source INTEGER NOT NULL DEFAULT 1',
+          );
+          await customStatement(
+            'ALTER TABLE diver_settings ADD COLUMN default_ceiling_source INTEGER NOT NULL DEFAULT 1',
+          );
+          await customStatement(
+            'ALTER TABLE diver_settings ADD COLUMN default_tts_source INTEGER NOT NULL DEFAULT 1',
+          );
+          await customStatement(
+            'ALTER TABLE diver_settings ADD COLUMN default_cns_source INTEGER NOT NULL DEFAULT 1',
+          );
+          // Migrate existing CNS toggle: if user had it enabled, set CNS source to computer (0)
+          await customStatement(
+            'UPDATE diver_settings SET default_cns_source = 0 WHERE use_dive_computer_cns_data = 1',
           );
         }
       },

@@ -104,8 +104,17 @@ class AppSettings {
   /// Deco stop increment in meters (typically 3)
   final double decoStopIncrement;
 
-  /// Whether to use dive-computer-reported CNS data when available
-  final bool useDiveComputerCnsData;
+  /// Default data source for NDL metric (computer or calculated)
+  final MetricDataSource defaultNdlSource;
+
+  /// Default data source for ceiling metric (computer or calculated)
+  final MetricDataSource defaultCeilingSource;
+
+  /// Default data source for TTS metric (computer or calculated)
+  final MetricDataSource defaultTtsSource;
+
+  /// Default data source for CNS metric (computer or calculated)
+  final MetricDataSource defaultCnsSource;
 
   // Appearance settings
   /// Which attribute to use for card background coloring
@@ -222,7 +231,10 @@ class AppSettings {
     this.showNdlOnProfile = true,
     this.lastStopDepth = 3.0,
     this.decoStopIncrement = 3.0,
-    this.useDiveComputerCnsData = false,
+    this.defaultNdlSource = MetricDataSource.calculated,
+    this.defaultCeilingSource = MetricDataSource.calculated,
+    this.defaultTtsSource = MetricDataSource.calculated,
+    this.defaultCnsSource = MetricDataSource.calculated,
     // Appearance defaults
     this.cardColorAttribute = CardColorAttribute.none,
     this.cardColorGradientPreset = 'ocean',
@@ -317,7 +329,10 @@ class AppSettings {
     bool? showNdlOnProfile,
     double? lastStopDepth,
     double? decoStopIncrement,
-    bool? useDiveComputerCnsData,
+    MetricDataSource? defaultNdlSource,
+    MetricDataSource? defaultCeilingSource,
+    MetricDataSource? defaultTtsSource,
+    MetricDataSource? defaultCnsSource,
     CardColorAttribute? cardColorAttribute,
     String? cardColorGradientPreset,
     int? cardColorGradientStart,
@@ -376,8 +391,10 @@ class AppSettings {
       showNdlOnProfile: showNdlOnProfile ?? this.showNdlOnProfile,
       lastStopDepth: lastStopDepth ?? this.lastStopDepth,
       decoStopIncrement: decoStopIncrement ?? this.decoStopIncrement,
-      useDiveComputerCnsData:
-          useDiveComputerCnsData ?? this.useDiveComputerCnsData,
+      defaultNdlSource: defaultNdlSource ?? this.defaultNdlSource,
+      defaultCeilingSource: defaultCeilingSource ?? this.defaultCeilingSource,
+      defaultTtsSource: defaultTtsSource ?? this.defaultTtsSource,
+      defaultCnsSource: defaultCnsSource ?? this.defaultCnsSource,
       cardColorAttribute: cardColorAttribute ?? this.cardColorAttribute,
       cardColorGradientPreset:
           cardColorGradientPreset ?? this.cardColorGradientPreset,
@@ -686,8 +703,23 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
     await _saveSettings();
   }
 
-  Future<void> setUseDiveComputerCnsData(bool value) async {
-    state = state.copyWith(useDiveComputerCnsData: value);
+  Future<void> setDefaultNdlSource(MetricDataSource value) async {
+    state = state.copyWith(defaultNdlSource: value);
+    await _saveSettings();
+  }
+
+  Future<void> setDefaultCeilingSource(MetricDataSource value) async {
+    state = state.copyWith(defaultCeilingSource: value);
+    await _saveSettings();
+  }
+
+  Future<void> setDefaultTtsSource(MetricDataSource value) async {
+    state = state.copyWith(defaultTtsSource: value);
+    await _saveSettings();
+  }
+
+  Future<void> setDefaultCnsSource(MetricDataSource value) async {
+    state = state.copyWith(defaultCnsSource: value);
     await _saveSettings();
   }
 
@@ -966,10 +998,6 @@ final showAscentRateColorsProvider = Provider<bool>((ref) {
 
 final showNdlOnProfileProvider = Provider<bool>((ref) {
   return ref.watch(settingsProvider.select((s) => s.showNdlOnProfile));
-});
-
-final useDiveComputerCnsDataProvider = Provider<bool>((ref) {
-  return ref.watch(settingsProvider.select((s) => s.useDiveComputerCnsData));
 });
 
 final lastStopDepthProvider = Provider<double>((ref) {

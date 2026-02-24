@@ -9,6 +9,7 @@ import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/pages/settings_page.dart';
 import 'package:submersion/core/constants/card_color.dart';
+import 'package:submersion/core/constants/profile_metrics.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
@@ -101,8 +102,17 @@ class _MockSettingsNotifier extends StateNotifier<AppSettings>
   Future<void> setDecoStopIncrement(double value) async =>
       state = state.copyWith(decoStopIncrement: value);
   @override
-  Future<void> setUseDiveComputerCnsData(bool value) async =>
-      state = state.copyWith(useDiveComputerCnsData: value);
+  Future<void> setDefaultNdlSource(MetricDataSource value) async =>
+      state = state.copyWith(defaultNdlSource: value);
+  @override
+  Future<void> setDefaultCeilingSource(MetricDataSource value) async =>
+      state = state.copyWith(defaultCeilingSource: value);
+  @override
+  Future<void> setDefaultTtsSource(MetricDataSource value) async =>
+      state = state.copyWith(defaultTtsSource: value);
+  @override
+  Future<void> setDefaultCnsSource(MetricDataSource value) async =>
+      state = state.copyWith(defaultCnsSource: value);
   @override
   Future<void> setCardColorAttribute(CardColorAttribute attribute) async =>
       state = state.copyWith(cardColorAttribute: attribute);

@@ -775,24 +775,6 @@ class _DecompressionSectionContent extends ConsumerWidget {
             context.l10n.settings_decompression_aboutTitle,
             context.l10n.settings_decompression_aboutContent,
           ),
-          const SizedBox(height: 24),
-          _buildSectionHeader(context, 'Dive Computer Data'),
-          const SizedBox(height: 8),
-          Card(
-            child: SwitchListTile(
-              title: const Text('Use Dive Computer CNS Data'),
-              subtitle: const Text(
-                'Prefer CNS values reported by the dive computer over app-calculated values',
-              ),
-              secondary: const Icon(Icons.memory),
-              value: settings.useDiveComputerCnsData,
-              onChanged: (value) {
-                ref
-                    .read(settingsProvider.notifier)
-                    .setUseDiveComputerCnsData(value);
-              },
-            ),
-          ),
         ],
       ),
     );

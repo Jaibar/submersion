@@ -330,7 +330,9 @@ final profileAnalysisProvider = FutureProvider.family<ProfileAnalysis?, String>(
       }
 
       // Check if dive computer CNS data should be used
-      final useComputerCns = ref.watch(useDiveComputerCnsDataProvider);
+      final settings = ref.watch(settingsProvider);
+      final useComputerCns =
+          settings.defaultCnsSource == MetricDataSource.computer;
       final computerCns = useComputerCns
           ? extractComputerCns(dive.profile)
           : null;
@@ -419,7 +421,9 @@ Future<double> _computeResidualCns(Ref ref, String diveId) async {
 
     // Short-circuit: if the setting is on and the previous dive has computer
     // CNS, use its last CNS sample directly instead of full analysis.
-    final useComputerCns = ref.watch(useDiveComputerCnsDataProvider);
+    final settings = ref.watch(settingsProvider);
+    final useComputerCns =
+        settings.defaultCnsSource == MetricDataSource.computer;
     if (useComputerCns) {
       final prevComputerCns = extractComputerCns(previousDive.profile);
       if (prevComputerCns != null) {
@@ -466,7 +470,7 @@ final residualCnsProvider = FutureProvider.family<double, String>((
 /// imported events). Use [profileAnalysisProvider] (by diveId) for the full
 /// event set including dive-computer-imported events.
 ///
-/// Note: This synchronous provider does NOT respect the [useDiveComputerCnsDataProvider]
+/// Note: This synchronous provider does NOT respect the defaultCnsSource
 /// setting for CNS overlay or o2Exposure. Use [profileAnalysisProvider] (by diveId)
 /// for setting-aware CNS handling.
 final diveProfileAnalysisProvider = Provider.family<ProfileAnalysis?, Dive>((
