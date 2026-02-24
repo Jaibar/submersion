@@ -1,11 +1,11 @@
 # Submersion Feature Roadmap
 ## Comprehensive Development Plan
 
-> **Last Updated:** 2026-02-10
+> **Last Updated:** 2026-02-24
 > **Current Version:** 1.1.0 (v1.1 Complete)
 > **Status:** v1.0 ✅ COMPLETE | v1.1 ✅ COMPLETE | v1.5 🚧 In Progress
 >
-> **v1.5 Progress:** Dive Profile & Telemetry (Category 2) ✅ Complete | Profile Visualization (Category 2.1) ✅ Complete | Dive Computer Connectivity (Category 3) ✅ Complete | Cloud Sync (Category 12) ✅ Complete | Statistics (Category 10) ✅ Complete | CCR/SCR Rebreather Support ✅ Complete | Dive Planner (Category 4.5) ✅ Complete | Search & Filtering (Category 10.1) ✅ Complete | Tools & Calculators (Category 11) ✅ Complete | Digital Signatures (Category 7.2) ✅ Complete | Training Dives (Category 8.3) ✅ Complete | Underwater Photography (Category 9.3) ✅ Complete | Maps & Visualization (Category 5.3) ✅ Complete | Certification Cards (Category 8.1) ✅ Complete | Push Notifications (Category 6.3) ✅ Complete | PDF Templates (Category 10.3) ✅ Complete | Wearable Integration v1 (Category 15.5) ✅ Complete | Marine Life Tracking (Category 9.2) ✅ Complete | Universal Import (Category 13.2/13.3) ✅ Complete | Accessibility & Keyboard Navigation (Category 15.3) ✅ Complete | Internationalization & Localization (Category 15.3) ✅ Complete | Custom Fields (Category 1.4) ✅ Complete
+> **v1.5 Progress:** Dive Profile & Telemetry (Category 2) ✅ Complete | Profile Visualization (Category 2.1) ✅ Complete | Dive Computer Connectivity (Category 3) ✅ Complete | Cloud Sync (Category 12) ✅ Complete | Statistics (Category 10) ✅ Complete | CCR/SCR Rebreather Support ✅ Complete | Dive Planner (Category 4.5) ✅ Complete | Search & Filtering (Category 10.1) ✅ Complete | Tools & Calculators (Category 11) ✅ Complete | Digital Signatures (Category 7.2) ✅ Complete | Training Dives (Category 8.3) ✅ Complete | Underwater Photography (Category 9.3) ✅ Complete | Maps & Visualization (Category 5.3) ✅ Complete | Certification Cards (Category 8.1) ✅ Complete | Push Notifications (Category 6.3) ✅ Complete | PDF Templates (Category 10.3) ✅ Complete | Wearable Integration v1 (Category 15.5) ✅ Complete | Marine Life Tracking (Category 9.2) ✅ Complete | Universal Import (Category 13.2/13.3) ✅ Complete | Accessibility & Keyboard Navigation (Category 15.3) ✅ Complete | Internationalization & Localization (Category 15.3) ✅ Complete | Custom Fields (Category 1.4) ✅ Complete | Bulk Media Selection (Category 9.3) ✅ Complete | Backup Redesign (Category 12.3) ✅ Complete | Gradient Factors & Dive Events (Category 3/4.4) ✅ Complete | Metric Data Source Switching (Category 2.1/4.4) ✅ Complete | Profile Editing (Category 2.3) ✅ Complete | Card Color Customization (Category 15.1) ✅ Complete
 
 ---
 
@@ -135,6 +135,10 @@
 | Step-through playback | ✅ Implemented | v1.5 | Animated playback with real-time stats |
 | Heart rate overlay | ✅ Implemented | v1.5 | Toggle red HR line on chart |
 | Tissue saturation display | ✅ Implemented | v1.5 | 16-compartment bar chart with N2/He |
+| CNS/OTU on profile graph | ✅ Implemented | v1.5 | Toggle CNS% curve on dive profile chart |
+| Metric data source switching | ✅ Implemented | v1.5 | Per-metric computer vs calculated selection (NDL, ceiling, TTS, CNS) |
+| Data source badges | ✅ Implemented | v1.5 | Legend shows DC/Calc* indicators per metric |
+| Recursive CNS calculation | ✅ Implemented | v1.5 | CNS incorporates residual from previous dives |
 
 **v1.5 Tasks:**
 - [x] Profile event markers (ProfileEvent entity with type, timestamp, severity)
@@ -154,6 +158,16 @@
 - [x] Playback stats panel (real-time interpolated values at cursor)
 - [x] Heart rate overlay toggle (red dashed line with HR data)
 - [x] Tissue saturation chart (16-compartment bar chart with N2/He split)
+- [x] CNS/OTU curves on dive profile graph (toggle in legend)
+- [x] Recursive CNS calculation incorporating residual CNS from previous dives
+- [x] Per-metric data source switching (NDL, ceiling, TTS, CNS: computer vs calculated)
+- [x] MetricDataSource enum and MetricSourceInfo type for source tracking
+- [x] Data source preference UI in settings and appearance pages
+- [x] Legend badges showing actual data source (DC/Calc*) per metric
+- [x] Source selector controls in profile legend More menu
+- [x] Database migration v42 for per-metric source settings in diver_settings
+- [x] Recalculate buttons for max depth, avg depth, and runtime from dive profile
+- [x] Auto-populate average depth for dives with a dive profile
 
 ---
 
@@ -183,17 +197,21 @@
 
 | Feature | Status | Phase | Notes |
 |---------|--------|-------|-------|
-| Smoothing / cleaning bad samples | Done | v2.0 | Weighted moving average with triangular kernel |
-| Manual profile drawing | Done | v2.0 | Waypoint-based with linear interpolation |
-| Segment editing | Done | v2.0 | Range selection, depth/time shift, delete |
-| Outlier detection | Done | v2.0 | Z-score on depth deltas + physical impossibility check |
+| Smoothing / cleaning bad samples | ✅ Implemented | v1.5 | Weighted moving average with triangular kernel |
+| Manual profile drawing | ✅ Implemented | v1.5 | Waypoint-based with linear interpolation |
+| Segment editing | ✅ Implemented | v1.5 | Range selection, depth/time shift, delete |
+| Outlier detection | ✅ Implemented | v1.5 | Z-score on depth deltas + physical impossibility check |
 
-**v2.0 Tasks:**
+**v1.5 Tasks (Complete):**
 - [x] Profile outlier detection algorithm (sudden depth jumps)
 - [x] Smoothing algorithm (moving average)
 - [x] Manual profile editor with touch/mouse drawing
 - [x] Segment selection and adjustment UI
-- [ ] Profile export as PNG image for sharing
+- [x] ProfileEditorPage with editor toolbar, context panel, outlier suggestion badge
+- [x] ProfileEditingService with outlier detection and smoothing
+- [x] Range operations (shift depth, shift time, delete segment)
+- [x] Waypoint interpolation for manual profile drawing
+- [x] Profile editing repository methods
 
 ---
 
@@ -206,6 +224,10 @@
 | USB cable transfers | ✅ Implemented | v1.5 | Via libdivecomputer FFI |
 | Bluetooth Classic | ✅ Implemented | v1.5 | flutter_blue_plus |
 | Bluetooth LE (BLE) | ✅ Implemented | v1.5 | flutter_blue_plus with manufacturer protocols |
+| Pigeon platform channels | ✅ Implemented | v1.5 | Native libdivecomputer bridge (macOS full, iOS/Windows/Linux scaffolded) |
+| Full sample capture | ✅ Implemented | v1.5 | All deco/rebreather/event fields from dive computers |
+| Gradient factor import | ✅ Implemented | v1.5 | GF Low/High from dive computer deco model |
+| Dive event markers | ✅ Implemented | v1.5 | 25 event types mapped from libdivecomputer |
 | Infrared (legacy) | 🔮 Future | v3.0 | Limited hardware support |
 | Wi-Fi / cloud devices | 📋 Planned | v2.0 | Garmin, Shearwater cloud API |
 
@@ -215,6 +237,19 @@
 - [x] Bluetooth connection manager (scanning, pairing, reconnection)
 - [x] USB device enumeration and selection
 - [x] Progress indicator during download (% complete, dive count)
+- [x] Pigeon API schema for cross-platform dive computer communication
+- [x] macOS plugin with CoreBluetooth BLE transport (full implementation)
+- [x] iOS plugin with CoreBluetooth BLE transport (full sample mapping synced with macOS)
+- [x] Windows plugin scaffold with C++ Pigeon API
+- [x] Linux plugin scaffold with GObject Pigeon API
+- [x] Android plugin scaffold with BLE transport and JNI wrapper
+- [x] DiveComputerService with stream-based API
+- [x] Rewrite discovery/download providers to use DiveComputerService
+- [x] Extend C native bridge for full sample capture (heartbeat, setpoint, ppO2, CNS, RBT, deco fields, TTS)
+- [x] Deco model import (Buhlmann, VPM, RGBM, DCIEM with GF Low/High)
+- [x] Dive event parsing and mapping (25 event types: deco, ascent, ceiling, gas change, etc.)
+- [x] Per-sample deco data (decoType, decoTime, decoDepth, TTS) with sentinel value handling
+- [x] TTS=0 sentinel fix in Swift bridge and Dart overlay (dive computers that don't track TTS)
 
 ---
 
@@ -342,7 +377,7 @@
 | Tissue loading display | ✅ Implemented | v1.5 | 16-compartment bar chart (DecoInfoPanel) |
 | TTS calculation | ✅ Implemented | v1.5 | Time To Surface with deco stops |
 | Deco stop schedule | ✅ Implemented | v1.5 | Stop depth/time with deep stop support |
-| Calculated vs DC ceiling | 📋 Planned | v1.5 | Compare app calc with computer |
+| Calculated vs DC ceiling | ✅ Implemented | v1.5 | Per-metric source switching (computer vs calculated) |
 | OC/CCR support | ✅ Implemented | v1.5 | Open Circuit / Closed Circuit Rebreather |
 | SCR support | ✅ Implemented | v1.5 | Semi-Closed Rebreather (moved from v2.0) |
 | Setpoints, diluent, bailout | ✅ Implemented | v1.5 | CCR-specific fields |
@@ -759,6 +794,10 @@
 - [x] Write dive metadata to photo EXIF (ExifWriteService with native_exif)
 - [x] EXIF tags: GPSAltitude (depth), ImageDescription (dive summary)
 - [x] Long-press to unlink photo from dive
+- [x] Bulk media selection with DragSelectGridView (drag-select in photo picker)
+- [x] Multi-select mode with bulk unlink in DiveMediaSection
+- [x] Duplicate prevention (dimmed already-linked photos, unique index on media)
+- [x] Migration to de-duplicate existing media records
 
 **v2.0 Tasks:**
 - [ ] Caption and datetime editing per photo
@@ -992,10 +1031,16 @@
 | Cloud backup via Google Drive | ✅ Implemented | v1.5 | Cross-platform |
 | Custom folder sync | ✅ Implemented | v1.5 | Dropbox/OneDrive via folder selection |
 
-**v2.0 Tasks:**
+**v1.5 Tasks (Complete):**
 - [x] Automatic scheduled backups
-- [x] Backup history (keep last N backups)
+- [x] Backup history (keep last N backups with stale entry pruning)
 - [x] One-click restore from cloud backup
+- [x] Redesigned BackupSettingsPage with file-based actions
+- [x] Export backup to file (user-chosen location) and share sheet
+- [x] Restore from arbitrary backup file with SQLite validation
+- [x] Configurable backup location persistence
+- [x] ExportBottomSheet widget for export options
+- [x] Auto application reload after restore from backup
 
 ---
 
@@ -1167,11 +1212,17 @@
 | Feature | Status | Phase | Notes |
 |---------|--------|-------|-------|
 | Dark mode | ✅ Implemented | MVP | Light/Dark/System |
+| Card color customization | ✅ Implemented | v1.5 | Color dive cards by any attribute (depth, temp, rating, etc.) with gradient presets |
 | Customizable logbook columns | 📋 Planned | v2.0 | Show/hide fields |
 | Themes | 📋 Planned | v2.0 | Custom color schemes |
 | Quick actions | 📋 Planned | v1.5 | iOS shortcuts, Android widgets |
 
 **v1.5 Tasks:**
+- [x] CardColorAttribute enum with gradient presets (depth, temperature, rating, CNS, OTU, ppO2, etc.)
+- [x] Generic attribute-based card coloring in dive list builders
+- [x] Card color settings UI (attribute dropdown + gradient preset picker)
+- [x] Card color settings columns in diver_settings (schema v35)
+- [x] Sync data serializer for card color settings
 - [ ] iOS 3D Touch shortcuts (Add Dive, View Last Dive)
 - [ ] Android home screen widgets (dive count, last dive, next service due)
 
@@ -1405,6 +1456,24 @@
 -- dive_custom_fields (id, dive_id, field_key, field_value, sort_order, created_at)
 -- CASCADE delete when parent dive is deleted
 -- Indexes: idx_dive_custom_fields_dive_id, idx_dive_custom_fields_key
+
+-- Card color settings (v35):
+-- diver_settings.card_color_attribute (text, e.g., 'depth', 'temperature', 'rating')
+-- diver_settings.card_color_gradient (text, gradient preset name)
+
+-- Per-metric data source settings (v42):
+-- diver_settings.default_ndl_source (int, MetricDataSource enum)
+-- diver_settings.default_ceiling_source (int, MetricDataSource enum)
+-- diver_settings.default_tts_source (int, MetricDataSource enum)
+-- diver_settings.default_cns_source (int, MetricDataSource enum)
+
+-- Media unique constraint:
+-- UNIQUE(dive_id, platform_asset_id) on media table (de-duplication)
+
+-- Dive computer extended fields:
+-- dive_profiles: setpoint, ppo2, cns, rbt, deco_type, tts (nullable columns)
+-- dive_computers: serial_number, firmware_version
+-- dives: deco_algorithm, gf_low, gf_high, deco_conservatism
 ```
 
 ## v2.0 Tables (Planned)
@@ -1512,6 +1581,16 @@
 - [x] Universal Import (6-step wizard, 12+ source app detection, 9 entity types, field mapping, dry-run preview, 161 tests)
 - [x] Accessibility & Keyboard Navigation (Semantics on 200+ files, global shortcuts, focus traversal, shortcuts help dialog, 83 tests)
 - [x] Custom Fields (freeform key:value metadata per dive, autocomplete, reorderable, search/filter, CSV/UDDF/PDF export/import)
+- [x] Bulk Media Selection (drag-select, multi-unlink, duplicate prevention with unique index)
+- [x] Backup Redesign (file-based export/restore, configurable location, share sheet, auto-reload)
+- [x] Card Color Customization (attribute-based coloring with gradient presets for depth, temp, rating, etc.)
+- [x] Recursive CNS Calculation (incorporating residual CNS from previous dives)
+- [x] CNS/OTU on Profile Graph (toggle curves on dive profile chart)
+- [x] Recalculate Buttons (max depth, avg depth, runtime from dive profile data)
+- [x] Gradient Factors & Dive Events (full sample capture, deco model import, 25 event types)
+- [x] Pigeon Platform Channels (native libdivecomputer bridge: macOS full, iOS synced, Windows/Linux/Android scaffolded)
+- [x] Metric Data Source Switching (per-metric computer vs calculated for NDL, ceiling, TTS, CNS with UI badges)
+- [x] Profile Editing (outlier detection, smoothing, manual drawing, segment editing)
 - [ ] Performance with 5000+ dives
 
 ## v2.0 (Planned)
@@ -1534,5 +1613,5 @@
 
 ---
 
-**Document Version:** 2.23
-**Last Updated:** 2026-02-13 (Custom Fields: freeform key:value metadata per dive with autocomplete, reorderable UI, search/filter, CSV/UDDF/PDF export/import)
+**Document Version:** 2.24
+**Last Updated:** 2026-02-24 (Bulk media selection, backup redesign, card color customization, recursive CNS, CNS/OTU on profile, recalculate buttons, gradient factors & dive events, Pigeon platform channels, metric data source switching, profile editing, TTS=0 bug fix)

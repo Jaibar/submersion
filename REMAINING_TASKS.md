@@ -12,8 +12,34 @@ This document contains only the features and tasks that are **not yet completed*
 
 | Phase | Status | Remaining Focus |
 |-------|--------|-----------------|
-| **v2.0** | 🚧 In Progressd | Advanced features, social, backend |
-| **v3.0** | 🔮 Future | Community platform, AI features |
+| **v1.5** | Nearly Complete | Performance testing, quick actions |
+| **v2.0** | Planned | Advanced features, social, backend |
+| **v3.0** | Future | Community platform, AI features |
+
+---
+
+## v1.5 Remaining Tasks
+
+### Category 5: GPS Integration
+- [ ] EXIF parsing from photo attachments
+- [ ] If photo has GPS and dive doesn't, suggest using photo GPS
+
+### Category 8: Digital Cards (eCards)
+- [ ] Certification wallet view (card-style UI)
+- [ ] Export cert card as image (shareable)
+
+### Category 11: Convenience Tools
+- [ ] Surface Interval Tool: Input previous dive (depth, time, gas) + desired next dive -> Output min surface interval
+- [ ] Display tissue loading chart showing saturation decreasing over time
+
+### Category 15: Layout & Customization
+- [ ] iOS 3D Touch shortcuts (Add Dive, View Last Dive)
+- [ ] Android home screen widgets (dive count, last dive, next service due)
+
+### Release Criteria
+- [ ] Performance with 5000+ dives
+- [ ] App store submissions (iOS, Android)
+- [ ] Documentation (user guide, FAQ)
 
 ---
 
@@ -31,11 +57,6 @@ This document contains only the features and tasks that are **not yet completed*
 
 ## Category 2: Dive Profile & Telemetry
 
-### 2.1 Profile Options
-- [ ] Re-enable profile "Range Analysis"
-- [ ] Re-enable profile "Playback"
-- [ ] Display CNS on dive profile graph
-
 ### 2.2 Multi-Profile Support
 | Feature | Notes |
 |---------|-------|
@@ -44,19 +65,6 @@ This document contains only the features and tasks that are **not yet completed*
 
 **Tasks:**
 - [ ] Side-by-side profile comparison view
-
-### 2.3 Profile Editing
-| Feature | Notes |
-|---------|-------|
-| Smoothing / cleaning bad samples | Outlier removal |
-| Manual profile drawing | For dives without computer |
-| Segment editing | Adjust timestamps, depths |
-
-**Tasks:**
-- [ ] Profile outlier detection algorithm (sudden depth jumps)
-- [ ] Smoothing algorithm (moving average)
-- [ ] Manual profile editor with touch/mouse drawing
-- [ ] Segment selection and adjustment UI
 
 ---
 
@@ -92,7 +100,7 @@ This document contains only the features and tasks that are **not yet completed*
 | Feature | Notes |
 |---------|-------|
 | Photos of gear | Deferred with photos |
-- [ ] Make Equipmenet Sets more visible and easier to access
+- [ ] Make Equipment Sets more visible and easier to access
 
 ### 6.3 Maintenance
 **Tasks:**
@@ -150,6 +158,7 @@ This document contains only the features and tasks that are **not yet completed*
 | Shareable dive cards | Generate visual summary for social media |
 
 **Tasks:**
+- [ ] Caption and datetime editing per photo
 - [ ] Export dive with photos (ZIP archive)
 - [ ] Bulk photo import with auto-match to dives
 - [ ] GPS extraction from photos (suggest site creation)
@@ -215,10 +224,6 @@ This document contains only the features and tasks that are **not yet completed*
 - [ ] Offline queue for pending sync operations
 - [ ] Auto-sync when connectivity restored
 - [ ] Sync conflict warnings and resolution
-
-### 12.5 Auto-update
-**Tasks:**
-- [ ] Application auto-update for non-app store releases
 
 ---
 
@@ -343,10 +348,30 @@ This document contains only the features and tasks that are **not yet completed*
 
 | Phase | Remaining Features | Remaining Tasks |
 |-------|-------------------|-----------------|
-| **v2.0** | ~65+ features | ~105+ tasks |
+| **v1.5** | ~4 items | ~7 tasks |
+| **v2.0** | ~60+ features | ~90+ tasks |
 | **v3.0** | ~4 features | Future scope |
 
 ---
 
-**Document Version:** 3.0
-**Updated:** 2026-02-10 (Section 15.3 i18n complete: 10 languages, 3,931 ARB keys, RTL support, locale-aware formatting)
+## Recently Completed (since 2026-02-10)
+
+The following were removed from this document as they are now complete:
+
+- **Profile Editing** (2.3): Outlier detection, smoothing, manual drawing, segment editing
+- **CNS on Profile Graph** (2.1): CNS/OTU curves now toggleable on dive profile
+- **Metric Data Source Switching** (2.1/4.4): Per-metric computer vs calculated selection for NDL, ceiling, TTS, CNS
+- **Gradient Factors & Dive Events** (3/4.4): Full sample capture from dive computers, deco model import, 25 event types
+- **Pigeon Platform Channels** (3): Native libdivecomputer bridge (macOS full, iOS synced, Windows/Linux/Android scaffolded)
+- **Bulk Media Selection** (9.3): Drag-select, multi-unlink, duplicate prevention
+- **Backup Redesign** (12.3): File-based export/restore, configurable location, share sheet
+- **Card Color Customization** (15.1): Attribute-based dive card coloring with gradient presets
+- **Recursive CNS Calculation** (2.1): CNS incorporates residual from previous dives
+- **Recalculate Buttons** (2.1): Max depth, avg depth, runtime from dive profile data
+- **Auto-update** (12.5): Sparkle for macOS/Windows, GitHub releases for Linux/Android
+- **Diver Profile Redesign**: New UI, active diver stored in database
+
+---
+
+**Document Version:** 4.0
+**Updated:** 2026-02-24 (Removed completed features: profile editing, CNS display, metric data source switching, gradient factors, platform channels, bulk media, backup redesign, card colors, recursive CNS, recalculate buttons, auto-update)
