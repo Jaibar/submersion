@@ -309,6 +309,49 @@ class AppearancePage extends ConsumerWidget {
               ref.read(settingsProvider.notifier).setDefaultShowOtu(value);
             },
           ),
+          const SizedBox(height: 16),
+          _buildSubsectionHeader(context, 'Data Source Preferences'),
+          Card(
+            child: Column(
+              children: [
+                _buildSourceDropdownTile(
+                  context,
+                  title: 'NDL',
+                  value: settings.defaultNdlSource,
+                  onChanged: (source) => ref
+                      .read(settingsProvider.notifier)
+                      .setDefaultNdlSource(source),
+                ),
+                const Divider(height: 1),
+                _buildSourceDropdownTile(
+                  context,
+                  title: 'Ceiling',
+                  value: settings.defaultCeilingSource,
+                  onChanged: (source) => ref
+                      .read(settingsProvider.notifier)
+                      .setDefaultCeilingSource(source),
+                ),
+                const Divider(height: 1),
+                _buildSourceDropdownTile(
+                  context,
+                  title: 'TTS',
+                  value: settings.defaultTtsSource,
+                  onChanged: (source) => ref
+                      .read(settingsProvider.notifier)
+                      .setDefaultTtsSource(source),
+                ),
+                const Divider(height: 1),
+                _buildSourceDropdownTile(
+                  context,
+                  title: 'CNS',
+                  value: settings.defaultCnsSource,
+                  onChanged: (source) => ref
+                      .read(settingsProvider.notifier)
+                      .setDefaultCnsSource(source),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 8),
           _buildSubsectionHeader(
             context,
@@ -462,6 +505,35 @@ class AppearancePage extends ConsumerWidget {
       case ThemeMode.dark:
         return Icons.dark_mode;
     }
+  }
+
+  Widget _buildSourceDropdownTile(
+    BuildContext context, {
+    required String title,
+    required MetricDataSource value,
+    required ValueChanged<MetricDataSource> onChanged,
+  }) {
+    return ListTile(
+      title: Text(title),
+      dense: true,
+      trailing: DropdownButton<MetricDataSource>(
+        value: value,
+        underline: const SizedBox.shrink(),
+        items: const [
+          DropdownMenuItem(
+            value: MetricDataSource.calculated,
+            child: Text('Calculated'),
+          ),
+          DropdownMenuItem(
+            value: MetricDataSource.computer,
+            child: Text('Dive Computer'),
+          ),
+        ],
+        onChanged: (newValue) {
+          if (newValue != null) onChanged(newValue);
+        },
+      ),
+    );
   }
 
   String _getAttributeDisplayName(

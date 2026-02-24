@@ -775,7 +775,92 @@ class _DecompressionSectionContent extends ConsumerWidget {
             context.l10n.settings_decompression_aboutTitle,
             context.l10n.settings_decompression_aboutContent,
           ),
+          const SizedBox(height: 24),
+          _buildSectionHeader(context, 'Data Source Preferences'),
+          const SizedBox(height: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              'When set to Dive Computer, the app uses data reported by the '
+              'dive computer when available. Falls back to calculated values '
+              'when computer data is not present.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Card(
+            child: Column(
+              children: [
+                _buildSourceDropdownTile(
+                  context,
+                  title: 'NDL Source',
+                  value: settings.defaultNdlSource,
+                  onChanged: (source) => ref
+                      .read(settingsProvider.notifier)
+                      .setDefaultNdlSource(source),
+                ),
+                const Divider(height: 1),
+                _buildSourceDropdownTile(
+                  context,
+                  title: 'Ceiling Source',
+                  value: settings.defaultCeilingSource,
+                  onChanged: (source) => ref
+                      .read(settingsProvider.notifier)
+                      .setDefaultCeilingSource(source),
+                ),
+                const Divider(height: 1),
+                _buildSourceDropdownTile(
+                  context,
+                  title: 'TTS Source',
+                  value: settings.defaultTtsSource,
+                  onChanged: (source) => ref
+                      .read(settingsProvider.notifier)
+                      .setDefaultTtsSource(source),
+                ),
+                const Divider(height: 1),
+                _buildSourceDropdownTile(
+                  context,
+                  title: 'CNS Source',
+                  value: settings.defaultCnsSource,
+                  onChanged: (source) => ref
+                      .read(settingsProvider.notifier)
+                      .setDefaultCnsSource(source),
+                ),
+              ],
+            ),
+          ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSourceDropdownTile(
+    BuildContext context, {
+    required String title,
+    required MetricDataSource value,
+    required ValueChanged<MetricDataSource> onChanged,
+  }) {
+    return ListTile(
+      title: Text(title),
+      dense: true,
+      trailing: DropdownButton<MetricDataSource>(
+        value: value,
+        underline: const SizedBox.shrink(),
+        items: const [
+          DropdownMenuItem(
+            value: MetricDataSource.calculated,
+            child: Text('Calculated'),
+          ),
+          DropdownMenuItem(
+            value: MetricDataSource.computer,
+            child: Text('Dive Computer'),
+          ),
+        ],
+        onChanged: (newValue) {
+          if (newValue != null) onChanged(newValue);
+        },
       ),
     );
   }
