@@ -158,7 +158,9 @@ ProfileAnalysisService _resolveAnalysisService(
 }) {
   final hasComputerNdl = profile.any((p) => p.ndl != null);
   final hasComputerCeiling = profile.any((p) => p.ceiling != null);
-  final hasComputerTts = profile.any((p) => p.tts != null);
+  // TTS=0 is a sentinel from dive computers that don't track TTS;
+  // treat it as unavailable so we fall back to calculated values.
+  final hasComputerTts = profile.any((p) => p.tts != null && p.tts! > 0);
   final hasComputerCns = profile.any((p) => p.cns != null);
 
   // Decide per-metric: overlay only when source=computer AND data exists
@@ -202,14 +204,14 @@ ProfileAnalysisService _resolveAnalysisService(
           )
         : null,
     ttsCurve: useTts
-        ? List<int>.generate(
-            profile.length,
-            (i) =>
-                profile[i].tts ??
-                (analysis.ttsCurve != null && i < analysis.ttsCurve!.length
-                    ? analysis.ttsCurve![i]
-                    : 0),
-          )
+        ? List<int>.generate(profile.length, (i) {
+            final computerTts = profile[i].tts;
+            if (computerTts != null && computerTts > 0) return computerTts;
+            if (analysis.ttsCurve != null && i < analysis.ttsCurve!.length) {
+              return analysis.ttsCurve![i];
+            }
+            return 0;
+          })
         : null,
     cnsCurve: useCns
         ? List<double>.generate(

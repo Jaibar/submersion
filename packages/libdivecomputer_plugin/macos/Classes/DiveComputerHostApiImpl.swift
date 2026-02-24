@@ -333,7 +333,7 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                     decoType: s.deco_type == UInt32.max ? nil : Int64(s.deco_type),
                     decoTime: s.deco_time == UInt32.max ? nil : Int64(s.deco_time),
                     decoDepth: s.deco_depth.isNaN ? nil : s.deco_depth,
-                    tts: s.deco_tts == UInt32.max ? nil : Int64(s.deco_tts)
+                    tts: s.deco_tts == UInt32.max || s.deco_tts == 0 ? nil : Int64(s.deco_tts)
                 ))
             }
         }
