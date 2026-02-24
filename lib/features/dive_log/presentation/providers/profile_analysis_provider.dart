@@ -1,3 +1,4 @@
+import 'package:submersion/core/constants/profile_metrics.dart';
 import 'package:submersion/core/deco/entities/o2_exposure.dart';
 import 'package:submersion/core/providers/provider.dart';
 
@@ -10,6 +11,13 @@ import 'package:submersion/features/dive_log/domain/services/computer_cns_extrac
 import 'package:submersion/features/dive_log/domain/services/profile_event_mapper.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_legend_provider.dart';
+
+/// Reports which data source was actually used for each metric in the current profile.
+/// Updated as a side-effect of profileAnalysisProvider.
+final metricSourceInfoProvider = StateProvider<MetricSourceInfo?>(
+  (ref) => null,
+);
 
 /// Provider that loads dive computer events from the database and maps them
 /// to domain [ProfileEvent] instances.
@@ -131,31 +139,51 @@ ProfileAnalysisService _resolveAnalysisService(
 /// Overlays computer-reported decompression data onto a calculated
 /// [ProfileAnalysis].
 ///
-/// When profile points contain computer-reported values for NDL, ceiling,
-/// TTS, or CNS, those values take priority over the Buhlmann-calculated
-/// values. Points without computer data fall back to the calculated values.
+/// Each metric (NDL, ceiling, TTS, CNS) is independently controlled by its
+/// own [MetricDataSource] parameter. When a source is [MetricDataSource.computer]
+/// and computer data exists in the profile, those values take priority over
+/// the Buhlmann-calculated values. Points without computer data fall back to
+/// the calculated values.
 ///
-/// Returns the original [analysis] unchanged if no computer data is present.
-ProfileAnalysis overlayComputerDecoData(
+/// Returns a tuple of the (possibly overlaid) [ProfileAnalysis] and a
+/// [MetricSourceInfo] reporting the actual source used per metric after
+/// fallback resolution.
+(ProfileAnalysis, MetricSourceInfo) overlayComputerDecoData(
   ProfileAnalysis analysis,
   List<DiveProfilePoint> profile, {
-  bool includeComputerCns = true,
+  MetricDataSource ndlSource = MetricDataSource.calculated,
+  MetricDataSource ceilingSource = MetricDataSource.calculated,
+  MetricDataSource ttsSource = MetricDataSource.calculated,
+  MetricDataSource cnsSource = MetricDataSource.calculated,
 }) {
   final hasComputerNdl = profile.any((p) => p.ndl != null);
   final hasComputerCeiling = profile.any((p) => p.ceiling != null);
   final hasComputerTts = profile.any((p) => p.tts != null);
-  final hasComputerCns =
-      includeComputerCns && profile.any((p) => p.cns != null);
+  final hasComputerCns = profile.any((p) => p.cns != null);
 
-  if (!hasComputerNdl &&
-      !hasComputerCeiling &&
-      !hasComputerTts &&
-      !hasComputerCns) {
-    return analysis;
+  // Decide per-metric: overlay only when source=computer AND data exists
+  final useNdl = ndlSource == MetricDataSource.computer && hasComputerNdl;
+  final useCeiling =
+      ceilingSource == MetricDataSource.computer && hasComputerCeiling;
+  final useTts = ttsSource == MetricDataSource.computer && hasComputerTts;
+  final useCns = cnsSource == MetricDataSource.computer && hasComputerCns;
+
+  // Report actual source used (fallback to calculated if no data)
+  final sourceInfo = (
+    ndlActual: useNdl ? MetricDataSource.computer : MetricDataSource.calculated,
+    ceilingActual: useCeiling
+        ? MetricDataSource.computer
+        : MetricDataSource.calculated,
+    ttsActual: useTts ? MetricDataSource.computer : MetricDataSource.calculated,
+    cnsActual: useCns ? MetricDataSource.computer : MetricDataSource.calculated,
+  );
+
+  if (!useNdl && !useCeiling && !useTts && !useCns) {
+    return (analysis, sourceInfo);
   }
 
-  return analysis.copyWith(
-    ndlCurve: hasComputerNdl
+  final overlaid = analysis.copyWith(
+    ndlCurve: useNdl
         ? List<int>.generate(
             profile.length,
             (i) =>
@@ -163,7 +191,7 @@ ProfileAnalysis overlayComputerDecoData(
                 (i < analysis.ndlCurve.length ? analysis.ndlCurve[i] : 0),
           )
         : null,
-    ceilingCurve: hasComputerCeiling
+    ceilingCurve: useCeiling
         ? List<double>.generate(
             profile.length,
             (i) =>
@@ -173,7 +201,7 @@ ProfileAnalysis overlayComputerDecoData(
                     : 0.0),
           )
         : null,
-    ttsCurve: hasComputerTts
+    ttsCurve: useTts
         ? List<int>.generate(
             profile.length,
             (i) =>
@@ -183,7 +211,7 @@ ProfileAnalysis overlayComputerDecoData(
                     : 0),
           )
         : null,
-    cnsCurve: hasComputerCns
+    cnsCurve: useCns
         ? List<double>.generate(
             profile.length,
             (i) =>
@@ -194,6 +222,8 @@ ProfileAnalysis overlayComputerDecoData(
           )
         : null,
   );
+
+  return (overlaid, sourceInfo);
 }
 
 /// Provider for the ProfileAnalysisService configured with user settings
@@ -306,8 +336,14 @@ final profileAnalysisProvider = FutureProvider.family<ProfileAnalysis?, String>(
         heFraction = primaryTank.gasMix.he / 100.0;
       }
 
-      // Check if dive computer CNS data should be used
-      final useComputerCns = ref.watch(useDiveComputerCnsDataProvider);
+      // Read per-metric source preferences from legend state
+      final legendState = ref.watch(profileLegendProvider);
+      final ndlSource = legendState.ndlSource;
+      final ceilingSource = legendState.ceilingSource;
+      final ttsSource = legendState.ttsSource;
+      final cnsSource = legendState.cnsSource;
+
+      final useComputerCns = cnsSource == MetricDataSource.computer;
       final computerCns = useComputerCns
           ? extractComputerCns(dive.profile)
           : null;
@@ -342,11 +378,17 @@ final profileAnalysisProvider = FutureProvider.family<ProfileAnalysis?, String>(
       );
 
       // Overlay computer-reported deco data where available
-      final overlaid = overlayComputerDecoData(
+      final (overlaid, sourceInfo) = overlayComputerDecoData(
         analysis,
         dive.profile,
-        includeComputerCns: useComputerCns,
+        ndlSource: ndlSource,
+        ceilingSource: ceilingSource,
+        ttsSource: ttsSource,
+        cnsSource: cnsSource,
       );
+
+      // Publish actual source info for legend badge display
+      ref.read(metricSourceInfoProvider.notifier).state = sourceInfo;
 
       // Override o2Exposure with computer-reported CNS start/end
       final withCns = computerCns != null
@@ -389,9 +431,11 @@ Future<double> _computeResidualCns(Ref ref, String diveId) async {
     final previousDive = await repository.getPreviousDive(diveId);
     if (previousDive == null) return 0.0;
 
-    // Short-circuit: if the setting is on and the previous dive has computer
-    // CNS, use its last CNS sample directly instead of full analysis.
-    final useComputerCns = ref.watch(useDiveComputerCnsDataProvider);
+    // Short-circuit: if the legend's CNS source is set to computer and the
+    // previous dive has computer CNS, use its last CNS sample directly
+    // instead of full analysis.
+    final legendState = ref.watch(profileLegendProvider);
+    final useComputerCns = legendState.cnsSource == MetricDataSource.computer;
     if (useComputerCns) {
       final prevComputerCns = extractComputerCns(previousDive.profile);
       if (prevComputerCns != null) {
@@ -434,13 +478,10 @@ final residualCnsProvider = FutureProvider.family<double, String>((
 
 /// Provider for profile analysis using a Dive object directly.
 ///
-/// Note: This synchronous provider does NOT merge DB events (dive computer
-/// imported events). Use [profileAnalysisProvider] (by diveId) for the full
-/// event set including dive-computer-imported events.
-///
-/// Note: This synchronous provider does NOT respect the [useDiveComputerCnsDataProvider]
-/// setting for CNS overlay or o2Exposure. Use [profileAnalysisProvider] (by diveId)
-/// for setting-aware CNS handling.
+/// Note: This synchronous provider always uses [MetricDataSource.computer]
+/// for all four metrics (NDL, ceiling, TTS, CNS) when data is present.
+/// It does not read per-metric source preferences from the legend state.
+/// Use [profileAnalysisProvider] (by diveId) for preference-aware handling.
 final diveProfileAnalysisProvider = Provider.family<ProfileAnalysis?, Dive>((
   ref,
   dive,
@@ -502,7 +543,15 @@ final diveProfileAnalysisProvider = Provider.family<ProfileAnalysis?, Dive>((
     );
 
     // Overlay computer-reported deco data where available
-    return overlayComputerDecoData(analysis, dive.profile);
+    final (overlaid, _) = overlayComputerDecoData(
+      analysis,
+      dive.profile,
+      ndlSource: MetricDataSource.computer,
+      ceilingSource: MetricDataSource.computer,
+      ttsSource: MetricDataSource.computer,
+      cnsSource: MetricDataSource.computer,
+    );
+    return overlaid;
   } catch (e, stackTrace) {
     _log.error('Failed to analyze profile for dive: ${dive.id}', e, stackTrace);
     return null;

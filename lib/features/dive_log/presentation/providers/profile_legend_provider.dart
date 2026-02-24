@@ -43,6 +43,12 @@ class ProfileLegendState {
   final bool showCns;
   final bool showOtu;
 
+  // Per-metric data source preferences (session overrides)
+  final MetricDataSource ndlSource;
+  final MetricDataSource ceilingSource;
+  final MetricDataSource ttsSource;
+  final MetricDataSource cnsSource;
+
   // Per-tank pressure visibility (keyed by tank ID)
   final Map<String, bool> showTankPressure;
 
@@ -70,6 +76,10 @@ class ProfileLegendState {
     this.showTts = false,
     this.showCns = false,
     this.showOtu = false,
+    this.ndlSource = MetricDataSource.calculated,
+    this.ceilingSource = MetricDataSource.calculated,
+    this.ttsSource = MetricDataSource.calculated,
+    this.cnsSource = MetricDataSource.calculated,
     this.showTankPressure = const {},
   });
 
@@ -127,6 +137,10 @@ class ProfileLegendState {
     bool? showTts,
     bool? showCns,
     bool? showOtu,
+    MetricDataSource? ndlSource,
+    MetricDataSource? ceilingSource,
+    MetricDataSource? ttsSource,
+    MetricDataSource? cnsSource,
     Map<String, bool>? showTankPressure,
   }) {
     return ProfileLegendState(
@@ -155,6 +169,10 @@ class ProfileLegendState {
       showTts: showTts ?? this.showTts,
       showCns: showCns ?? this.showCns,
       showOtu: showOtu ?? this.showOtu,
+      ndlSource: ndlSource ?? this.ndlSource,
+      ceilingSource: ceilingSource ?? this.ceilingSource,
+      ttsSource: ttsSource ?? this.ttsSource,
+      cnsSource: cnsSource ?? this.cnsSource,
       showTankPressure: showTankPressure ?? this.showTankPressure,
     );
   }
@@ -187,6 +205,10 @@ class ProfileLegendState {
           showTts == other.showTts &&
           showCns == other.showCns &&
           showOtu == other.showOtu &&
+          ndlSource == other.ndlSource &&
+          ceilingSource == other.ceilingSource &&
+          ttsSource == other.ttsSource &&
+          cnsSource == other.cnsSource &&
           mapEquals(showTankPressure, other.showTankPressure);
 
   @override
@@ -214,6 +236,10 @@ class ProfileLegendState {
     showTts,
     showCns,
     showOtu,
+    ndlSource,
+    ceilingSource,
+    ttsSource,
+    cnsSource,
     ...showTankPressure.entries,
   ]);
 }
@@ -256,6 +282,10 @@ class ProfileLegend extends _$ProfileLegend {
       showTts: settings.defaultShowTts,
       showCns: settings.defaultShowCns,
       showOtu: settings.defaultShowOtu,
+      ndlSource: settings.defaultNdlSource,
+      ceilingSource: settings.defaultCeilingSource,
+      ttsSource: settings.defaultTtsSource,
+      cnsSource: settings.defaultCnsSource,
     );
   }
 
@@ -363,6 +393,39 @@ class ProfileLegend extends _$ProfileLegend {
 
   void toggleOtu() {
     state = state.copyWith(showOtu: !state.showOtu);
+  }
+
+  // Data source cycle methods
+  void cycleNdlSource() {
+    state = state.copyWith(
+      ndlSource: state.ndlSource == MetricDataSource.computer
+          ? MetricDataSource.calculated
+          : MetricDataSource.computer,
+    );
+  }
+
+  void cycleCeilingSource() {
+    state = state.copyWith(
+      ceilingSource: state.ceilingSource == MetricDataSource.computer
+          ? MetricDataSource.calculated
+          : MetricDataSource.computer,
+    );
+  }
+
+  void cycleTtsSource() {
+    state = state.copyWith(
+      ttsSource: state.ttsSource == MetricDataSource.computer
+          ? MetricDataSource.calculated
+          : MetricDataSource.computer,
+    );
+  }
+
+  void cycleCnsSource() {
+    state = state.copyWith(
+      cnsSource: state.cnsSource == MetricDataSource.computer
+          ? MetricDataSource.calculated
+          : MetricDataSource.computer,
+    );
   }
 
   /// Toggle visibility for a specific tank's pressure line

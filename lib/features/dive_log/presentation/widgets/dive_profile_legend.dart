@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:submersion/core/constants/profile_metrics.dart';
 import 'package:submersion/core/theme/app_colors.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_legend_provider.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/gas_colors.dart';
@@ -68,6 +70,7 @@ class ProfileLegendConfig {
 
   /// Whether any secondary toggles should be shown
   bool get hasSecondaryToggles =>
+      hasCeilingCurve ||
       hasHeartRateData ||
       hasSacCurve ||
       hasAscentRates ||
@@ -118,6 +121,7 @@ class DiveProfileLegend extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final legendState = ref.watch(profileLegendProvider);
     final legendNotifier = ref.read(profileLegendProvider.notifier);
+    final sourceInfo = ref.watch(metricSourceInfoProvider);
     final colorScheme = Theme.of(context).colorScheme;
 
     // Initialize tank pressures if needed
@@ -169,7 +173,11 @@ class DiveProfileLegend extends ConsumerWidget {
                   _buildMetricToggle(
                     context,
                     color: const Color(0xFFD32F2F), // Red 700
-                    label: context.l10n.diveLog_legend_label_ceiling,
+                    label: _sourceLabel(
+                      context.l10n.diveLog_legend_label_ceiling,
+                      legendState.ceilingSource,
+                      sourceInfo?.ceilingActual ?? MetricDataSource.calculated,
+                    ),
                     isEnabled: legendState.showCeiling,
                     onTap: legendNotifier.toggleCeiling,
                   ),
@@ -271,8 +279,32 @@ class DiveProfileLegend extends ConsumerWidget {
   }
 }
 
+/// Builds a source-aware label for metrics that can come from a dive computer
+/// or app calculation.
+///
+/// When the user prefers [MetricDataSource.computer]:
+///   - Returns `'$baseName (DC)'` when computer data was used.
+///   - Returns `'$baseName (Calc*)'` when it fell back to calculated.
+/// When the user chose [MetricDataSource.calculated], returns the base name
+/// unchanged (no indicator needed).
+String _sourceLabel(
+  String baseName,
+  MetricDataSource preferred,
+  MetricDataSource actual,
+) {
+  if (preferred == MetricDataSource.computer) {
+    if (actual == MetricDataSource.computer) {
+      return '$baseName (DC)';
+    }
+    // Wanted computer but fell back to calculated
+    return '$baseName (Calc*)';
+  }
+  // User chose calculated -- no indicator needed
+  return baseName;
+}
+
 /// Button that shows badge with active secondary toggle count and opens popover
-class _MoreOptionsButton extends StatelessWidget {
+class _MoreOptionsButton extends ConsumerWidget {
   final ProfileLegendConfig config;
   final ProfileLegendState legendState;
   final ProfileLegend legendNotifier;
@@ -318,12 +350,13 @@ class _MoreOptionsButton extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
     final activeCount = _activeSecondaryCount;
+    final sourceInfo = ref.watch(metricSourceInfoProvider);
 
     return IconButton(
-      onPressed: () => _showMoreOptions(context),
+      onPressed: () => _showMoreOptions(context, sourceInfo),
       icon: Badge(
         isLabelVisible: activeCount > 0,
         label: Text(
@@ -343,7 +376,7 @@ class _MoreOptionsButton extends StatelessWidget {
     );
   }
 
-  void _showMoreOptions(BuildContext context) {
+  void _showMoreOptions(BuildContext context, MetricSourceInfo? sourceInfo) {
     final colorScheme = Theme.of(context).colorScheme;
     final renderBox = context.findRenderObject() as RenderBox;
     final offset = renderBox.localToGlobal(Offset.zero);
@@ -356,13 +389,14 @@ class _MoreOptionsButton extends StatelessWidget {
         offset.dx + renderBox.size.width,
         offset.dy + renderBox.size.height + 400,
       ),
-      items: _buildMenuItems(context, colorScheme),
+      items: _buildMenuItems(context, colorScheme, sourceInfo),
     );
   }
 
   List<PopupMenuEntry<void>> _buildMenuItems(
     BuildContext context,
     ColorScheme colorScheme,
+    MetricSourceInfo? sourceInfo,
   ) {
     final items = <PopupMenuEntry<void>>[];
 
@@ -494,6 +528,7 @@ class _MoreOptionsButton extends StatelessWidget {
 
     // Advanced decompression/gas section
     final hasAdvancedOptions =
+        config.hasCeilingCurve ||
         config.hasNdlData ||
         config.hasPpO2Data ||
         config.hasPpN2Data ||
@@ -511,15 +546,38 @@ class _MoreOptionsButton extends StatelessWidget {
       items.add(const PopupMenuDivider());
     }
 
+    // Ceiling source selector (visibility toggle is in primary legend area)
+    if (config.hasCeilingCurve) {
+      items.add(
+        _buildSourceSelector(
+          context,
+          currentSource: legendState.ceilingSource,
+          onCycle: legendNotifier.cycleCeilingSource,
+          metricName: context.l10n.diveLog_legend_label_ceiling,
+        ),
+      );
+    }
+
     // NDL
     if (config.hasNdlData) {
       items.add(
         _buildToggleMenuItem(
           context,
-          label: context.l10n.diveLog_legend_label_ndl,
+          label: _sourceLabel(
+            context.l10n.diveLog_legend_label_ndl,
+            legendState.ndlSource,
+            sourceInfo?.ndlActual ?? MetricDataSource.calculated,
+          ),
           color: Colors.lightGreen.shade700,
           isEnabled: legendState.showNdl,
           onTap: legendNotifier.toggleNdl,
+        ),
+      );
+      items.add(
+        _buildSourceSelector(
+          context,
+          currentSource: legendState.ndlSource,
+          onCycle: legendNotifier.cycleNdlSource,
         ),
       );
     }
@@ -633,10 +691,21 @@ class _MoreOptionsButton extends StatelessWidget {
       items.add(
         _buildToggleMenuItem(
           context,
-          label: context.l10n.diveLog_legend_label_tts,
+          label: _sourceLabel(
+            context.l10n.diveLog_legend_label_tts,
+            legendState.ttsSource,
+            sourceInfo?.ttsActual ?? MetricDataSource.calculated,
+          ),
           color: const Color(0xFFAD1457), // Pink 800
           isEnabled: legendState.showTts,
           onTap: legendNotifier.toggleTts,
+        ),
+      );
+      items.add(
+        _buildSourceSelector(
+          context,
+          currentSource: legendState.ttsSource,
+          onCycle: legendNotifier.cycleTtsSource,
         ),
       );
     }
@@ -646,10 +715,21 @@ class _MoreOptionsButton extends StatelessWidget {
       items.add(
         _buildToggleMenuItem(
           context,
-          label: context.l10n.diveLog_legend_label_cns,
+          label: _sourceLabel(
+            context.l10n.diveLog_legend_label_cns,
+            legendState.cnsSource,
+            sourceInfo?.cnsActual ?? MetricDataSource.calculated,
+          ),
           color: const Color(0xFFE65100), // Orange 900
           isEnabled: legendState.showCns,
           onTap: legendNotifier.toggleCns,
+        ),
+      );
+      items.add(
+        _buildSourceSelector(
+          context,
+          currentSource: legendState.cnsSource,
+          onCycle: legendNotifier.cycleCnsSource,
         ),
       );
     }
@@ -701,6 +781,49 @@ class _MoreOptionsButton extends StatelessWidget {
           const SizedBox(width: 8),
           Text(label),
         ],
+      ),
+    );
+  }
+
+  /// Builds a source selector row for a metric that can come from a dive
+  /// computer or app calculation.
+  ///
+  /// When [metricName] is provided, the row shows the metric name prefix
+  /// (used when the visibility toggle is in the primary legend area rather
+  /// than the popup menu).
+  PopupMenuItem<void> _buildSourceSelector(
+    BuildContext context, {
+    required MetricDataSource currentSource,
+    required VoidCallback onCycle,
+    String? metricName,
+  }) {
+    return PopupMenuItem<void>(
+      height: 36,
+      onTap: onCycle,
+      child: Padding(
+        padding: EdgeInsets.only(left: metricName != null ? 0 : 28),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              metricName != null ? '$metricName Source: ' : 'Source: ',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                currentSource == MetricDataSource.computer ? 'DC' : 'Calc',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
