@@ -1110,15 +1110,6 @@ class MockTagRepository extends _i1.Mock implements _i23.TagRepository {
           as _i17.Future<void>);
 
   @override
-  _i17.Future<void> deleteUnusedTags() =>
-      (super.noSuchMethod(
-            Invocation.method(#deleteUnusedTags, []),
-            returnValue: _i17.Future<void>.value(),
-            returnValueForMissingStub: _i17.Future<void>.value(),
-          )
-          as _i17.Future<void>);
-
-  @override
   _i17.Future<List<_i23.TagStatistic>> getTagStatistics({String? diverId}) =>
       (super.noSuchMethod(
             Invocation.method(#getTagStatistics, [], {#diverId: diverId}),
