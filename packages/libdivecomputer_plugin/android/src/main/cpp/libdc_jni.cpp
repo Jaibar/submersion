@@ -453,16 +453,25 @@ Java_com_submersion_libdivecomputer_LibdcWrapper_nativeGetDiveSample(
     if (index < 0 || static_cast<unsigned int>(index) >= dive->sample_count) return nullptr;
 
     const libdc_sample_t *s = &dive->samples[index];
-    // Return [time_ms, depth, temperature, pressure, tank]
-    jdouble values[5] = {
+    // All 14 fields. Integer sentinels (UINT32_MAX) are cast to double.
+    jdouble values[14] = {
         static_cast<jdouble>(s->time_ms),
         s->depth,
         s->temperature,
         s->pressure,
-        static_cast<jdouble>(s->tank)
+        static_cast<jdouble>(s->tank),
+        static_cast<jdouble>(s->heartbeat),
+        s->setpoint,
+        s->ppo2,
+        s->cns,
+        static_cast<jdouble>(s->rbt),
+        static_cast<jdouble>(s->deco_type),
+        static_cast<jdouble>(s->deco_time),
+        s->deco_depth,
+        static_cast<jdouble>(s->deco_tts)
     };
-    jdoubleArray result = env->NewDoubleArray(5);
-    env->SetDoubleArrayRegion(result, 0, 5, values);
+    jdoubleArray result = env->NewDoubleArray(14);
+    env->SetDoubleArrayRegion(result, 0, 14, values);
     return result;
 }
 
@@ -510,5 +519,54 @@ Java_com_submersion_libdivecomputer_LibdcWrapper_nativeGetDiveTank(
     };
     jdoubleArray result = env->NewDoubleArray(5);
     env->SetDoubleArrayRegion(result, 0, 5, values);
+    return result;
+}
+
+// ============================================================
+// Event Data Access
+// ============================================================
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_submersion_libdivecomputer_LibdcWrapper_nativeGetDiveEventCount(
+    JNIEnv *, jclass, jlong divePtr) {
+    auto *dive = reinterpret_cast<const libdc_parsed_dive_t *>(divePtr);
+    return static_cast<jint>(dive->event_count);
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_submersion_libdivecomputer_LibdcWrapper_nativeGetDiveEvent(
+    JNIEnv *env, jclass, jlong divePtr, jint index) {
+    auto *dive = reinterpret_cast<const libdc_parsed_dive_t *>(divePtr);
+    if (!dive->events || index < 0 ||
+        static_cast<unsigned int>(index) >= dive->event_count) return nullptr;
+
+    const libdc_event_t *e = &dive->events[index];
+    jlong values[4] = {
+        static_cast<jlong>(e->time_ms),
+        static_cast<jlong>(e->type),
+        static_cast<jlong>(e->flags),
+        static_cast<jlong>(e->value)
+    };
+    jlongArray result = env->NewLongArray(4);
+    env->SetLongArrayRegion(result, 0, 4, values);
+    return result;
+}
+
+// ============================================================
+// Decompression Model Access
+// ============================================================
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_submersion_libdivecomputer_LibdcWrapper_nativeGetDiveDecoModel(
+    JNIEnv *env, jclass, jlong divePtr) {
+    auto *dive = reinterpret_cast<const libdc_parsed_dive_t *>(divePtr);
+    jint values[4] = {
+        static_cast<jint>(dive->deco_model_type),
+        static_cast<jint>(dive->deco_conservatism),
+        static_cast<jint>(dive->gf_low),
+        static_cast<jint>(dive->gf_high)
+    };
+    jintArray result = env->NewIntArray(4);
+    env->SetIntArrayRegion(result, 0, 4, values);
     return result;
 }
