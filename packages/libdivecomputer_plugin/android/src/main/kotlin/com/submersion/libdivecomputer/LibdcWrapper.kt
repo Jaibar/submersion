@@ -57,6 +57,13 @@ object LibdcWrapper {
     external fun nativeGetDiveGasmix(divePtr: Long, index: Int): DoubleArray?
     external fun nativeGetDiveTankCount(divePtr: Long): Int
     external fun nativeGetDiveTank(divePtr: Long, index: Int): DoubleArray?
+
+    // Event data access
+    external fun nativeGetDiveEventCount(divePtr: Long): Int
+    external fun nativeGetDiveEvent(divePtr: Long, index: Int): LongArray?
+
+    // Decompression model access
+    external fun nativeGetDiveDecoModel(divePtr: Long): IntArray?
 }
 
 // Mutable data class for receiving descriptor info from JNI.

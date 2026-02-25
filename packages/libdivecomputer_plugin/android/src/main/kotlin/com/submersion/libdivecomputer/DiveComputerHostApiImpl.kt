@@ -226,7 +226,15 @@ class DiveComputerHostApiImpl(
                 temperatureCelsius = if (s[2].isNaN()) null else s[2],
                 pressureBar = if (s[3].isNaN()) null else s[3],
                 tankIndex = if (s[4].toLong() == 0xFFFFFFFFL) null else s[4].toLong(),
-                heartRate = null
+                heartRate = if (s[5].toLong() == 0xFFFFFFFFL) null else s[5].toLong(),
+                setpoint = if (s[6].isNaN()) null else s[6],
+                ppo2 = if (s[7].isNaN()) null else s[7],
+                cns = if (s[8].isNaN()) null else s[8],
+                rbt = if (s[9].toLong() == 0xFFFFFFFFL) null else s[9].toLong(),
+                decoType = if (s[10].toLong() == 0xFFFFFFFFL) null else s[10].toLong(),
+                decoTime = if (s[11].toLong() == 0xFFFFFFFFL) null else s[11].toLong(),
+                decoDepth = if (s[12].isNaN()) null else s[12],
+                tts = if (s[13].toLong() == 0xFFFFFFFFL || s[13].toLong() == 0L) null else s[13].toLong()
             )
         }
 
@@ -269,6 +277,33 @@ class DiveComputerHostApiImpl(
         val minTemp = LibdcWrapper.nativeGetDiveMinTemp(divePtr)
         val maxTemp = LibdcWrapper.nativeGetDiveMaxTemp(divePtr)
 
+        // Convert events.
+        val eventCount = LibdcWrapper.nativeGetDiveEventCount(divePtr)
+        val events = (0 until eventCount).mapNotNull { i ->
+            val e = LibdcWrapper.nativeGetDiveEvent(divePtr, i) ?: return@mapNotNull null
+            if (e[1] == 0L) return@mapNotNull null  // skip EVENT_NONE
+            DiveEvent(
+                timeSeconds = e[0] / 1000,
+                type = mapEventType(e[1].toInt()),
+                data = mapOf("flags" to e[2].toString(), "value" to e[3].toString())
+            )
+        }
+
+        // Convert deco model.
+        val decoInfo = LibdcWrapper.nativeGetDiveDecoModel(divePtr)
+        val decoAlgorithm = decoInfo?.let {
+            when (it[0]) {
+                1 -> "buhlmann"
+                2 -> "vpm"
+                3 -> "rgbm"
+                4 -> "dciem"
+                else -> null
+            }
+        }
+        val gfLow = decoInfo?.let { if (it[2] == 0) null else it[2].toLong() }
+        val gfHigh = decoInfo?.let { if (it[3] == 0) null else it[3].toLong() }
+        val decoConservatism = decoInfo?.let { if (it[1] == 0) null else it[1].toLong() }
+
         return ParsedDive(
             fingerprint = fingerprint,
             dateTimeEpoch = epoch,
@@ -280,8 +315,12 @@ class DiveComputerHostApiImpl(
             samples = samples,
             tanks = tanks,
             gasMixes = gasMixes,
-            events = emptyList(),
-            diveMode = diveMode
+            events = events,
+            diveMode = diveMode,
+            decoAlgorithm = decoAlgorithm,
+            gfLow = gfLow,
+            gfHigh = gfHigh,
+            decoConservatism = decoConservatism
         )
     }
 
@@ -295,5 +334,34 @@ class DiveComputerHostApiImpl(
 
     private fun reportError(code: String, message: String) {
         flutterApi.onError(DiveComputerError(code = code, message = message)) { }
+    }
+
+    private fun mapEventType(type: Int): String = when (type) {
+        0 -> "none"
+        1 -> "deco"
+        2 -> "ascent"
+        3 -> "ceiling"
+        4 -> "workload"
+        5 -> "transmitter"
+        6 -> "violation"
+        7 -> "bookmark"
+        8 -> "surface"
+        9 -> "safetystop"
+        10 -> "gaschange"
+        11 -> "safetystop_voluntary"
+        12 -> "safetystop_mandatory"
+        13 -> "deepstop"
+        14 -> "ceiling_safetystop"
+        15 -> "floor"
+        16 -> "divetime"
+        17 -> "maxdepth"
+        18 -> "OLF"
+        19 -> "PO2"
+        20 -> "airtime"
+        21 -> "rgbm"
+        22 -> "heading"
+        23 -> "tissuelevel"
+        24 -> "gaschange2"
+        else -> "unknown_$type"
     }
 }
