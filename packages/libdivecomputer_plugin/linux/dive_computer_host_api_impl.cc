@@ -4,7 +4,6 @@ extern "C" {
 #include "ble_io_stream.h"
 #include "ble_scanner.h"
 #include "dive_converter.h"
-#include "libdc_download.h"
 #include "libdc_wrapper.h"
 #include "serial_io_stream.h"
 #include "serial_scanner.h"

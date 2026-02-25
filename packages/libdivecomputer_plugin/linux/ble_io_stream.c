@@ -4,8 +4,9 @@
 #include <string.h>
 
 // Known GATT UUIDs for dive computer communication (same as macOS/Windows).
-static const char* PREFERRED_SERVICE_UUID =
-    "cb3c4555-d670-4670-bc20-b61dbc851e9a";
+// PREFERRED_SERVICE_UUID is unused on Linux (BlueZ enumerates all
+// characteristics under the device path rather than filtering by service),
+// but kept for cross-platform reference.
 static const char* PREFERRED_WRITE_UUID =
     "6606ab42-89d5-4a00-a8ce-4eb5e1414ee0";
 static const char* PREFERRED_NOTIFY_UUID =

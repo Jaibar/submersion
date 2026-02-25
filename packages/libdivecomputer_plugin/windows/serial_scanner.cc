@@ -1,10 +1,17 @@
 #include "serial_scanner.h"
 
 #include <Windows.h>
+#include <initguid.h>
 #include <SetupAPI.h>
 #include <devguid.h>
-#include <initguid.h>
+
+// ntddser.h provides GUID_DEVINTERFACE_COMPORT.  It also redefines
+// SERIAL_LSRMST_* / SERIAL_IOC_* macros already pulled in through
+// Windows.h, so suppress the C4005 (macro redefinition) warning.
+#pragma warning(push)
+#pragma warning(disable : 4005)
 #include <ntddser.h>
+#pragma warning(pop)
 
 #include <cstdio>
 #include <string>
