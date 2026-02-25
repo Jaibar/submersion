@@ -9,9 +9,11 @@ on:
   push:
     paths:
       - 'packages/libdivecomputer_plugin/**'
+      - '.github/workflows/native-plugin-tests.yml'
   pull_request:
     paths:
       - 'packages/libdivecomputer_plugin/**'
+      - '.github/workflows/native-plugin-tests.yml'
 
 concurrency:
   group: native-plugin-${{ github.ref }}
@@ -58,8 +60,17 @@ jobs:
         with:
           flutter-version: ${{ steps.flutter-version.outputs.version }}
 
-      - name: Build macOS debug
-        run: flutter build macos --debug
+      - name: Run code generation
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Build macOS debug (no codesign)
+        run: |
+          flutter build macos --config-only --debug
+          xcodebuild build \
+            -workspace macos/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO
 
   # ==========================================================================
   # iOS Build
@@ -79,6 +90,9 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ steps.flutter-version.outputs.version }}
+
+      - name: Run code generation
+        run: dart run build_runner build --delete-conflicting-outputs
 
       - name: Build iOS simulator debug
         run: flutter build ios --simulator --debug --no-codesign
@@ -102,6 +116,9 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ steps.flutter-version.outputs.version }}
+
+      - name: Run code generation
+        run: dart run build_runner build --delete-conflicting-outputs
 
       - name: Build Windows debug
         run: flutter build windows --debug
@@ -129,10 +146,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libgtk-3-dev \
+            clang \
+            cmake \
             ninja-build \
+            pkg-config \
+            libgtk-3-dev \
             libglib2.0-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            libsecret-1-dev
+
+      - name: Run code generation
+        run: dart run build_runner build --delete-conflicting-outputs
 
       - name: Build Linux debug
         run: flutter build linux --debug
