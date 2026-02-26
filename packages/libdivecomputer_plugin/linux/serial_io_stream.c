@@ -114,7 +114,7 @@ static int serial_close(void* userdata) {
     return LIBDC_STATUS_SUCCESS;
 }
 
-static int serial_purge(void* userdata, int direction) {
+static int serial_purge(void* userdata, unsigned int direction) {
     SerialIoStream* stream = (SerialIoStream*)userdata;
     if (stream->fd < 0) return LIBDC_STATUS_IO;
 
@@ -130,7 +130,7 @@ static int serial_purge(void* userdata, int direction) {
     return LIBDC_STATUS_SUCCESS;
 }
 
-static int serial_sleep(void* userdata, int milliseconds) {
+static int serial_sleep(void* userdata, unsigned int milliseconds) {
     (void)userdata;
     g_usleep((gulong)milliseconds * 1000);
     return LIBDC_STATUS_SUCCESS;
