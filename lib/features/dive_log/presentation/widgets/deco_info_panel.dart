@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:submersion/core/accessibility/semantic_helpers.dart';
 import 'package:submersion/core/deco/entities/deco_status.dart';
 import 'package:submersion/core/deco/entities/tissue_compartment.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_heat_map.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Panel displaying decompression status and tissue loading.
@@ -449,10 +450,9 @@ class DecoInfoPanel extends StatelessWidget {
 
   Color _getN2Color(double loading) {
     if (loading >= 100) return Colors.red;
-    if (loading >= 85) return Colors.orange;
-    if (loading >= 70) return Colors.amber;
-    if (loading >= 50) return Colors.teal;
-    return Colors.teal.shade300;
+    if (loading >= 80) return Colors.orange;
+    if (loading >= 60) return Colors.amber;
+    return Colors.green;
   }
 }
 
@@ -465,7 +465,19 @@ class CompactDecoPanel extends StatelessWidget {
   /// Optional subtitle text (e.g. "at 3:42")
   final String? subtitle;
 
-  const CompactDecoPanel({super.key, required this.status, this.subtitle});
+  /// Full time-series of deco statuses for the tissue heat map
+  final List<DecoStatus>? decoStatuses;
+
+  /// Currently selected profile point index (for heat map cursor)
+  final int? selectedIndex;
+
+  const CompactDecoPanel({
+    super.key,
+    required this.status,
+    this.subtitle,
+    this.decoStatuses,
+    this.selectedIndex,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -488,6 +500,45 @@ class CompactDecoPanel extends StatelessWidget {
 
             // Tissue pressure diagram (Subsurface-style)
             _buildTissuePressureDiagram(context, colorScheme),
+
+            // Tissue loading heat map over time
+            if (decoStatuses != null && decoStatuses!.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // Vertical axis labels (fast tissues top, slow bottom)
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Fast',
+                        style: textTheme.labelSmall?.copyWith(
+                          fontSize: 9,
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 36),
+                      Text(
+                        'Slow',
+                        style: textTheme.labelSmall?.copyWith(
+                          fontSize: 9,
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: TissueHeatMapStrip(
+                      decoStatuses: decoStatuses!,
+                      selectedIndex: selectedIndex,
+                      height: 64,
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 6),
 
             // Bottom row: GF values and deco stops
@@ -812,10 +863,9 @@ class CompactDecoPanel extends StatelessWidget {
 
   Color _getN2Color(double loading) {
     if (loading >= 100) return Colors.red;
-    if (loading >= 85) return Colors.orange;
-    if (loading >= 70) return Colors.amber;
-    if (loading >= 50) return Colors.teal;
-    return Colors.teal.shade300;
+    if (loading >= 80) return Colors.orange;
+    if (loading >= 60) return Colors.amber;
+    return Colors.green;
   }
 }
 

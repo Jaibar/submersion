@@ -558,8 +558,8 @@ class CompactO2ToxicityPanel extends StatelessWidget {
     required Color endColor,
     required double? selectedDelta,
   }) {
-    const barHeight = 10.0;
-    const barRadius = BorderRadius.all(Radius.circular(5));
+    const barHeight = 20.0;
+    const barRadius = BorderRadius.all(Radius.circular(6));
 
     final endFraction = (exposure.cnsEnd / 100).clamp(0.0, 1.0);
     final startFraction = (exposure.cnsStart / 100).clamp(0.0, 1.0);

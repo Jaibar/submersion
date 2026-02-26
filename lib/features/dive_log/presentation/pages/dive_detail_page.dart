@@ -1089,6 +1089,8 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
     final Widget decoWidget = CompactDecoPanel(
       status: status,
       subtitle: timeSubtitle,
+      decoStatuses: analysis.decoStatuses,
+      selectedIndex: _selectedPointIndex,
     );
 
     final Widget o2Widget = CompactO2ToxicityPanel(
