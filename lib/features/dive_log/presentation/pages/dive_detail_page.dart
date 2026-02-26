@@ -944,23 +944,6 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                   OutlinedButton.icon(
                     onPressed: () {
                       ref
-                          .read(playbackProvider(dive.id).notifier)
-                          .togglePlaybackMode();
-                    },
-                    icon: const Icon(Icons.play_circle_outline, size: 18),
-                    label: Text(context.l10n.diveLog_detail_button_playback),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 8,
-                      ),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  OutlinedButton.icon(
-                    onPressed: () {
-                      ref
                           .read(rangeSelectionProvider(dive.id).notifier)
                           .enableRangeMode();
                     },
