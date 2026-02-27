@@ -565,6 +565,8 @@ class DiverSettings extends Table {
       boolean().withDefault(const Constant(true))();
   RealColumn get lastStopDepth => real().withDefault(const Constant(3.0))();
   RealColumn get decoStopIncrement => real().withDefault(const Constant(3.0))();
+  BoolColumn get o2Narcotic => boolean().withDefault(const Constant(true))();
+  RealColumn get endLimit => real().withDefault(const Constant(30.0))();
   BoolColumn get useDiveComputerCnsData =>
       boolean().withDefault(const Constant(false))();
   IntColumn get defaultNdlSource => integer().withDefault(const Constant(1))();

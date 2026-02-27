@@ -107,6 +107,12 @@ class AppSettings {
   /// Deco stop increment in meters (typically 3)
   final double decoStopIncrement;
 
+  /// Whether O2 is considered narcotic (true = more conservative)
+  final bool o2Narcotic;
+
+  /// END limit in meters for MND calculations (typically 30)
+  final double endLimit;
+
   /// Default data source for NDL metric (computer or calculated)
   final MetricDataSource defaultNdlSource;
 
@@ -235,6 +241,8 @@ class AppSettings {
     this.showNdlOnProfile = true,
     this.lastStopDepth = 3.0,
     this.decoStopIncrement = 3.0,
+    this.o2Narcotic = true,
+    this.endLimit = 30.0,
     this.defaultNdlSource = MetricDataSource.calculated,
     this.defaultCeilingSource = MetricDataSource.calculated,
     this.defaultTtsSource = MetricDataSource.calculated,
@@ -334,6 +342,8 @@ class AppSettings {
     bool? showNdlOnProfile,
     double? lastStopDepth,
     double? decoStopIncrement,
+    bool? o2Narcotic,
+    double? endLimit,
     MetricDataSource? defaultNdlSource,
     MetricDataSource? defaultCeilingSource,
     MetricDataSource? defaultTtsSource,
@@ -397,6 +407,8 @@ class AppSettings {
       showNdlOnProfile: showNdlOnProfile ?? this.showNdlOnProfile,
       lastStopDepth: lastStopDepth ?? this.lastStopDepth,
       decoStopIncrement: decoStopIncrement ?? this.decoStopIncrement,
+      o2Narcotic: o2Narcotic ?? this.o2Narcotic,
+      endLimit: endLimit ?? this.endLimit,
       defaultNdlSource: defaultNdlSource ?? this.defaultNdlSource,
       defaultCeilingSource: defaultCeilingSource ?? this.defaultCeilingSource,
       defaultTtsSource: defaultTtsSource ?? this.defaultTtsSource,
@@ -711,6 +723,17 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
   Future<void> setDecoStopIncrement(double value) async {
     final clamped = value.clamp(1.0, 3.0);
     state = state.copyWith(decoStopIncrement: clamped);
+    await _saveSettings();
+  }
+
+  Future<void> setO2Narcotic(bool value) async {
+    state = state.copyWith(o2Narcotic: value);
+    await _saveSettings();
+  }
+
+  Future<void> setEndLimit(double value) async {
+    final clamped = value.clamp(20.0, 50.0);
+    state = state.copyWith(endLimit: clamped);
     await _saveSettings();
   }
 
