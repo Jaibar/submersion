@@ -14254,6 +14254,66 @@ abstract class AppLocalizations {
   /// **'Standard working limit for recreational diving'**
   String get gasCalculators_mod_ppO2Standard;
 
+  /// No description provided for @gasCalculators_mnd_depthInput.
+  ///
+  /// In en, this message translates to:
+  /// **'Depth'**
+  String get gasCalculators_mnd_depthInput;
+
+  /// No description provided for @gasCalculators_mnd_endAtDepthTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'END at Depth'**
+  String get gasCalculators_mnd_endAtDepthTitle;
+
+  /// No description provided for @gasCalculators_mnd_endLimit.
+  ///
+  /// In en, this message translates to:
+  /// **'END Limit'**
+  String get gasCalculators_mnd_endLimit;
+
+  /// No description provided for @gasCalculators_mnd_hePercent.
+  ///
+  /// In en, this message translates to:
+  /// **'He %'**
+  String get gasCalculators_mnd_hePercent;
+
+  /// No description provided for @gasCalculators_mnd_infoContent.
+  ///
+  /// In en, this message translates to:
+  /// **'Maximum Narcotic Depth (MND) is the deepest you can go before narcosis exceeds your END limit. Equivalent Narcotic Depth (END) tells you the narcotic effect of your gas at a given depth.\n\nWhen \'O2 is narcotic\' is enabled, both oxygen and nitrogen contribute to narcosis (more conservative). When disabled, only nitrogen is considered narcotic.'**
+  String get gasCalculators_mnd_infoContent;
+
+  /// No description provided for @gasCalculators_mnd_infoTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'About MND/END'**
+  String get gasCalculators_mnd_infoTitle;
+
+  /// No description provided for @gasCalculators_mnd_inputParameters.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas Mix & Narcosis Settings'**
+  String get gasCalculators_mnd_inputParameters;
+
+  /// No description provided for @gasCalculators_mnd_o2Narcotic.
+  ///
+  /// In en, this message translates to:
+  /// **'O2 is narcotic'**
+  String get gasCalculators_mnd_o2Narcotic;
+
+  /// No description provided for @gasCalculators_mnd_o2Percent.
+  ///
+  /// In en, this message translates to:
+  /// **'O2 %'**
+  String get gasCalculators_mnd_o2Percent;
+
+  /// No description provided for @gasCalculators_mnd_resultTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Maximum Narcotic Depth'**
+  String get gasCalculators_mnd_resultTitle;
+
   /// No description provided for @gasCalculators_ppO2Limit.
   ///
   /// In en, this message translates to:
@@ -14283,6 +14343,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Consumption'**
   String get gasCalculators_tab_consumption;
+
+  /// No description provided for @gasCalculators_tab_mnd.
+  ///
+  /// In en, this message translates to:
+  /// **'MND/END'**
+  String get gasCalculators_tab_mnd;
 
   /// No description provided for @gasCalculators_tab_mod.
   ///

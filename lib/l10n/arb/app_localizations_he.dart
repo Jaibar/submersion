@@ -7984,6 +7984,38 @@ class AppLocalizationsHe extends AppLocalizations {
       'מגבלת עבודה סטנדרטית לצלילה פנאי';
 
   @override
+  String get gasCalculators_mnd_depthInput => 'Depth';
+
+  @override
+  String get gasCalculators_mnd_endAtDepthTitle => 'END at Depth';
+
+  @override
+  String get gasCalculators_mnd_endLimit => 'END Limit';
+
+  @override
+  String get gasCalculators_mnd_hePercent => 'He %';
+
+  @override
+  String get gasCalculators_mnd_infoContent =>
+      'Maximum Narcotic Depth (MND) is the deepest you can go before narcosis exceeds your END limit. Equivalent Narcotic Depth (END) tells you the narcotic effect of your gas at a given depth.\n\nWhen \'O2 is narcotic\' is enabled, both oxygen and nitrogen contribute to narcosis (more conservative). When disabled, only nitrogen is considered narcotic.';
+
+  @override
+  String get gasCalculators_mnd_infoTitle => 'About MND/END';
+
+  @override
+  String get gasCalculators_mnd_inputParameters =>
+      'Gas Mix & Narcosis Settings';
+
+  @override
+  String get gasCalculators_mnd_o2Narcotic => 'O2 is narcotic';
+
+  @override
+  String get gasCalculators_mnd_o2Percent => 'O2 %';
+
+  @override
+  String get gasCalculators_mnd_resultTitle => 'Maximum Narcotic Depth';
+
+  @override
   String get gasCalculators_ppO2Limit => 'מגבלת ppO₂';
 
   @override
@@ -7997,6 +8029,9 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get gasCalculators_tab_consumption => 'צריכה';
+
+  @override
+  String get gasCalculators_tab_mnd => 'MND/END';
 
   @override
   String get gasCalculators_tab_mod => 'MOD';
