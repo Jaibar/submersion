@@ -5,16 +5,18 @@ import 'package:submersion/features/gas_calculators/presentation/providers/gas_c
 import 'package:submersion/features/gas_calculators/presentation/widgets/best_mix_calculator.dart';
 import 'package:submersion/features/gas_calculators/presentation/widgets/gas_consumption_calculator.dart';
 import 'package:submersion/features/gas_calculators/presentation/widgets/mod_calculator.dart';
+import 'package:submersion/features/gas_calculators/presentation/widgets/mnd_calculator.dart';
 import 'package:submersion/features/gas_calculators/presentation/widgets/rock_bottom_calculator.dart';
 import 'package:submersion/core/providers/provider.dart';
 
 /// Gas Calculators page with tabbed interface.
 ///
-/// Provides 4 specialized diving gas calculators:
+/// Provides 5 specialized diving gas calculators:
 /// - MOD: Maximum Operating Depth for a given gas mix
 /// - Best Mix: Ideal O2% for a target depth
 /// - Gas Consumption: How much gas a dive will use
 /// - Rock Bottom: Minimum reserve for emergency ascent
+/// - MND/END: Maximum Narcotic Depth / Equivalent Narcotic Depth
 class GasCalculatorsPage extends ConsumerStatefulWidget {
   const GasCalculatorsPage({super.key});
 
@@ -29,7 +31,7 @@ class _GasCalculatorsPageState extends ConsumerState<GasCalculatorsPage>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
   }
 
   @override
@@ -75,6 +77,10 @@ class _GasCalculatorsPageState extends ConsumerState<GasCalculatorsPage>
               icon: const Icon(Icons.warning_amber),
               text: context.l10n.gasCalculators_tab_rockBottom,
             ),
+            Tab(
+              icon: const Icon(Icons.psychology),
+              text: context.l10n.gasCalculators_tab_mnd,
+            ),
           ],
           indicatorColor: colorScheme.primary,
           labelColor: colorScheme.primary,
@@ -88,6 +94,7 @@ class _GasCalculatorsPageState extends ConsumerState<GasCalculatorsPage>
           BestMixCalculator(),
           GasConsumptionCalculator(),
           RockBottomCalculator(),
+          MndCalculator(),
         ],
       ),
     );
