@@ -26,7 +26,7 @@ class CompactTissueLoadingCard extends StatefulWidget {
   /// Currently selected profile point index (for heat map cursor)
   final int? selectedIndex;
 
-  /// Optional subtitle text (e.g. "@3:42") shown when cursor is active
+  /// Optional time label (e.g. "at 3:42") shown next to the title on hover
   final String? subtitle;
 
   /// Called when user hovers over a time index on the heat map.
@@ -75,9 +75,9 @@ class _CompactTissueLoadingCardState extends State<CompactTissueLoadingCard> {
                   ),
                 ),
                 if (widget.subtitle != null) ...[
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   Text(
-                    '@${widget.subtitle!}',
+                    '@ ${widget.subtitle!}',
                     style: textTheme.labelSmall?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                     ),

@@ -438,6 +438,15 @@ class CompactO2ToxicityPanel extends StatelessWidget {
           context.l10n.diveLog_detail_section_oxygenToxicity,
           style: textTheme.titleSmall,
         ),
+        if (subtitle != null) ...[
+          const SizedBox(width: 6),
+          Text(
+            '@ $subtitle',
+            style: textTheme.labelSmall?.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
         if (isWarning) ...[
           const SizedBox(width: 6),
           Semantics(
@@ -636,18 +645,6 @@ class CompactO2ToxicityPanel extends StatelessWidget {
 
     return Row(
       children: [
-        // Time (only when a point is selected)
-        if (isLiveMode)
-          Expanded(
-            child: _buildCompactMetric(
-              context,
-              value: subtitle!,
-              label: context.l10n.diveLog_deco_label_time,
-              textTheme: textTheme,
-              colorScheme: colorScheme,
-            ),
-          ),
-
         // OTU (dynamic / total)
         Expanded(
           child: _buildCompactMetric(

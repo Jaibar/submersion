@@ -253,19 +253,16 @@ class _TissueHeatMapStripState extends State<TissueHeatMapStrip> {
         onExit: (_) => _removeTooltip(),
         child: GestureDetector(
           onTapDown: (details) {
-            final (timeIdx, compIdx) =
-                _cellAt(
-                  details.localPosition,
-                  (context.findRenderObject() as RenderBox).size,
-                ) ??
-                (-1, -1);
-            // Toggle: tap same cell hides tooltip
-            if (timeIdx == _hoveredTimeIdx && compIdx == _hoveredCompIdx) {
-              _removeTooltip();
-            } else {
-              _showTooltipForPosition(details.localPosition);
-            }
+            _showTooltipForPosition(details.localPosition);
           },
+          onTapUp: (_) => _removeTooltip(),
+          onHorizontalDragStart: (details) {
+            _showTooltipForPosition(details.localPosition);
+          },
+          onHorizontalDragUpdate: (details) {
+            _showTooltipForPosition(details.localPosition);
+          },
+          onHorizontalDragEnd: (_) => _removeTooltip(),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: SizedBox(

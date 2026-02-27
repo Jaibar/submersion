@@ -1087,58 +1087,78 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
           )
         : null;
 
-    return IntrinsicHeight(
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // Left column: Deco Status + O2 Toxicity
-          Expanded(
-            child: Column(
-              children: [
-                CompactDecoStatusCard(status: status, subtitle: timeSubtitle),
-                const SizedBox(height: 8),
-                CompactO2ToxicityPanel(
-                  exposure: analysis.o2Exposure,
-                  selectedPpO2:
-                      _selectedPointIndex != null &&
-                          _selectedPointIndex! < analysis.ppO2Curve.length
-                      ? analysis.ppO2Curve[_selectedPointIndex!]
-                      : null,
-                  selectedCns:
-                      _selectedPointIndex != null &&
-                          analysis.cnsCurve != null &&
-                          _selectedPointIndex! < analysis.cnsCurve!.length
-                      ? analysis.cnsCurve![_selectedPointIndex!]
-                      : null,
-                  selectedOtu:
-                      _selectedPointIndex != null &&
-                          analysis.otuCurve != null &&
-                          _selectedPointIndex! < analysis.otuCurve!.length
-                      ? analysis.otuCurve![_selectedPointIndex!]
-                      : null,
-                  subtitle: timeSubtitle,
+    final tissueCard = CompactTissueLoadingCard(
+      status: status,
+      decoStatuses: analysis.decoStatuses,
+      selectedIndex: _selectedPointIndex,
+      subtitle: timeSubtitle,
+      onHeatMapHover: (index) {
+        setState(() {
+          _heatMapHoverIndex = index;
+          _selectedPointIndex = index;
+        });
+      },
+    );
+
+    final decoCard = CompactDecoStatusCard(
+      status: status,
+      subtitle: timeSubtitle,
+    );
+
+    final o2Card = CompactO2ToxicityPanel(
+      exposure: analysis.o2Exposure,
+      selectedPpO2:
+          _selectedPointIndex != null &&
+              _selectedPointIndex! < analysis.ppO2Curve.length
+          ? analysis.ppO2Curve[_selectedPointIndex!]
+          : null,
+      selectedCns:
+          _selectedPointIndex != null &&
+              analysis.cnsCurve != null &&
+              _selectedPointIndex! < analysis.cnsCurve!.length
+          ? analysis.cnsCurve![_selectedPointIndex!]
+          : null,
+      selectedOtu:
+          _selectedPointIndex != null &&
+              analysis.otuCurve != null &&
+              _selectedPointIndex! < analysis.otuCurve!.length
+          ? analysis.otuCurve![_selectedPointIndex!]
+          : null,
+      subtitle: timeSubtitle,
+    );
+
+    // Use LayoutBuilder to respond to actual panel width, not screen width.
+    // This handles both phone screens and narrow master-detail panes.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 600) {
+          // Narrow: stack vertically at full width
+          return Column(
+            children: [
+              tissueCard,
+              const SizedBox(height: 8),
+              decoCard,
+              const SizedBox(height: 8),
+              o2Card,
+            ],
+          );
+        }
+        // Wide: two-column layout
+        return IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: Column(
+                  children: [decoCard, const SizedBox(height: 8), o2Card],
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(child: tissueCard),
+            ],
           ),
-          const SizedBox(width: 8),
-          // Right column: Tissue Loading (stretches to match left column)
-          Expanded(
-            child: CompactTissueLoadingCard(
-              status: status,
-              decoStatuses: analysis.decoStatuses,
-              selectedIndex: _selectedPointIndex,
-              subtitle: timeSubtitle,
-              onHeatMapHover: (index) {
-                setState(() {
-                  _heatMapHoverIndex = index;
-                  _selectedPointIndex = index;
-                });
-              },
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 

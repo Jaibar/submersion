@@ -14,7 +14,7 @@ class CompactDecoStatusCard extends StatelessWidget {
   /// Current decompression status
   final DecoStatus status;
 
-  /// Optional subtitle text (e.g. "at 3:42") shown when cursor is active
+  /// Optional time label (e.g. "at 3:42") shown next to the title on hover
   final String? subtitle;
 
   const CompactDecoStatusCard({super.key, required this.status, this.subtitle});
@@ -60,6 +60,15 @@ class CompactDecoStatusCard extends StatelessWidget {
           context.l10n.diveLog_detail_section_decoStatus,
           style: textTheme.titleSmall,
         ),
+        if (subtitle != null) ...[
+          const SizedBox(width: 6),
+          Text(
+            '@ $subtitle',
+            style: textTheme.labelSmall?.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
         const Spacer(),
         Semantics(
           label: status.inDeco
@@ -96,18 +105,6 @@ class CompactDecoStatusCard extends StatelessWidget {
   ) {
     return Row(
       children: [
-        // Time (only when a point is selected)
-        if (subtitle != null)
-          Expanded(
-            child: _buildCompactMetric(
-              context,
-              value: subtitle!,
-              label: context.l10n.diveLog_deco_label_time,
-              textTheme: textTheme,
-              colorScheme: colorScheme,
-            ),
-          ),
-
         // NDL or Ceiling
         Expanded(
           child: _buildCompactMetric(
