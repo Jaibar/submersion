@@ -1041,6 +1041,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
             ),
             lineTouchData: LineTouchData(
               enabled: true,
+              touchSpotThreshold: 20,
+              handleBuiltInTouches: true,
               touchCallback: (event, response) {
                 if (widget.onPointSelected != null) {
                   // Clear selection on any touch-end event (finger lift,
