@@ -10,68 +10,221 @@ import 'package:submersion/features/divers/presentation/providers/diver_provider
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_list_content.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_set_list_content.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_summary_widget.dart';
 import 'package:submersion/features/equipment/presentation/pages/equipment_detail_page.dart';
 import 'package:submersion/features/equipment/presentation/pages/equipment_edit_page.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_set_detail_page.dart';
 
-class EquipmentListPage extends ConsumerWidget {
+class EquipmentListPage extends ConsumerStatefulWidget {
   const EquipmentListPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final fab = FloatingActionButton.extended(
-      onPressed: () {
-        if (ResponsiveBreakpoints.isMasterDetail(context)) {
-          final state = GoRouterState.of(context);
-          final currentPath = state.uri.path;
-          context.go('$currentPath?mode=new');
-        } else {
-          _showAddEquipmentDialog(context, ref);
-        }
-      },
-      icon: const Icon(Icons.add),
-      label: Text(context.l10n.equipment_fab_addEquipment),
-    );
+  ConsumerState<EquipmentListPage> createState() => _EquipmentListPageState();
+}
 
+class _EquipmentListPageState extends ConsumerState<EquipmentListPage>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(() {
+      if (!_tabController.indexIsChanging) {
+        setState(() {}); // Rebuild to update FAB
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  bool get _isEquipmentTab => _tabController.index == 0;
+
+  @override
+  Widget build(BuildContext context) {
     if (ResponsiveBreakpoints.isMasterDetail(context)) {
-      return MasterDetailScaffold(
-        sectionId: 'equipment',
-        masterBuilder: (context, onItemSelected, selectedId) =>
-            EquipmentListContent(
-              onItemSelected: onItemSelected,
-              selectedId: selectedId,
-              showAppBar: false,
-            ),
-        detailBuilder: (context, id) => EquipmentDetailPage(
-          equipmentId: id,
-          embedded: true,
-          onDeleted: () {
-            context.go('/equipment');
-          },
-        ),
-        summaryBuilder: (context) => const EquipmentSummaryWidget(),
-        editBuilder: (context, id, onSaved, onCancel) => EquipmentEditPage(
-          equipmentId: id,
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
-        ),
-        createBuilder: (context, onSaved, onCancel) => EquipmentEditPage(
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
-        ),
-        floatingActionButton: fab,
-      );
+      return _buildMasterDetailLayout(context);
     }
+    return _buildMobileLayout(context);
+  }
 
-    return EquipmentListContent(
-      showAppBar: true,
+  Widget _buildMobileLayout(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(context.l10n.equipment_appBar_title),
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: [
+            Tab(
+              icon: const Icon(Icons.backpack),
+              text: context.l10n.equipment_tab_equipment,
+            ),
+            Tab(
+              icon: const Icon(Icons.folder_special),
+              text: context.l10n.equipment_tab_sets,
+            ),
+          ],
+          indicatorColor: colorScheme.primary,
+          labelColor: colorScheme.primary,
+          unselectedLabelColor: colorScheme.onSurfaceVariant,
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          const EquipmentListContent(showAppBar: false),
+          const EquipmentSetListContent(showAppBar: false),
+        ],
+      ),
+      floatingActionButton: _buildFab(context),
+    );
+  }
+
+  Widget _buildMasterDetailLayout(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Column(
+      children: [
+        AppBar(
+          title: Text(context.l10n.equipment_appBar_title),
+          bottom: TabBar(
+            controller: _tabController,
+            tabs: [
+              Tab(
+                icon: const Icon(Icons.backpack),
+                text: context.l10n.equipment_tab_equipment,
+              ),
+              Tab(
+                icon: const Icon(Icons.folder_special),
+                text: context.l10n.equipment_tab_sets,
+              ),
+            ],
+            indicatorColor: colorScheme.primary,
+            labelColor: colorScheme.primary,
+            unselectedLabelColor: colorScheme.onSurfaceVariant,
+          ),
+        ),
+        Expanded(
+          child: TabBarView(
+            controller: _tabController,
+            children: [_buildEquipmentMasterDetail(), _buildSetsMasterDetail()],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEquipmentMasterDetail() {
+    return MasterDetailScaffold(
+      sectionId: 'equipment',
+      masterBuilder: (context, onItemSelected, selectedId) =>
+          EquipmentListContent(
+            onItemSelected: onItemSelected,
+            selectedId: selectedId,
+            showAppBar: false,
+          ),
+      detailBuilder: (context, id) => EquipmentDetailPage(
+        equipmentId: id,
+        embedded: true,
+        onDeleted: () {
+          context.go('/equipment');
+        },
+      ),
+      summaryBuilder: (context) => const EquipmentSummaryWidget(),
+      editBuilder: (context, id, onSaved, onCancel) => EquipmentEditPage(
+        equipmentId: id,
+        embedded: true,
+        onSaved: onSaved,
+        onCancel: onCancel,
+      ),
+      createBuilder: (context, onSaved, onCancel) => EquipmentEditPage(
+        embedded: true,
+        onSaved: onSaved,
+        onCancel: onCancel,
+      ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _showAddEquipmentDialog(context, ref),
+        onPressed: () {},
         icon: const Icon(Icons.add),
         label: Text(context.l10n.equipment_fab_addEquipment),
       ),
+    );
+  }
+
+  Widget _buildSetsMasterDetail() {
+    return MasterDetailScaffold(
+      sectionId: 'equipment-sets',
+      masterBuilder: (context, onItemSelected, selectedId) =>
+          EquipmentSetListContent(
+            onItemSelected: onItemSelected,
+            selectedId: selectedId,
+            showAppBar: false,
+          ),
+      detailBuilder: (context, id) => EquipmentSetDetailPage(setId: id),
+      summaryBuilder: (context) => _buildSetsSummary(context),
+      mobileDetailRoute: (id) => '/equipment/sets/$id',
+      mobileCreateRoute: '/equipment/sets/new',
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () {},
+        icon: const Icon(Icons.add),
+        label: Text(context.l10n.equipment_fab_addSet),
+      ),
+    );
+  }
+
+  Widget _buildSetsSummary(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.folder_special,
+              size: 64,
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              context.l10n.equipment_sets_appBar_title,
+              style: Theme.of(
+                context,
+              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              context.l10n.equipment_sets_emptyState_description,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFab(BuildContext context) {
+    if (_isEquipmentTab) {
+      return FloatingActionButton.extended(
+        onPressed: () => _showAddEquipmentDialog(context, ref),
+        icon: const Icon(Icons.add),
+        label: Text(context.l10n.equipment_fab_addEquipment),
+      );
+    }
+    return FloatingActionButton.extended(
+      onPressed: () => context.push('/equipment/sets/new'),
+      icon: const Icon(Icons.add),
+      label: Text(context.l10n.equipment_fab_addSet),
     );
   }
 
