@@ -10,6 +10,7 @@ import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_color_schemes.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 class DiverSettingsRepository {
@@ -86,6 +87,8 @@ class DiverSettingsRepository {
               cardColorGradientPreset: Value(s.cardColorGradientPreset),
               cardColorGradientStart: Value(s.cardColorGradientStart),
               cardColorGradientEnd: Value(s.cardColorGradientEnd),
+              tissueColorScheme: Value(s.tissueColorScheme.name),
+              tissueVizMode: Value(s.tissueVizMode.name),
               showMapBackgroundOnDiveCards: Value(
                 s.showMapBackgroundOnDiveCards,
               ),
@@ -192,6 +195,8 @@ class DiverSettingsRepository {
           cardColorGradientPreset: Value(settings.cardColorGradientPreset),
           cardColorGradientStart: Value(settings.cardColorGradientStart),
           cardColorGradientEnd: Value(settings.cardColorGradientEnd),
+          tissueColorScheme: Value(settings.tissueColorScheme.name),
+          tissueVizMode: Value(settings.tissueVizMode.name),
           showMapBackgroundOnDiveCards: Value(
             settings.showMapBackgroundOnDiveCards,
           ),
@@ -333,6 +338,8 @@ class DiverSettingsRepository {
       cardColorGradientPreset: row.cardColorGradientPreset,
       cardColorGradientStart: row.cardColorGradientStart,
       cardColorGradientEnd: row.cardColorGradientEnd,
+      tissueColorScheme: TissueColorScheme.fromName(row.tissueColorScheme),
+      tissueVizMode: TissueVizMode.fromName(row.tissueVizMode),
       showMapBackgroundOnDiveCards: row.showMapBackgroundOnDiveCards,
       showMapBackgroundOnSiteCards: row.showMapBackgroundOnSiteCards,
       showMaxDepthMarker: row.showMaxDepthMarker,

@@ -11,6 +11,7 @@ import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/notifications/data/services/notification_scheduler.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_color_schemes.dart';
 import 'package:submersion/features/settings/data/repositories/diver_settings_repository.dart';
 
 /// Unit system preset
@@ -138,6 +139,12 @@ class AppSettings {
   /// Custom gradient end color (ARGB int), null when using preset
   final int? cardColorGradientEnd;
 
+  /// Color scheme for tissue loading heat map
+  final TissueColorScheme tissueColorScheme;
+
+  /// Visualization mode for tissue loading display
+  final TissueVizMode tissueVizMode;
+
   /// Backward-compatible getter: true when any card coloring is active
   bool get showDepthColoredDiveCards =>
       cardColorAttribute != CardColorAttribute.none;
@@ -252,6 +259,8 @@ class AppSettings {
     this.cardColorGradientPreset = 'ocean',
     this.cardColorGradientStart,
     this.cardColorGradientEnd,
+    this.tissueColorScheme = TissueColorScheme.thermal,
+    this.tissueVizMode = TissueVizMode.heatMap,
     this.showMapBackgroundOnDiveCards = false,
     this.showMapBackgroundOnSiteCards = false,
     // Dive profile marker defaults
@@ -354,6 +363,8 @@ class AppSettings {
     int? cardColorGradientEnd,
     bool clearCardColorGradientStart = false,
     bool clearCardColorGradientEnd = false,
+    TissueColorScheme? tissueColorScheme,
+    TissueVizMode? tissueVizMode,
     bool? showMapBackgroundOnDiveCards,
     bool? showMapBackgroundOnSiteCards,
     bool? showMaxDepthMarker,
@@ -422,6 +433,8 @@ class AppSettings {
       cardColorGradientEnd: clearCardColorGradientEnd
           ? null
           : (cardColorGradientEnd ?? this.cardColorGradientEnd),
+      tissueColorScheme: tissueColorScheme ?? this.tissueColorScheme,
+      tissueVizMode: tissueVizMode ?? this.tissueVizMode,
       showMapBackgroundOnDiveCards:
           showMapBackgroundOnDiveCards ?? this.showMapBackgroundOnDiveCards,
       showMapBackgroundOnSiteCards:
@@ -779,6 +792,16 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
       cardColorGradientStart: start,
       cardColorGradientEnd: end,
     );
+    await _saveSettings();
+  }
+
+  Future<void> setTissueColorScheme(TissueColorScheme scheme) async {
+    state = state.copyWith(tissueColorScheme: scheme);
+    await _saveSettings();
+  }
+
+  Future<void> setTissueVizMode(TissueVizMode mode) async {
+    state = state.copyWith(tissueVizMode: mode);
     await _saveSettings();
   }
 
@@ -1169,4 +1192,12 @@ final defaultShowGasSwitchMarkersProvider = Provider<bool>((ref) {
   return ref.watch(
     settingsProvider.select((s) => s.defaultShowGasSwitchMarkers),
   );
+});
+
+final tissueColorSchemeProvider = Provider<TissueColorScheme>((ref) {
+  return ref.watch(settingsProvider).tissueColorScheme;
+});
+
+final tissueVizModeProvider = Provider<TissueVizMode>((ref) {
+  return ref.watch(settingsProvider).tissueVizMode;
 });

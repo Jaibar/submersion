@@ -10,6 +10,7 @@ import 'package:submersion/features/dive_log/presentation/providers/dive_provide
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/core/constants/card_color.dart';
 import 'package:submersion/core/constants/profile_metrics.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_color_schemes.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/statistics/presentation/pages/records_page.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
@@ -142,6 +143,12 @@ class _MockSettingsNotifier extends StateNotifier<AppSettings>
   @override
   Future<void> setShowMapBackgroundOnSiteCards(bool value) async =>
       state = state.copyWith(showMapBackgroundOnSiteCards: value);
+  @override
+  Future<void> setTissueColorScheme(TissueColorScheme scheme) async =>
+      state = state.copyWith(tissueColorScheme: scheme);
+  @override
+  Future<void> setTissueVizMode(TissueVizMode mode) async =>
+      state = state.copyWith(tissueVizMode: mode);
   @override
   Future<void> setShowMaxDepthMarker(bool value) async =>
       state = state.copyWith(showMaxDepthMarker: value);

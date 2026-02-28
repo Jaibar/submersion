@@ -584,6 +584,11 @@ class DiverSettings extends Table {
       text().withDefault(const Constant('ocean'))();
   IntColumn get cardColorGradientStart => integer().nullable()();
   IntColumn get cardColorGradientEnd => integer().nullable()();
+  // Tissue visualization settings
+  TextColumn get tissueColorScheme =>
+      text().withDefault(const Constant('thermal'))();
+  TextColumn get tissueVizMode =>
+      text().withDefault(const Constant('heatMap'))();
   BoolColumn get showMapBackgroundOnDiveCards =>
       boolean().withDefault(const Constant(false))();
   BoolColumn get showMapBackgroundOnSiteCards =>
@@ -1114,7 +1119,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 44;
+  int get schemaVersion => 45;
 
   @override
   MigrationStrategy get migration {
@@ -2020,6 +2025,14 @@ class AppDatabase extends _$AppDatabase {
           );
           await customStatement(
             'ALTER TABLE diver_settings ADD COLUMN end_limit REAL NOT NULL DEFAULT 30.0',
+          );
+        }
+        if (from < 45) {
+          await customStatement(
+            "ALTER TABLE diver_settings ADD COLUMN tissue_color_scheme TEXT NOT NULL DEFAULT 'thermal'",
+          );
+          await customStatement(
+            "ALTER TABLE diver_settings ADD COLUMN tissue_viz_mode TEXT NOT NULL DEFAULT 'heatMap'",
           );
         }
       },
