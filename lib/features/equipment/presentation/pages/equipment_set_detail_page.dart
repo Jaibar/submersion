@@ -250,7 +250,7 @@ class EquipmentSetDetailPage extends ConsumerWidget {
             .read(equipmentSetListNotifierProvider.notifier)
             .deleteSet(setId);
         if (context.mounted) {
-          context.go('/equipment/sets');
+          context.go('/equipment');
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(context.l10n.equipment_setDetail_snackbar_deleted),

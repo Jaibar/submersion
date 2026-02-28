@@ -162,11 +162,6 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
         title: Text(context.l10n.equipment_appBar_title),
         actions: [
           IconButton(
-            icon: const Icon(Icons.folder_outlined),
-            tooltip: context.l10n.equipment_list_setsTooltip,
-            onPressed: () => context.push('/equipment/sets'),
-          ),
-          IconButton(
             icon: const Icon(Icons.sort),
             tooltip: context.l10n.equipment_list_sortTooltip,
             onPressed: () => _showSortSheet(context),
@@ -212,11 +207,6 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
           ),
           const Spacer(),
-          IconButton(
-            icon: const Icon(Icons.folder_outlined, size: 20),
-            tooltip: context.l10n.equipment_list_setsTooltip,
-            onPressed: () => context.push('/equipment/sets'),
-          ),
           IconButton(
             icon: const Icon(Icons.sort, size: 20),
             tooltip: context.l10n.equipment_list_sortTooltip,

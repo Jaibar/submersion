@@ -337,11 +337,6 @@ class EquipmentSummaryWidget extends ConsumerWidget {
               icon: const Icon(Icons.add),
               label: Text(context.l10n.equipment_summary_addEquipmentButton),
             ),
-            OutlinedButton.icon(
-              onPressed: () => context.push('/equipment/sets'),
-              icon: const Icon(Icons.folder),
-              label: Text(context.l10n.equipment_summary_equipmentSetsButton),
-            ),
           ],
         ),
       ],
