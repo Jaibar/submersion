@@ -569,6 +569,11 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
               _startFocalPoint = details.localFocalPoint;
             },
             onScaleUpdate: (details) {
+              // Only apply zoom/pan for multi-touch (pinch) gestures.
+              // Single-finger drag is handled by fl_chart's touchCallback
+              // without gesture arena disambiguation delay.
+              if (details.pointerCount < 2) return;
+
               setState(() {
                 // Handle zoom
                 final newZoom = (_previousZoom * details.scale).clamp(
