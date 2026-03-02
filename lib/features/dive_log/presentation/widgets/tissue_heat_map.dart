@@ -117,6 +117,13 @@ class TissueHeatMapStrip extends StatefulWidget {
   /// The value is the compartment index (0-based).
   final ValueChanged<int?>? onCompartmentHoverChanged;
 
+  /// When true, the strip fills its parent's height instead of using [height].
+  final bool flexible;
+
+  /// Index of the compartment to highlight with an outline (0-based).
+  /// Typically driven by hover on the bar chart or this heat map itself.
+  final int? hoveredCompartmentIndex;
+
   const TissueHeatMapStrip({
     super.key,
     required this.decoStatuses,
@@ -125,6 +132,8 @@ class TissueHeatMapStrip extends StatefulWidget {
     required this.colorFn,
     this.onHoverIndexChanged,
     this.onCompartmentHoverChanged,
+    this.flexible = false,
+    this.hoveredCompartmentIndex,
   });
 
   @override
@@ -276,7 +285,7 @@ class _TissueHeatMapStripState extends State<TissueHeatMapStrip> {
           child: ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: SizedBox(
-              height: widget.height,
+              height: widget.flexible ? null : widget.height,
               width: double.infinity,
               child: CustomPaint(
                 painter: _TissueHeatMapPainter(
@@ -284,6 +293,8 @@ class _TissueHeatMapStripState extends State<TissueHeatMapStrip> {
                   selectedIndex: widget.selectedIndex,
                   cursorColor: colorScheme.onSurface,
                   colorFn: widget.colorFn,
+                  hoveredCompartmentIndex: widget.hoveredCompartmentIndex,
+                  outlineColor: colorScheme.onSurface,
                 ),
               ),
             ),
@@ -367,11 +378,19 @@ class _TissueHeatMapPainter extends CustomPainter {
   /// Color function mapping tissue loading percentage to a color.
   final TissueColorFn colorFn;
 
+  /// Index of the compartment row to outline (0-based), or null for none.
+  final int? hoveredCompartmentIndex;
+
+  /// Color used for the compartment outline.
+  final Color outlineColor;
+
   _TissueHeatMapPainter({
     required this.decoStatuses,
     required this.selectedIndex,
     required this.cursorColor,
     required this.colorFn,
+    this.hoveredCompartmentIndex,
+    this.outlineColor = Colors.white,
   });
 
   @override
@@ -433,6 +452,22 @@ class _TissueHeatMapPainter extends CustomPainter {
         cursorPaint,
       );
     }
+
+    // Draw outline around hovered compartment row
+    if (hoveredCompartmentIndex != null &&
+        hoveredCompartmentIndex! >= 0 &&
+        hoveredCompartmentIndex! < numCompartments) {
+      final y = hoveredCompartmentIndex! * cellHeight;
+      final outlinePaint = Paint()
+        ..color = outlineColor.withValues(alpha: 0.8)
+        ..strokeWidth = 1.5
+        ..style = PaintingStyle.stroke;
+
+      canvas.drawRect(
+        Rect.fromLTWH(0, y, size.width, cellHeight),
+        outlinePaint,
+      );
+    }
   }
 
   // colorFn equality works because colorFnForScheme always returns
@@ -441,6 +476,7 @@ class _TissueHeatMapPainter extends CustomPainter {
   bool shouldRepaint(_TissueHeatMapPainter oldDelegate) {
     return oldDelegate.decoStatuses != decoStatuses ||
         oldDelegate.selectedIndex != selectedIndex ||
-        oldDelegate.colorFn != colorFn;
+        oldDelegate.colorFn != colorFn ||
+        oldDelegate.hoveredCompartmentIndex != hoveredCompartmentIndex;
   }
 }

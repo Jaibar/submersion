@@ -1,0 +1,386 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/trips/data/repositories/itinerary_day_repository.dart';
+import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
+import 'package:submersion/features/trips/domain/entities/itinerary_day.dart';
+import 'package:submersion/features/trips/domain/entities/trip.dart';
+
+import '../../../../helpers/test_database.dart';
+
+void main() {
+  late ItineraryDayRepository repository;
+  late TripRepository tripRepository;
+  late String testTripId;
+
+  final startDate = DateTime(2025, 3, 1);
+  final endDate = DateTime(2025, 3, 7);
+
+  Trip createTestTrip({String id = '', String name = 'Test Trip'}) {
+    final now = DateTime.now();
+    return Trip(
+      id: id,
+      name: name,
+      startDate: startDate,
+      endDate: endDate,
+      createdAt: now,
+      updatedAt: now,
+    );
+  }
+
+  ItineraryDay createTestDay({
+    String id = '',
+    String? tripId,
+    int dayNumber = 1,
+    DateTime? date,
+    DayType dayType = DayType.diveDay,
+    String? portName,
+    double? latitude,
+    double? longitude,
+    String notes = '',
+  }) {
+    final now = DateTime.now();
+    return ItineraryDay(
+      id: id,
+      tripId: tripId ?? testTripId,
+      dayNumber: dayNumber,
+      date: date ?? startDate,
+      dayType: dayType,
+      portName: portName,
+      latitude: latitude,
+      longitude: longitude,
+      notes: notes,
+      createdAt: now,
+      updatedAt: now,
+    );
+  }
+
+  setUp(() async {
+    await setUpTestDatabase();
+    repository = ItineraryDayRepository();
+    tripRepository = TripRepository();
+
+    // Create a trip to satisfy FK constraint
+    final trip = await tripRepository.createTrip(
+      createTestTrip(name: 'Itinerary Test Trip'),
+    );
+    testTripId = trip.id;
+  });
+
+  tearDown(() async {
+    await tearDownTestDatabase();
+  });
+
+  group('ItineraryDayRepository', () {
+    group('getByTripId', () {
+      test('should return empty list when no days exist', () async {
+        final result = await repository.getByTripId(testTripId);
+
+        expect(result, isEmpty);
+      });
+
+      test('should return empty list for non-existent trip id', () async {
+        final result = await repository.getByTripId('non-existent-id');
+
+        expect(result, isEmpty);
+      });
+    });
+
+    group('saveAll', () {
+      test(
+        'should save multiple days and getByTripId returns them ordered by dayNumber',
+        () async {
+          final days = [
+            createTestDay(
+              dayNumber: 3,
+              date: DateTime(2025, 3, 3),
+              dayType: DayType.diveDay,
+            ),
+            createTestDay(
+              dayNumber: 1,
+              date: DateTime(2025, 3, 1),
+              dayType: DayType.embark,
+            ),
+            createTestDay(
+              dayNumber: 2,
+              date: DateTime(2025, 3, 2),
+              dayType: DayType.diveDay,
+            ),
+          ];
+
+          await repository.saveAll(days);
+          final result = await repository.getByTripId(testTripId);
+
+          expect(result, hasLength(3));
+          expect(result[0].dayNumber, equals(1));
+          expect(result[1].dayNumber, equals(2));
+          expect(result[2].dayNumber, equals(3));
+          expect(result[0].dayType, equals(DayType.embark));
+          expect(result[1].dayType, equals(DayType.diveDay));
+          expect(result[2].dayType, equals(DayType.diveDay));
+        },
+      );
+
+      test('should generate UUID for days with empty id', () async {
+        final days = [
+          createTestDay(id: '', dayNumber: 1, date: DateTime(2025, 3, 1)),
+        ];
+
+        await repository.saveAll(days);
+        final result = await repository.getByTripId(testTripId);
+
+        expect(result, hasLength(1));
+        expect(result[0].id, isNotEmpty);
+      });
+
+      test('should save days with all fields', () async {
+        final days = [
+          createTestDay(
+            dayNumber: 1,
+            date: DateTime(2025, 3, 1),
+            dayType: DayType.portDay,
+            portName: 'Male Harbor',
+            latitude: 4.1755,
+            longitude: 73.5093,
+            notes: 'Departure port',
+          ),
+        ];
+
+        await repository.saveAll(days);
+        final result = await repository.getByTripId(testTripId);
+
+        expect(result, hasLength(1));
+        expect(result[0].dayType, equals(DayType.portDay));
+        expect(result[0].portName, equals('Male Harbor'));
+        expect(result[0].latitude, closeTo(4.1755, 0.001));
+        expect(result[0].longitude, closeTo(73.5093, 0.001));
+        expect(result[0].notes, equals('Departure port'));
+      });
+    });
+
+    group('updateDay', () {
+      test(
+        'should update dayType, portName, and notes for a single day',
+        () async {
+          final days = [
+            createTestDay(
+              dayNumber: 1,
+              date: DateTime(2025, 3, 1),
+              dayType: DayType.diveDay,
+              notes: 'Original notes',
+            ),
+          ];
+
+          await repository.saveAll(days);
+          final saved = await repository.getByTripId(testTripId);
+          final dayToUpdate = saved[0].copyWith(
+            dayType: DayType.portDay,
+            portName: 'Hurghada',
+            notes: 'Updated notes',
+          );
+
+          await repository.updateDay(dayToUpdate);
+          final result = await repository.getByTripId(testTripId);
+
+          expect(result, hasLength(1));
+          expect(result[0].dayType, equals(DayType.portDay));
+          expect(result[0].portName, equals('Hurghada'));
+          expect(result[0].notes, equals('Updated notes'));
+        },
+      );
+
+      test('should update latitude and longitude', () async {
+        final days = [createTestDay(dayNumber: 1, date: DateTime(2025, 3, 1))];
+
+        await repository.saveAll(days);
+        final saved = await repository.getByTripId(testTripId);
+        final dayToUpdate = saved[0].copyWith(
+          latitude: 27.2579,
+          longitude: 33.8116,
+        );
+
+        await repository.updateDay(dayToUpdate);
+        final result = await repository.getByTripId(testTripId);
+
+        expect(result[0].latitude, closeTo(27.2579, 0.001));
+        expect(result[0].longitude, closeTo(33.8116, 0.001));
+      });
+
+      test('should preserve createdAt when updating', () async {
+        final days = [createTestDay(dayNumber: 1, date: DateTime(2025, 3, 1))];
+
+        await repository.saveAll(days);
+        final saved = await repository.getByTripId(testTripId);
+        final originalCreatedAt = saved[0].createdAt;
+
+        // Small delay so updatedAt would differ
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        final dayToUpdate = saved[0].copyWith(notes: 'New notes');
+        await repository.updateDay(dayToUpdate);
+        final result = await repository.getByTripId(testTripId);
+
+        expect(
+          result[0].createdAt.millisecondsSinceEpoch,
+          equals(originalCreatedAt.millisecondsSinceEpoch),
+        );
+        expect(result[0].notes, equals('New notes'));
+      });
+    });
+
+    group('deleteByTripId', () {
+      test('should remove all days for a trip', () async {
+        final days = [
+          createTestDay(dayNumber: 1, date: DateTime(2025, 3, 1)),
+          createTestDay(dayNumber: 2, date: DateTime(2025, 3, 2)),
+          createTestDay(dayNumber: 3, date: DateTime(2025, 3, 3)),
+        ];
+
+        await repository.saveAll(days);
+
+        // Verify days exist
+        final beforeDelete = await repository.getByTripId(testTripId);
+        expect(beforeDelete, hasLength(3));
+
+        await repository.deleteByTripId(testTripId);
+
+        final afterDelete = await repository.getByTripId(testTripId);
+        expect(afterDelete, isEmpty);
+      });
+
+      test('should be a no-op when no days exist', () async {
+        await expectLater(repository.deleteByTripId(testTripId), completes);
+      });
+
+      test('should be a no-op for non-existent trip id', () async {
+        await expectLater(
+          repository.deleteByTripId('non-existent-trip'),
+          completes,
+        );
+      });
+    });
+
+    group('regenerateForTrip', () {
+      test('should generate correct days for date range', () async {
+        final result = await repository.regenerateForTrip(
+          testTripId,
+          DateTime(2025, 3, 1),
+          DateTime(2025, 3, 5),
+        );
+
+        expect(result, hasLength(5));
+        expect(result[0].dayNumber, equals(1));
+        expect(result[0].dayType, equals(DayType.embark));
+        expect(result[0].date, equals(DateTime(2025, 3, 1)));
+
+        expect(result[1].dayNumber, equals(2));
+        expect(result[1].dayType, equals(DayType.diveDay));
+
+        expect(result[2].dayNumber, equals(3));
+        expect(result[2].dayType, equals(DayType.diveDay));
+
+        expect(result[3].dayNumber, equals(4));
+        expect(result[3].dayType, equals(DayType.diveDay));
+
+        expect(result[4].dayNumber, equals(5));
+        expect(result[4].dayType, equals(DayType.disembark));
+        expect(result[4].date, equals(DateTime(2025, 3, 5)));
+
+        // Verify they are persisted
+        final fetched = await repository.getByTripId(testTripId);
+        expect(fetched, hasLength(5));
+      });
+
+      test(
+        'should preserve notes and dayType from overlapping dates when range changes',
+        () async {
+          // First, generate days for March 1-5
+          await repository.regenerateForTrip(
+            testTripId,
+            DateTime(2025, 3, 1),
+            DateTime(2025, 3, 5),
+          );
+
+          // Customize day 2 (March 2) and day 3 (March 3)
+          final existingDays = await repository.getByTripId(testTripId);
+          final day2 = existingDays[1].copyWith(
+            dayType: DayType.portDay,
+            portName: 'Hurghada',
+            latitude: 27.2579,
+            longitude: 33.8116,
+            notes: 'Port call for supplies',
+          );
+          final day3 = existingDays[2].copyWith(
+            notes: 'Great visibility expected',
+          );
+          await repository.updateDay(day2);
+          await repository.updateDay(day3);
+
+          // Now regenerate for March 2-6 (shifted range)
+          final result = await repository.regenerateForTrip(
+            testTripId,
+            DateTime(2025, 3, 2),
+            DateTime(2025, 3, 6),
+          );
+
+          expect(result, hasLength(5));
+
+          // March 2 is now Day 1 (embark), but should preserve portName,
+          // latitude, longitude, notes from the old day. dayType should
+          // come from the old day.
+          expect(result[0].dayNumber, equals(1));
+          expect(result[0].date, equals(DateTime(2025, 3, 2)));
+          expect(result[0].dayType, equals(DayType.portDay));
+          expect(result[0].portName, equals('Hurghada'));
+          expect(result[0].latitude, closeTo(27.2579, 0.001));
+          expect(result[0].longitude, closeTo(33.8116, 0.001));
+          expect(result[0].notes, equals('Port call for supplies'));
+
+          // March 3 is now Day 2, should preserve notes
+          expect(result[1].dayNumber, equals(2));
+          expect(result[1].date, equals(DateTime(2025, 3, 3)));
+          expect(result[1].notes, equals('Great visibility expected'));
+
+          // March 4-6 are new days with no overlap
+          expect(result[2].dayNumber, equals(3));
+          expect(result[2].notes, isEmpty);
+          expect(result[3].dayNumber, equals(4));
+          expect(result[4].dayNumber, equals(5));
+          expect(result[4].dayType, equals(DayType.disembark));
+        },
+      );
+
+      test('should work with no existing days', () async {
+        final result = await repository.regenerateForTrip(
+          testTripId,
+          DateTime(2025, 3, 1),
+          DateTime(2025, 3, 3),
+        );
+
+        expect(result, hasLength(3));
+        expect(result[0].dayType, equals(DayType.embark));
+        expect(result[1].dayType, equals(DayType.diveDay));
+        expect(result[2].dayType, equals(DayType.disembark));
+      });
+
+      test('should replace all old days with new ones', () async {
+        // Generate initial 7-day itinerary
+        await repository.regenerateForTrip(
+          testTripId,
+          DateTime(2025, 3, 1),
+          DateTime(2025, 3, 7),
+        );
+        final initial = await repository.getByTripId(testTripId);
+        expect(initial, hasLength(7));
+
+        // Regenerate with shorter range
+        await repository.regenerateForTrip(
+          testTripId,
+          DateTime(2025, 3, 1),
+          DateTime(2025, 3, 3),
+        );
+        final regenerated = await repository.getByTripId(testTripId);
+        expect(regenerated, hasLength(3));
+      });
+    });
+  });
+}

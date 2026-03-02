@@ -430,3 +430,40 @@ enum AscentRateCategory {
     return AscentRateCategory.danger;
   }
 }
+
+/// Trip type classification
+enum TripType {
+  shore('Shore'),
+  liveaboard('Liveaboard'),
+  resort('Resort'),
+  dayTrip('Day Trip');
+
+  final String displayName;
+  const TripType(this.displayName);
+
+  static TripType fromName(String name) {
+    return TripType.values.firstWhere(
+      (e) => e.name == name,
+      orElse: () => TripType.shore,
+    );
+  }
+}
+
+/// Itinerary day type for liveaboard trips
+enum DayType {
+  diveDay('Dive Day'),
+  seaDay('Sea Day'),
+  portDay('Port Day'),
+  embark('Embark'),
+  disembark('Disembark');
+
+  final String displayName;
+  const DayType(this.displayName);
+
+  static DayType fromName(String name) {
+    return DayType.values.firstWhere(
+      (e) => e.name == name,
+      orElse: () => DayType.diveDay,
+    );
+  }
+}

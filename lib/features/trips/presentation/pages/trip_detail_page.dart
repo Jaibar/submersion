@@ -1,22 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
-import 'package:latlong2/latlong.dart';
 
-import 'package:submersion/core/providers/async_value_extensions.dart';
-import 'package:submersion/features/dive_log/domain/entities/dive.dart';
-import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
-import 'package:submersion/features/media/data/services/photo_picker_service.dart';
-import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
-import 'package:submersion/features/media/presentation/providers/media_providers.dart';
-import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
-import 'package:submersion/features/media/presentation/widgets/scan_results_dialog.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
-import 'package:submersion/features/trips/presentation/providers/trip_media_providers.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_itinerary_tab.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_overview_tab.dart';
 import 'package:submersion/features/trips/presentation/widgets/trip_photo_section.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
@@ -98,48 +91,17 @@ class _TripDetailContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final trip = tripWithStats.trip;
-    final divesAsync = ref.watch(divesForTripProvider(trip.id));
-    final dateFormat = DateFormat.yMMMd();
 
-    final body = SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Trip header with map background
-          _buildTripHeader(context, ref, trip, dateFormat),
-          const SizedBox(height: 24),
+    if (trip.isLiveaboard) {
+      return _buildLiveaboardLayout(context, ref, trip);
+    }
 
-          // Trip info
-          if (trip.location != null ||
-              trip.resortName != null ||
-              trip.liveaboardName != null) ...[
-            _buildInfoSection(context, trip),
-            const SizedBox(height: 24),
-          ],
+    return _buildStandardLayout(context, ref, trip);
+  }
 
-          // Statistics
-          _buildStatsSection(context),
-          const SizedBox(height: 24),
-
-          // Notes
-          if (trip.notes.isNotEmpty) ...[
-            _buildNotesSection(context, trip),
-            const SizedBox(height: 24),
-          ],
-
-          // Photos
-          TripPhotoSection(
-            tripId: trip.id,
-            onScanPressed: () => _showScanDialog(context, ref, trip.id),
-          ),
-          const SizedBox(height: 24),
-
-          // Dives
-          _buildDivesSection(context, ref, divesAsync),
-        ],
-      ),
-    );
+  /// Standard single-scroll layout for non-liveaboard trips.
+  Widget _buildStandardLayout(BuildContext context, WidgetRef ref, Trip trip) {
+    final body = TripOverviewTab(tripWithStats: tripWithStats);
 
     if (embedded) {
       return Column(
@@ -153,26 +115,203 @@ class _TripDetailContent extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         title: Text(trip.name),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.map_outlined),
-            tooltip: context.l10n.trips_detail_tooltip_viewOnMap,
-            onPressed: () {
-              ref.read(diveFilterProvider.notifier).state = DiveFilterState(
-                tripId: trip.id,
-              );
-              context.go('/dives?view=map');
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.edit),
-            tooltip: context.l10n.trips_detail_tooltip_edit,
-            onPressed: () => context.push('/trips/${trip.id}/edit'),
-          ),
-          _buildMoreMenu(context, ref, trip),
-        ],
+        actions: _buildAppBarActions(context, ref, trip),
       ),
       body: body,
+    );
+  }
+
+  /// Tabbed layout for liveaboard trips with 4 tabs:
+  /// Overview, Itinerary, Photos, Dives.
+  Widget _buildLiveaboardLayout(
+    BuildContext context,
+    WidgetRef ref,
+    Trip trip,
+  ) {
+    final tabbedBody = DefaultTabController(
+      length: 4,
+      child: Column(
+        children: [
+          Material(
+            color: Theme.of(context).colorScheme.surface,
+            child: TabBar(
+              tabs: [
+                Tab(text: context.l10n.trips_detail_tab_overview),
+                Tab(text: context.l10n.trips_detail_tab_itinerary),
+                Tab(text: context.l10n.trips_detail_tab_photos),
+                Tab(text: context.l10n.trips_detail_tab_dives),
+              ],
+            ),
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [
+                TripOverviewTab(tripWithStats: tripWithStats),
+                TripItineraryTab(tripId: trip.id),
+                _buildPhotosTab(context, ref, trip),
+                _buildDivesTab(context, ref, trip),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (embedded) {
+      return Column(
+        children: [
+          _buildEmbeddedHeader(context, ref, trip),
+          Expanded(child: tabbedBody),
+        ],
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(trip.name),
+        actions: _buildAppBarActions(context, ref, trip),
+      ),
+      body: tabbedBody,
+    );
+  }
+
+  /// Shared AppBar actions for both standard and liveaboard layouts.
+  List<Widget> _buildAppBarActions(
+    BuildContext context,
+    WidgetRef ref,
+    Trip trip,
+  ) {
+    return [
+      IconButton(
+        icon: const Icon(Icons.map_outlined),
+        tooltip: context.l10n.trips_detail_tooltip_viewOnMap,
+        onPressed: () {
+          ref.read(diveFilterProvider.notifier).state = DiveFilterState(
+            tripId: trip.id,
+          );
+          context.go('/dives?view=map');
+        },
+      ),
+      IconButton(
+        icon: const Icon(Icons.edit),
+        tooltip: context.l10n.trips_detail_tooltip_edit,
+        onPressed: () => context.push('/trips/${trip.id}/edit'),
+      ),
+      _buildMoreMenu(context, ref, trip),
+    ];
+  }
+
+  /// Standalone photos tab for the liveaboard tabbed layout.
+  Widget _buildPhotosTab(BuildContext context, WidgetRef ref, Trip trip) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: TripPhotoSection(tripId: trip.id),
+    );
+  }
+
+  /// Standalone dives tab for the liveaboard tabbed layout.
+  /// Shows all dives (not limited to 5 like the overview).
+  Widget _buildDivesTab(BuildContext context, WidgetRef ref, Trip trip) {
+    final divesAsync = ref.watch(divesForTripProvider(trip.id));
+    final settings = ref.watch(settingsProvider);
+    final units = UnitFormatter(settings);
+    final theme = Theme.of(context);
+    final dateFormat = DateFormat.MMMd();
+
+    return divesAsync.when(
+      data: (dives) {
+        if (dives.isEmpty) {
+          return Center(child: Text(context.l10n.trips_detail_dives_empty));
+        }
+        final sortedDives = List.of(dives)
+          ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+        return ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: sortedDives.length,
+          itemBuilder: (context, index) {
+            final dive = sortedDives[index];
+            return InkWell(
+              onTap: () => context.push('/dives/${dive.id}'),
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primaryContainer,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        '#${dive.diveNumber ?? '-'}',
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: theme.colorScheme.onPrimaryContainer,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            dive.site?.name ??
+                                context.l10n.trips_detail_dives_unknownSite,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            dateFormat.format(dive.dateTime),
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        if (dive.maxDepth != null)
+                          Text(
+                            units.formatDepth(dive.maxDepth),
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        if (dive.duration != null)
+                          Text(
+                            '${dive.duration!.inMinutes}min',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      Icons.chevron_right,
+                      color: theme.colorScheme.onSurfaceVariant,
+                      size: 20,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+      loading: () => const Center(child: CircularProgressIndicator.adaptive()),
+      error: (e, _) =>
+          Center(child: Text(context.l10n.trips_detail_dives_errorLoading)),
     );
   }
 
@@ -303,464 +442,6 @@ class _TripDetailContent extends ConsumerWidget {
     );
   }
 
-  Widget _buildTripHeader(
-    BuildContext context,
-    WidgetRef ref,
-    Trip trip,
-    DateFormat dateFormat,
-  ) {
-    final sitesAsync = ref.watch(tripSitesWithLocationsProvider(trip.id));
-    final colorScheme = Theme.of(context).colorScheme;
-    final cardColor = Theme.of(context).cardColor;
-
-    final content = Center(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            CircleAvatar(
-              radius: 50,
-              backgroundColor: colorScheme.primaryContainer,
-              child: Icon(
-                trip.isLiveaboard ? Icons.sailing : Icons.flight_takeoff,
-                size: 50,
-                color: colorScheme.onPrimaryContainer,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              trip.name,
-              style: Theme.of(context).textTheme.headlineMedium,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '${dateFormat.format(trip.startDate)} - ${dateFormat.format(trip.endDate)}',
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            Text(
-              context.l10n.trips_detail_durationDays(trip.durationDays),
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: colorScheme.primary),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    // Get sites with valid locations
-    final sites = sitesAsync.valueOrNull ?? [];
-    final sitesWithLocation = sites.where((s) => s.location != null).toList();
-
-    // If no sites with locations, return simple card
-    if (sitesWithLocation.isEmpty) {
-      return Card(clipBehavior: Clip.antiAlias, child: content);
-    }
-
-    // Convert sites to LatLng points
-    final points = sitesWithLocation
-        .map((s) => LatLng(s.location!.latitude, s.location!.longitude))
-        .toList();
-
-    // Calculate bounds to fit all points with padding
-    final bounds = LatLngBounds.fromPoints(points);
-    final center = bounds.center;
-
-    // Calculate zoom level based on bounds
-    // For a single point, use a fixed zoom; otherwise calculate based on span
-    final double zoom;
-    if (points.length == 1) {
-      zoom = 12.0;
-    } else {
-      // Approximate zoom calculation based on latitude span
-      final latSpan = bounds.north - bounds.south;
-      final lngSpan = bounds.east - bounds.west;
-      final maxSpan = latSpan > lngSpan ? latSpan : lngSpan;
-      // Rough approximation: each zoom level doubles the detail
-      // Start at zoom 10 for ~5 degree span, adjust from there
-      if (maxSpan > 5) {
-        zoom = 4.0;
-      } else if (maxSpan > 2) {
-        zoom = 6.0;
-      } else if (maxSpan > 1) {
-        zoom = 7.0;
-      } else if (maxSpan > 0.5) {
-        zoom = 8.0;
-      } else if (maxSpan > 0.2) {
-        zoom = 9.0;
-      } else if (maxSpan > 0.1) {
-        zoom = 10.0;
-      } else {
-        zoom = 11.0;
-      }
-    }
-
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: Stack(
-        children: [
-          // Map background
-          Positioned.fill(
-            child: FlutterMap(
-              options: MapOptions(
-                initialCenter: center,
-                initialZoom: zoom,
-                interactionOptions: const InteractionOptions(
-                  flags: InteractiveFlag.none,
-                ),
-              ),
-              children: [
-                TileLayer(
-                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                  userAgentPackageName: 'com.submersion.app',
-                  maxZoom: 19,
-                  tileProvider: TileCacheService.instance.isInitialized
-                      ? TileCacheService.instance.getTileProvider()
-                      : null,
-                ),
-                MarkerLayer(
-                  markers: sitesWithLocation.map((site) {
-                    return Marker(
-                      point: LatLng(
-                        site.location!.latitude,
-                        site.location!.longitude,
-                      ),
-                      width: 32,
-                      height: 32,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: colorScheme.primary,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: colorScheme.onPrimary,
-                            width: 2,
-                          ),
-                        ),
-                        child: Center(
-                          child: Icon(
-                            Icons.scuba_diving,
-                            size: 16,
-                            color: colorScheme.onPrimary,
-                          ),
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ],
-            ),
-          ),
-          // Gradient overlay from top to bottom
-          Positioned.fill(
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  stops: const [0.0, 0.3, 0.7, 1.0],
-                  colors: [
-                    cardColor.withValues(alpha: 0.3),
-                    cardColor.withValues(alpha: 0.6),
-                    cardColor.withValues(alpha: 0.85),
-                    cardColor,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          // Content
-          content,
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInfoSection(BuildContext context, Trip trip) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              context.l10n.trips_detail_sectionTitle_details,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            if (trip.location != null)
-              ListTile(
-                leading: const Icon(Icons.place),
-                title: Text(context.l10n.trips_detail_label_location),
-                subtitle: Text(trip.location!),
-                contentPadding: EdgeInsets.zero,
-              ),
-            if (trip.resortName != null)
-              ListTile(
-                leading: const Icon(Icons.hotel),
-                title: Text(context.l10n.trips_detail_label_resort),
-                subtitle: Text(trip.resortName!),
-                contentPadding: EdgeInsets.zero,
-              ),
-            if (trip.liveaboardName != null)
-              ListTile(
-                leading: const Icon(Icons.sailing),
-                title: Text(context.l10n.trips_detail_label_liveaboard),
-                subtitle: Text(trip.liveaboardName!),
-                contentPadding: EdgeInsets.zero,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatsSection(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              context.l10n.trips_detail_sectionTitle_statistics,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            _StatRow(
-              icon: Icons.scuba_diving,
-              label: context.l10n.trips_detail_stat_totalDives,
-              value: tripWithStats.diveCount.toString(),
-            ),
-            _StatRow(
-              icon: Icons.timer,
-              label: context.l10n.trips_detail_stat_totalBottomTime,
-              value: tripWithStats.formattedBottomTime,
-            ),
-            if (tripWithStats.maxDepth != null)
-              _StatRow(
-                icon: Icons.arrow_downward,
-                label: context.l10n.trips_detail_stat_maxDepth,
-                value: '${tripWithStats.maxDepth!.toStringAsFixed(1)} m',
-              ),
-            if (tripWithStats.avgDepth != null)
-              _StatRow(
-                icon: Icons.trending_flat,
-                label: context.l10n.trips_detail_stat_avgDepth,
-                value: '${tripWithStats.avgDepth!.toStringAsFixed(1)} m',
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildNotesSection(BuildContext context, Trip trip) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              context.l10n.trips_detail_sectionTitle_notes,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            Text(trip.notes),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDivesSection(
-    BuildContext context,
-    WidgetRef ref,
-    AsyncValue<List<Dive>> divesAsync,
-  ) {
-    final theme = Theme.of(context);
-    final dateFormat = DateFormat.MMMd();
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  context.l10n.trips_detail_sectionTitle_dives,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                divesAsync.when(
-                  data: (dives) => TextButton(
-                    onPressed: dives.isEmpty
-                        ? null
-                        : () {
-                            ref.read(diveFilterProvider.notifier).state =
-                                DiveFilterState(tripId: tripWithStats.trip.id);
-                            context.go('/dives');
-                          },
-                    child: Text(
-                      context.l10n.trips_detail_dives_viewAll(dives.length),
-                    ),
-                  ),
-                  loading: () => const SizedBox.shrink(),
-                  error: (e, st) => const SizedBox.shrink(),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            divesAsync.when(
-              data: (dives) {
-                if (dives.isEmpty) {
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    child: Center(
-                      child: Text(context.l10n.trips_detail_dives_empty),
-                    ),
-                  );
-                }
-                final sortedDives = List<Dive>.from(dives)
-                  ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
-                final displayDives = sortedDives.take(5).toList();
-                return Column(
-                  children: displayDives.map((dive) {
-                    final siteName =
-                        dive.site?.name ??
-                        context.l10n.trips_detail_dives_unknownSite;
-                    final diveNum = dive.diveNumber ?? '-';
-                    final depthStr = dive.maxDepth != null
-                        ? ', ${dive.maxDepth!.toStringAsFixed(1)}m'
-                        : '';
-                    final durationStr = dive.duration != null
-                        ? ', ${dive.duration!.inMinutes} minutes'
-                        : '';
-                    return Semantics(
-                      button: true,
-                      label:
-                          'Dive $diveNum at $siteName, ${dateFormat.format(dive.dateTime)}$depthStr$durationStr. Tap to view details',
-                      child: InkWell(
-                        onTap: () => context.push('/dives/${dive.id}'),
-                        borderRadius: BorderRadius.circular(8),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 8,
-                            horizontal: 4,
-                          ),
-                          child: Row(
-                            children: [
-                              Container(
-                                width: 40,
-                                height: 40,
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.primaryContainer,
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                alignment: Alignment.center,
-                                child: Text(
-                                  '#${dive.diveNumber ?? '-'}',
-                                  style: theme.textTheme.labelMedium?.copyWith(
-                                    color: theme.colorScheme.onPrimaryContainer,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      dive.site?.name ??
-                                          context
-                                              .l10n
-                                              .trips_detail_dives_unknownSite,
-                                      style: theme.textTheme.bodyMedium
-                                          ?.copyWith(
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      dateFormat.format(dive.dateTime),
-                                      style: theme.textTheme.bodySmall
-                                          ?.copyWith(
-                                            color: theme
-                                                .colorScheme
-                                                .onSurfaceVariant,
-                                          ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  if (dive.maxDepth != null)
-                                    Text(
-                                      '${dive.maxDepth!.toStringAsFixed(1)}m',
-                                      style: theme.textTheme.bodyMedium
-                                          ?.copyWith(
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                    ),
-                                  if (dive.duration != null)
-                                    Text(
-                                      '${dive.duration!.inMinutes}min',
-                                      style: theme.textTheme.bodySmall
-                                          ?.copyWith(
-                                            color: theme
-                                                .colorScheme
-                                                .onSurfaceVariant,
-                                          ),
-                                    ),
-                                ],
-                              ),
-                              const SizedBox(width: 4),
-                              Icon(
-                                Icons.chevron_right,
-                                color: theme.colorScheme.onSurfaceVariant,
-                                size: 20,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                );
-              },
-              loading: () => const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(16),
-                  child: CircularProgressIndicator.adaptive(),
-                ),
-              ),
-              error: (e, st) =>
-                  Text(context.l10n.trips_detail_dives_errorLoading),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Future<bool> _showDeleteConfirmation(BuildContext context) async {
     return await showDialog<bool>(
           context: context,
@@ -835,200 +516,6 @@ class _TripDetailContent extends ConsumerWidget {
                   );
                 },
               ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showScanDialog(
-    BuildContext context,
-    WidgetRef ref,
-    String tripId,
-  ) async {
-    // Show loading indicator
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-
-    try {
-      // Get trip and dives
-      final trip = tripWithStats.trip;
-      final dives = await ref.read(divesForTripProvider(tripId).future);
-
-      if (dives.isEmpty) {
-        if (context.mounted) Navigator.of(context).pop();
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(context.l10n.trips_detail_scan_addDivesFirst),
-            ),
-          );
-        }
-        return;
-      }
-
-      // Get existing asset IDs to filter out
-      final mediaByDive = await ref.read(mediaForTripProvider(tripId).future);
-      final existingIds = <String>{};
-      for (final mediaList in mediaByDive.values) {
-        for (final item in mediaList) {
-          if (item.platformAssetId != null) {
-            existingIds.add(item.platformAssetId!);
-          }
-        }
-      }
-
-      // Scan gallery
-      final photoPickerService = ref.read(photoPickerServiceProvider);
-      final result = await TripMediaScanner.scanGalleryForTrip(
-        dives: dives,
-        tripStartDate: trip.startDate,
-        tripEndDate: trip.endDate,
-        existingAssetIds: existingIds,
-        photoPickerService: photoPickerService,
-      );
-
-      if (!context.mounted) return;
-      Navigator.of(context).pop(); // Dismiss loading
-
-      if (result == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.trips_detail_scan_accessDenied)),
-        );
-        return;
-      }
-
-      // Show results dialog
-      final dialogResult = await showScanResultsDialog(
-        context: context,
-        scanResult: result,
-      );
-
-      if (dialogResult.confirmed != true) return;
-      if (!context.mounted) return;
-
-      // Import selected photos
-      await _importPhotos(context, ref, tripId, dialogResult.selectedPhotos);
-    } catch (e) {
-      if (context.mounted) Navigator.of(context).pop();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(context.l10n.trips_detail_scan_errorScanning('$e')),
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> _importPhotos(
-    BuildContext context,
-    WidgetRef ref,
-    String tripId,
-    Map<Dive, List<AssetInfo>> photosByDive,
-  ) async {
-    // Show progress
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        content: Row(
-          children: [
-            const CircularProgressIndicator(),
-            const SizedBox(width: 16),
-            Text(context.l10n.trips_detail_scan_linkingPhotos),
-          ],
-        ),
-      ),
-    );
-
-    try {
-      final importService = ref.read(mediaImportServiceProvider);
-      int totalImported = 0;
-
-      for (final entry in photosByDive.entries) {
-        final dive = entry.key;
-        final assets = entry.value;
-
-        final result = await importService.importPhotosForDive(
-          selectedAssets: assets,
-          dive: dive,
-        );
-
-        totalImported += result.imported.length;
-
-        // Invalidate media providers for this dive
-        ref.invalidate(mediaForDiveProvider(dive.id));
-        ref.invalidate(mediaCountForDiveProvider(dive.id));
-      }
-
-      // Invalidate trip-level providers
-      ref.invalidate(mediaForTripProvider(tripId));
-      ref.invalidate(mediaCountForTripProvider(tripId));
-      ref.invalidate(flatMediaListForTripProvider(tripId));
-
-      if (!context.mounted) return;
-      Navigator.of(context).pop(); // Dismiss progress
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            context.l10n.trips_detail_scan_linkedPhotos(totalImported),
-          ),
-        ),
-      );
-    } catch (e) {
-      if (context.mounted) Navigator.of(context).pop();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(context.l10n.trips_detail_scan_errorLinking('$e')),
-          ),
-        );
-      }
-    }
-  }
-}
-
-class _StatRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-
-  const _StatRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      label: '$label: $value',
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Row(
-          children: [
-            ExcludeSemantics(
-              child: Icon(
-                icon,
-                size: 20,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
-            ),
-            Text(
-              value,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.bold),
             ),
           ],
         ),

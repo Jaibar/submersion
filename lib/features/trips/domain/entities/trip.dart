@@ -1,4 +1,5 @@
 import 'package:equatable/equatable.dart';
+import 'package:submersion/core/constants/enums.dart';
 
 /// Dive trip entity - represents a group of dives at a destination
 class Trip extends Equatable {
@@ -10,6 +11,7 @@ class Trip extends Equatable {
   final String? location;
   final String? resortName;
   final String? liveaboardName;
+  final TripType tripType;
   final String notes;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -23,6 +25,7 @@ class Trip extends Equatable {
     this.location,
     this.resortName,
     this.liveaboardName,
+    this.tripType = TripType.shore,
     this.notes = '',
     required this.createdAt,
     required this.updatedAt,
@@ -32,10 +35,10 @@ class Trip extends Equatable {
   int get durationDays => endDate.difference(startDate).inDays + 1;
 
   /// Check if this is a liveaboard trip
-  bool get isLiveaboard => liveaboardName != null && liveaboardName!.isNotEmpty;
+  bool get isLiveaboard => tripType == TripType.liveaboard;
 
   /// Check if this is a resort-based trip
-  bool get isResort => resortName != null && resortName!.isNotEmpty;
+  bool get isResort => tripType == TripType.resort;
 
   /// Get display subtitle (resort, liveaboard, or location)
   String? get subtitle {
@@ -61,6 +64,7 @@ class Trip extends Equatable {
     Object? location = _undefined,
     Object? resortName = _undefined,
     Object? liveaboardName = _undefined,
+    TripType? tripType,
     String? notes,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -78,6 +82,7 @@ class Trip extends Equatable {
       liveaboardName: liveaboardName == _undefined
           ? this.liveaboardName
           : liveaboardName as String?,
+      tripType: tripType ?? this.tripType,
       notes: notes ?? this.notes,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -94,6 +99,7 @@ class Trip extends Equatable {
     location,
     resortName,
     liveaboardName,
+    tripType,
     notes,
     createdAt,
     updatedAt,

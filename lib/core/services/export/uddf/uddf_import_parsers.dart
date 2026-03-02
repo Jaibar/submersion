@@ -162,6 +162,10 @@ class UddfImportParsers {
   ) {
     trip['resortName'] = getElementText(tripExtElement, 'resortname');
     trip['liveaboardName'] = getElementText(tripExtElement, 'liveaboardname');
+    final tripType = getElementText(tripExtElement, 'triptype');
+    if (tripType != null) {
+      trip['tripType'] = tripType;
+    }
   }
 
   static Map<String, dynamic> parseTag(XmlElement tagElement) {

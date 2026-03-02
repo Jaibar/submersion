@@ -3,7 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/trips/data/repositories/itinerary_day_repository.dart';
+import 'package:submersion/features/trips/data/repositories/liveaboard_details_repository.dart';
+import 'package:submersion/features/trips/domain/entities/itinerary_day.dart';
+import 'package:submersion/features/trips/domain/entities/liveaboard_details.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
@@ -34,6 +39,16 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
   final _liveaboardController = TextEditingController();
   final _notesController = TextEditingController();
 
+  TripType _tripType = TripType.shore;
+  final _vesselNameController = TextEditingController();
+  final _operatorController = TextEditingController();
+  final _cabinTypeController = TextEditingController();
+  final _capacityController = TextEditingController();
+  final _embarkPortController = TextEditingController();
+  final _disembarkPortController = TextEditingController();
+  String? _vesselType;
+  LiveaboardDetails? _originalLiveaboardDetails;
+
   DateTime _startDate = DateTime.now();
   DateTime _endDate = DateTime.now().add(const Duration(days: 7));
   bool _isLoading = false;
@@ -54,6 +69,12 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
     _resortController.addListener(_onFieldChanged);
     _liveaboardController.addListener(_onFieldChanged);
     _notesController.addListener(_onFieldChanged);
+    _vesselNameController.addListener(_onFieldChanged);
+    _operatorController.addListener(_onFieldChanged);
+    _cabinTypeController.addListener(_onFieldChanged);
+    _capacityController.addListener(_onFieldChanged);
+    _embarkPortController.addListener(_onFieldChanged);
+    _disembarkPortController.addListener(_onFieldChanged);
   }
 
   void _onFieldChanged() {
@@ -75,6 +96,24 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
         _resortController.text = trip.resortName ?? '';
         _liveaboardController.text = trip.liveaboardName ?? '';
         _notesController.text = trip.notes;
+        _tripType = trip.tripType;
+
+        // Load liveaboard details if applicable
+        if (trip.isLiveaboard) {
+          final liveaboardRepo = LiveaboardDetailsRepository();
+          final details = await liveaboardRepo.getByTripId(trip.id);
+          if (details != null) {
+            _originalLiveaboardDetails = details;
+            _vesselNameController.text = details.vesselName;
+            _operatorController.text = details.operatorName ?? '';
+            _vesselType = details.vesselType;
+            _cabinTypeController.text = details.cabinType ?? '';
+            _capacityController.text = details.capacity?.toString() ?? '';
+            _embarkPortController.text = details.embarkPort ?? '';
+            _disembarkPortController.text = details.disembarkPort ?? '';
+          }
+        }
+
         setState(() {
           _startDate = trip.startDate;
           _endDate = trip.endDate;
@@ -101,6 +140,12 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
     _resortController.dispose();
     _liveaboardController.dispose();
     _notesController.dispose();
+    _vesselNameController.dispose();
+    _operatorController.dispose();
+    _cabinTypeController.dispose();
+    _capacityController.dispose();
+    _embarkPortController.dispose();
+    _disembarkPortController.dispose();
     super.dispose();
   }
 
@@ -125,6 +170,36 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  // Trip type selector
+                  SegmentedButton<TripType>(
+                    segments: [
+                      ButtonSegment(
+                        value: TripType.shore,
+                        label: Text(context.l10n.trips_type_shore),
+                      ),
+                      ButtonSegment(
+                        value: TripType.liveaboard,
+                        label: Text(context.l10n.trips_type_liveaboard),
+                      ),
+                      ButtonSegment(
+                        value: TripType.resort,
+                        label: Text(context.l10n.trips_type_resort),
+                      ),
+                      ButtonSegment(
+                        value: TripType.dayTrip,
+                        label: Text(context.l10n.trips_type_dayTrip),
+                      ),
+                    ],
+                    selected: {_tripType},
+                    onSelectionChanged: (selected) {
+                      setState(() {
+                        _tripType = selected.first;
+                        _hasChanges = true;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 24),
+
                   // Name field
                   TextFormField(
                     controller: _nameController,
@@ -239,6 +314,141 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
                     ),
                     textCapitalization: TextCapitalization.words,
                   ),
+
+                  // Liveaboard vessel details (shown only when type is liveaboard)
+                  if (_tripType == TripType.liveaboard) ...[
+                    const SizedBox(height: 24),
+                    // Vessel section header
+                    Text(
+                      context.l10n.trips_edit_sectionTitle_vessel,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Vessel name (required for liveaboard)
+                    TextFormField(
+                      controller: _vesselNameController,
+                      decoration: InputDecoration(
+                        labelText: context.l10n.trips_edit_label_vesselName,
+                        prefixIcon: const Icon(Icons.directions_boat),
+                        hintText: context.l10n.trips_edit_hint_vesselName,
+                      ),
+                      textCapitalization: TextCapitalization.words,
+                      validator: (value) {
+                        if (_tripType == TripType.liveaboard &&
+                            (value == null || value.trim().isEmpty)) {
+                          return context
+                              .l10n
+                              .trips_edit_validation_vesselRequired;
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Operator
+                    TextFormField(
+                      controller: _operatorController,
+                      decoration: InputDecoration(
+                        labelText: context.l10n.trips_edit_label_operatorName,
+                        prefixIcon: const Icon(Icons.business),
+                        hintText: context.l10n.trips_edit_hint_operatorName,
+                      ),
+                      textCapitalization: TextCapitalization.words,
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Vessel type dropdown
+                    DropdownButtonFormField<String>(
+                      initialValue: _vesselType,
+                      decoration: InputDecoration(
+                        labelText: context.l10n.trips_edit_label_vesselType,
+                        prefixIcon: const Icon(Icons.category),
+                      ),
+                      items: [
+                        DropdownMenuItem(
+                          value: 'catamaran',
+                          child: Text(context.l10n.trips_vesselType_catamaran),
+                        ),
+                        DropdownMenuItem(
+                          value: 'motorYacht',
+                          child: Text(context.l10n.trips_vesselType_motorYacht),
+                        ),
+                        DropdownMenuItem(
+                          value: 'sailingYacht',
+                          child: Text(
+                            context.l10n.trips_vesselType_sailingYacht,
+                          ),
+                        ),
+                        DropdownMenuItem(
+                          value: 'other',
+                          child: Text(context.l10n.trips_vesselType_other),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        setState(() {
+                          _vesselType = value;
+                          _hasChanges = true;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Cabin type
+                    TextFormField(
+                      controller: _cabinTypeController,
+                      decoration: InputDecoration(
+                        labelText: context.l10n.trips_edit_label_cabinType,
+                        prefixIcon: const Icon(Icons.bed),
+                        hintText: context.l10n.trips_edit_hint_cabinType,
+                      ),
+                      textCapitalization: TextCapitalization.words,
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Capacity
+                    TextFormField(
+                      controller: _capacityController,
+                      decoration: InputDecoration(
+                        labelText: context.l10n.trips_edit_label_capacity,
+                        prefixIcon: const Icon(Icons.people),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                    const SizedBox(height: 24),
+
+                    // Embark / Disembark section
+                    Text(
+                      context.l10n.trips_edit_sectionTitle_embarkDisembark,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    TextFormField(
+                      controller: _embarkPortController,
+                      decoration: InputDecoration(
+                        labelText: context.l10n.trips_edit_label_embarkPort,
+                        prefixIcon: const Icon(Icons.login),
+                        hintText: context.l10n.trips_edit_hint_embarkPort,
+                      ),
+                      textCapitalization: TextCapitalization.words,
+                    ),
+                    const SizedBox(height: 16),
+
+                    TextFormField(
+                      controller: _disembarkPortController,
+                      decoration: InputDecoration(
+                        labelText: context.l10n.trips_edit_label_disembarkPort,
+                        prefixIcon: const Icon(Icons.logout),
+                        hintText: context.l10n.trips_edit_hint_disembarkPort,
+                      ),
+                      textCapitalization: TextCapitalization.words,
+                    ),
+                  ],
                   const SizedBox(height: 24),
 
                   // Notes section header
@@ -513,6 +723,7 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
         liveaboardName: _liveaboardController.text.trim().isEmpty
             ? null
             : _liveaboardController.text.trim(),
+        tripType: _tripType,
         notes: _notesController.text.trim(),
         createdAt: _originalTrip?.createdAt ?? now,
         updatedAt: now,
@@ -527,6 +738,51 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
             .read(tripListNotifierProvider.notifier)
             .addTrip(trip);
         savedId = newTrip.id;
+      }
+
+      // Save or clean up liveaboard details
+      if (_tripType == TripType.liveaboard) {
+        final liveaboardRepo = LiveaboardDetailsRepository();
+        final capacityText = _capacityController.text.trim();
+        final details = LiveaboardDetails(
+          id: _originalLiveaboardDetails?.id ?? '',
+          tripId: savedId,
+          vesselName: _vesselNameController.text.trim(),
+          operatorName: _operatorController.text.trim().isEmpty
+              ? null
+              : _operatorController.text.trim(),
+          vesselType: _vesselType,
+          cabinType: _cabinTypeController.text.trim().isEmpty
+              ? null
+              : _cabinTypeController.text.trim(),
+          capacity: capacityText.isEmpty ? null : int.tryParse(capacityText),
+          embarkPort: _embarkPortController.text.trim().isEmpty
+              ? null
+              : _embarkPortController.text.trim(),
+          disembarkPort: _disembarkPortController.text.trim().isEmpty
+              ? null
+              : _disembarkPortController.text.trim(),
+          createdAt: _originalLiveaboardDetails?.createdAt ?? DateTime.now(),
+          updatedAt: DateTime.now(),
+        );
+        await liveaboardRepo.createOrUpdate(details);
+
+        // Generate itinerary days for new liveaboard trips
+        if (!isEditing) {
+          final itineraryRepo = ItineraryDayRepository();
+          final days = ItineraryDay.generateForTrip(
+            tripId: savedId,
+            startDate: _startDate,
+            endDate: _endDate,
+          );
+          await itineraryRepo.saveAll(days);
+        }
+      } else if (isEditing && _originalLiveaboardDetails != null) {
+        // Type changed away from liveaboard - clean up details
+        final liveaboardRepo = LiveaboardDetailsRepository();
+        await liveaboardRepo.deleteByTripId(savedId);
+        final itineraryRepo = ItineraryDayRepository();
+        await itineraryRepo.deleteByTripId(savedId);
       }
 
       if (mounted) {

@@ -112,6 +112,8 @@ class SyncData {
   final List<Map<String, dynamic>> serviceRecords;
   final List<Map<String, dynamic>> diveCenters;
   final List<Map<String, dynamic>> trips;
+  final List<Map<String, dynamic>> liveaboardDetails;
+  final List<Map<String, dynamic>> itineraryDays;
   final List<Map<String, dynamic>> tags;
   final List<Map<String, dynamic>> diveTags;
   final List<Map<String, dynamic>> diveTypes;
@@ -144,6 +146,8 @@ class SyncData {
     this.serviceRecords = const [],
     this.diveCenters = const [],
     this.trips = const [],
+    this.liveaboardDetails = const [],
+    this.itineraryDays = const [],
     this.tags = const [],
     this.diveTags = const [],
     this.diveTypes = const [],
@@ -177,6 +181,8 @@ class SyncData {
     'serviceRecords': serviceRecords,
     'diveCenters': diveCenters,
     'trips': trips,
+    'liveaboardDetails': liveaboardDetails,
+    'itineraryDays': itineraryDays,
     'tags': tags,
     'diveTags': diveTags,
     'diveTypes': diveTypes,
@@ -211,6 +217,8 @@ class SyncData {
       serviceRecords: _parseList(json['serviceRecords']),
       diveCenters: _parseList(json['diveCenters']),
       trips: _parseList(json['trips']),
+      liveaboardDetails: _parseList(json['liveaboardDetails']),
+      itineraryDays: _parseList(json['itineraryDays']),
       tags: _parseList(json['tags']),
       diveTags: _parseList(json['diveTags']),
       diveTypes: _parseList(json['diveTypes']),
@@ -331,6 +339,14 @@ class SyncDataSerializer {
           () => _exportDiveCenters(sinceMs),
         ),
         trips: await _safeExport('trips', () => _exportTrips(sinceMs)),
+        liveaboardDetails: await _safeExport(
+          'liveaboardDetails',
+          () => _exportLiveaboardDetails(sinceMs),
+        ),
+        itineraryDays: await _safeExport(
+          'itineraryDays',
+          () => _exportItineraryDays(sinceMs),
+        ),
         tags: await _safeExport('tags', () => _exportTags(sinceMs)),
         diveTags: await _safeExport('diveTags', () => _exportDiveTags(sinceMs)),
         diveTypes: await _safeExport(
@@ -534,6 +550,16 @@ class SyncDataSerializer {
           _db.trips,
         )..where((t) => t.id.equals(recordId))).getSingleOrNull();
         return row == null ? null : _tripToJson(row);
+      case 'liveaboardDetails':
+        final row = await (_db.select(
+          _db.liveaboardDetailRecords,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row == null ? null : _liveaboardDetailToJson(row);
+      case 'itineraryDays':
+        final row = await (_db.select(
+          _db.tripItineraryDays,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row == null ? null : _itineraryDayToJson(row);
       case 'tags':
         final row = await (_db.select(
           _db.tags,
@@ -689,6 +715,16 @@ class SyncDataSerializer {
       case 'trips':
         await _db.into(_db.trips).insertOnConflictUpdate(Trip.fromJson(data));
         return;
+      case 'liveaboardDetails':
+        await _db
+            .into(_db.liveaboardDetailRecords)
+            .insertOnConflictUpdate(LiveaboardDetailRecord.fromJson(data));
+        return;
+      case 'itineraryDays':
+        await _db
+            .into(_db.tripItineraryDays)
+            .insertOnConflictUpdate(TripItineraryDay.fromJson(data));
+        return;
       case 'tags':
         await _db.into(_db.tags).insertOnConflictUpdate(Tag.fromJson(data));
         return;
@@ -843,6 +879,16 @@ class SyncDataSerializer {
         return;
       case 'trips':
         await (_db.delete(_db.trips)..where((t) => t.id.equals(recordId))).go();
+        return;
+      case 'liveaboardDetails':
+        await (_db.delete(
+          _db.liveaboardDetailRecords,
+        )..where((t) => t.id.equals(recordId))).go();
+        return;
+      case 'itineraryDays':
+        await (_db.delete(
+          _db.tripItineraryDays,
+        )..where((t) => t.id.equals(recordId))).go();
         return;
       case 'tags':
         await (_db.delete(_db.tags)..where((t) => t.id.equals(recordId))).go();
@@ -1113,6 +1159,26 @@ class SyncDataSerializer {
     }
     final rows = await query.get();
     return rows.map((r) => _tripToJson(r)).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> _exportLiveaboardDetails(
+    int? since,
+  ) async {
+    final query = _db.select(_db.liveaboardDetailRecords);
+    if (since != null) {
+      query.where((t) => t.updatedAt.isBiggerOrEqualValue(since));
+    }
+    final rows = await query.get();
+    return rows.map((r) => _liveaboardDetailToJson(r)).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> _exportItineraryDays(int? since) async {
+    final query = _db.select(_db.tripItineraryDays);
+    if (since != null) {
+      query.where((t) => t.updatedAt.isBiggerOrEqualValue(since));
+    }
+    final rows = await query.get();
+    return rows.map((r) => _itineraryDayToJson(r)).toList();
   }
 
   Future<List<Map<String, dynamic>>> _exportTags(int? since) async {
@@ -1636,6 +1702,39 @@ class SyncDataSerializer {
     'location': r.location,
     'resortName': r.resortName,
     'liveaboardName': r.liveaboardName,
+    'tripType': r.tripType,
+    'notes': r.notes,
+    'createdAt': r.createdAt,
+    'updatedAt': r.updatedAt,
+  };
+
+  Map<String, dynamic> _liveaboardDetailToJson(LiveaboardDetailRecord r) => {
+    'id': r.id,
+    'tripId': r.tripId,
+    'vesselName': r.vesselName,
+    'operatorName': r.operatorName,
+    'vesselType': r.vesselType,
+    'cabinType': r.cabinType,
+    'capacity': r.capacity,
+    'embarkPort': r.embarkPort,
+    'embarkLatitude': r.embarkLatitude,
+    'embarkLongitude': r.embarkLongitude,
+    'disembarkPort': r.disembarkPort,
+    'disembarkLatitude': r.disembarkLatitude,
+    'disembarkLongitude': r.disembarkLongitude,
+    'createdAt': r.createdAt,
+    'updatedAt': r.updatedAt,
+  };
+
+  Map<String, dynamic> _itineraryDayToJson(TripItineraryDay r) => {
+    'id': r.id,
+    'tripId': r.tripId,
+    'dayNumber': r.dayNumber,
+    'date': r.date,
+    'dayType': r.dayType,
+    'portName': r.portName,
+    'latitude': r.latitude,
+    'longitude': r.longitude,
     'notes': r.notes,
     'createdAt': r.createdAt,
     'updatedAt': r.updatedAt,

@@ -74,6 +74,8 @@ class CsvImportService {
           diveData['notes'] = value;
         } else if (header.contains('visibility')) {
           diveData['visibility'] = _parseVisibility(value);
+        } else if (header.contains('trip') && header.contains('type')) {
+          diveData['tripType'] = value;
         } else if (header.contains('type')) {
           diveData['diveType'] = _parseDiveType(value);
         } else if (header.contains('start') && header.contains('pressure')) {

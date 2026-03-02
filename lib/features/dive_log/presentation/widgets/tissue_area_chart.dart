@@ -35,6 +35,17 @@ class TissueAreaChart extends StatefulWidget {
   /// The value is the compartment index (0-based).
   final ValueChanged<int?>? onCompartmentHoverChanged;
 
+  /// When true, the chart fills its parent's height instead of using [height].
+  final bool flexible;
+
+  /// Index of the compartment to highlight as "leading" (0-based).
+  /// In expanded mode, this compartment's line is drawn thicker and on top.
+  final int? leadingCompartmentIndex;
+
+  /// Index of the compartment currently hovered on the bar chart (0-based).
+  /// When set, this compartment's line is drawn with full emphasis on top.
+  final int? hoveredCompartmentIndex;
+
   const TissueAreaChart({
     super.key,
     required this.decoStatuses,
@@ -42,6 +53,9 @@ class TissueAreaChart extends StatefulWidget {
     this.selectedIndex,
     this.height = 72,
     this.isExpanded = false,
+    this.flexible = false,
+    this.leadingCompartmentIndex,
+    this.hoveredCompartmentIndex,
     this.onHoverIndexChanged,
     this.onCompartmentHoverChanged,
   });
@@ -187,7 +201,7 @@ class _TissueAreaChartState extends State<TissueAreaChart> {
           child: ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: SizedBox(
-              height: widget.height,
+              height: widget.flexible ? null : widget.height,
               width: double.infinity,
               child: CustomPaint(
                 painter: _TissueAreaChartPainter(
@@ -197,6 +211,8 @@ class _TissueAreaChartState extends State<TissueAreaChart> {
                   colorFn: widget.colorFn,
                   cursorColor: colorScheme.onSurface,
                   mValueLineColor: colorScheme.error,
+                  leadingCompartmentIndex: widget.leadingCompartmentIndex,
+                  hoveredCompartmentIndex: widget.hoveredCompartmentIndex,
                 ),
               ),
             ),
@@ -219,6 +235,8 @@ class _TissueAreaChartPainter extends CustomPainter {
   final TissueColorFn colorFn;
   final Color cursorColor;
   final Color mValueLineColor;
+  final int? leadingCompartmentIndex;
+  final int? hoveredCompartmentIndex;
 
   _TissueAreaChartPainter({
     required this.decoStatuses,
@@ -227,6 +245,8 @@ class _TissueAreaChartPainter extends CustomPainter {
     required this.colorFn,
     required this.cursorColor,
     required this.mValueLineColor,
+    this.leadingCompartmentIndex,
+    this.hoveredCompartmentIndex,
   });
 
   @override
@@ -353,6 +373,8 @@ class _TissueAreaChartPainter extends CustomPainter {
   /// Paints slowest compartments first so fast tissues draw on top.
   /// Each compartment gets a distinct hue based on its index (0-15)
   /// so lines are visually distinguishable regardless of loading level.
+  /// The leading compartment is drawn last with a thicker, fully opaque
+  /// stroke so it stands out visually.
   void _paintExpanded(
     Canvas canvas,
     Size size,
@@ -361,41 +383,95 @@ class _TissueAreaChartPainter extends CustomPainter {
     double maxPercent,
     double step,
   ) {
+    bool isValid(int? idx) => idx != null && idx >= 0 && idx < numCompartments;
+
+    final hasLeading = isValid(leadingCompartmentIndex);
+    final hasHovered = isValid(hoveredCompartmentIndex);
+
+    // When hovering, only the hovered compartment is emphasized.
+    // When not hovering, the leading compartment is emphasized.
+    final emphasizedIdx = hasHovered
+        ? hoveredCompartmentIndex!
+        : (hasLeading ? leadingCompartmentIndex! : null);
+
+    // First pass: draw all non-emphasized compartments (slowest first)
     for (int compIdx = numCompartments - 1; compIdx >= 0; compIdx--) {
-      final strokePath = Path();
-      bool firstStroke = true;
-      double col = 0;
+      if (compIdx == emphasizedIdx) continue;
 
-      while (col < numTimePoints) {
-        final timeIdx = col.floor().clamp(0, numTimePoints - 1);
-        final status = decoStatuses[timeIdx];
-        final ambient = status.ambientPressureBar;
-        final comp = status.compartments[compIdx];
-        final pct = subsurfacePercentage(comp, ambient);
+      _drawCompartmentLine(
+        canvas,
+        size,
+        numTimePoints,
+        numCompartments,
+        maxPercent,
+        step,
+        compIdx,
+        alpha: 0.5,
+        strokeWidth: 1.0,
+      );
+    }
 
-        final x = col / numTimePoints * size.width;
-        final y = size.height * (1.0 - pct.clamp(0.0, maxPercent) / maxPercent);
+    // Second pass: draw the emphasized compartment on top
+    if (emphasizedIdx != null) {
+      _drawCompartmentLine(
+        canvas,
+        size,
+        numTimePoints,
+        numCompartments,
+        maxPercent,
+        step,
+        emphasizedIdx,
+        alpha: 1.0,
+        strokeWidth: 2.5,
+      );
+    }
+  }
 
-        if (firstStroke) {
-          strokePath.moveTo(x, y);
-          firstStroke = false;
-        } else {
-          strokePath.lineTo(x, y);
-        }
+  /// Draws a single compartment's loading line across the time axis.
+  void _drawCompartmentLine(
+    Canvas canvas,
+    Size size,
+    int numTimePoints,
+    int numCompartments,
+    double maxPercent,
+    double step,
+    int compIdx, {
+    required double alpha,
+    required double strokeWidth,
+  }) {
+    final strokePath = Path();
+    bool firstStroke = true;
+    double col = 0;
 
-        col += step;
+    while (col < numTimePoints) {
+      final timeIdx = col.floor().clamp(0, numTimePoints - 1);
+      final status = decoStatuses[timeIdx];
+      final ambient = status.ambientPressureBar;
+      final comp = status.compartments[compIdx];
+      final pct = subsurfacePercentage(comp, ambient);
+
+      final x = col / numTimePoints * size.width;
+      final y = size.height * (1.0 - pct.clamp(0.0, maxPercent) / maxPercent);
+
+      if (firstStroke) {
+        strokePath.moveTo(x, y);
+        firstStroke = false;
+      } else {
+        strokePath.lineTo(x, y);
       }
 
-      // Hue spread: 0 (red/fast) through 240 (blue/slow)
-      final hue = compIdx / (numCompartments - 1) * 240.0;
-      final lineColor = HSVColor.fromAHSV(1.0, hue, 0.8, 0.9).toColor();
-
-      final strokePaint = Paint()
-        ..color = lineColor.withValues(alpha: 0.7)
-        ..strokeWidth = 1.0
-        ..style = PaintingStyle.stroke;
-      canvas.drawPath(strokePath, strokePaint);
+      col += step;
     }
+
+    // Hue spread: 0 (red/fast) through 240 (blue/slow)
+    final hue = compIdx / (numCompartments - 1) * 240.0;
+    final lineColor = HSVColor.fromAHSV(1.0, hue, 0.8, 0.9).toColor();
+
+    final strokePaint = Paint()
+      ..color = lineColor.withValues(alpha: alpha)
+      ..strokeWidth = strokeWidth
+      ..style = PaintingStyle.stroke;
+    canvas.drawPath(strokePath, strokePaint);
   }
 
   // colorFn equality works because colorFnForScheme always returns
@@ -407,6 +483,8 @@ class _TissueAreaChartPainter extends CustomPainter {
         oldDelegate.isExpanded != isExpanded ||
         oldDelegate.colorFn != colorFn ||
         oldDelegate.cursorColor != cursorColor ||
-        oldDelegate.mValueLineColor != mValueLineColor;
+        oldDelegate.mValueLineColor != mValueLineColor ||
+        oldDelegate.leadingCompartmentIndex != leadingCompartmentIndex ||
+        oldDelegate.hoveredCompartmentIndex != hoveredCompartmentIndex;
   }
 }

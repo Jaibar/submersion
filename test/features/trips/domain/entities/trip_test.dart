@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 
 void main() {
@@ -74,6 +75,78 @@ void main() {
       );
 
       expect(updated.liveaboardName, 'Sea Spirit');
+    });
+  });
+
+  group('Trip tripType', () {
+    test('defaults to shore when not specified', () {
+      final trip = Trip(
+        id: 'trip-1',
+        name: 'Test',
+        startDate: DateTime(2024, 1, 1),
+        endDate: DateTime(2024, 1, 7),
+        createdAt: DateTime(2024, 1, 1),
+        updatedAt: DateTime(2024, 1, 1),
+      );
+      expect(trip.tripType, TripType.shore);
+    });
+
+    test('isLiveaboard returns true for liveaboard type', () {
+      final trip = Trip(
+        id: 'trip-1',
+        name: 'Red Sea Trip',
+        tripType: TripType.liveaboard,
+        startDate: DateTime(2024, 1, 1),
+        endDate: DateTime(2024, 1, 7),
+        createdAt: DateTime(2024, 1, 1),
+        updatedAt: DateTime(2024, 1, 1),
+      );
+      expect(trip.isLiveaboard, isTrue);
+    });
+
+    test(
+      'isLiveaboard returns false for shore type even with liveaboardName set',
+      () {
+        final trip = Trip(
+          id: 'trip-1',
+          name: 'Test',
+          tripType: TripType.shore,
+          liveaboardName: 'Some Vessel',
+          startDate: DateTime(2024, 1, 1),
+          endDate: DateTime(2024, 1, 7),
+          createdAt: DateTime(2024, 1, 1),
+          updatedAt: DateTime(2024, 1, 1),
+        );
+        expect(trip.isLiveaboard, isFalse);
+      },
+    );
+
+    test('copyWith preserves tripType', () {
+      final trip = Trip(
+        id: 'trip-1',
+        name: 'Test',
+        tripType: TripType.liveaboard,
+        startDate: DateTime(2024, 1, 1),
+        endDate: DateTime(2024, 1, 7),
+        createdAt: DateTime(2024, 1, 1),
+        updatedAt: DateTime(2024, 1, 1),
+      );
+      final copy = trip.copyWith(name: 'Updated');
+      expect(copy.tripType, TripType.liveaboard);
+    });
+
+    test('copyWith can change tripType', () {
+      final trip = Trip(
+        id: 'trip-1',
+        name: 'Test',
+        tripType: TripType.shore,
+        startDate: DateTime(2024, 1, 1),
+        endDate: DateTime(2024, 1, 7),
+        createdAt: DateTime(2024, 1, 1),
+        updatedAt: DateTime(2024, 1, 1),
+      );
+      final updated = trip.copyWith(tripType: TripType.liveaboard);
+      expect(updated.tripType, TripType.liveaboard);
     });
   });
 }

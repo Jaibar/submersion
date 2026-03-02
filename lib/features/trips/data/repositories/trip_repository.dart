@@ -6,6 +6,7 @@ import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart' as domain;
 
 class TripRepository {
@@ -82,6 +83,9 @@ class TripRepository {
         resortName: row.data['resort_name'] as String?,
         liveaboardName: row.data['liveaboard_name'] as String?,
         notes: (row.data['notes'] as String?) ?? '',
+        tripType: TripType.fromName(
+          (row.data['trip_type'] as String?) ?? 'shore',
+        ),
         createdAt: DateTime.fromMillisecondsSinceEpoch(
           row.data['created_at'] as int,
         ),
@@ -112,6 +116,7 @@ class TripRepository {
               resortName: Value(trip.resortName),
               liveaboardName: Value(trip.liveaboardName),
               notes: Value(trip.notes),
+              tripType: Value(trip.tripType.name),
               createdAt: Value(now.millisecondsSinceEpoch),
               updatedAt: Value(now.millisecondsSinceEpoch),
             ),
@@ -147,6 +152,7 @@ class TripRepository {
           resortName: Value(trip.resortName),
           liveaboardName: Value(trip.liveaboardName),
           notes: Value(trip.notes),
+          tripType: Value(trip.tripType.name),
           updatedAt: Value(now),
         ),
       );
@@ -315,6 +321,9 @@ class TripRepository {
       resortName: result.data['resort_name'] as String?,
       liveaboardName: result.data['liveaboard_name'] as String?,
       notes: (result.data['notes'] as String?) ?? '',
+      tripType: TripType.fromName(
+        (result.data['trip_type'] as String?) ?? 'shore',
+      ),
       createdAt: DateTime.fromMillisecondsSinceEpoch(
         result.data['created_at'] as int,
       ),
@@ -362,6 +371,9 @@ class TripRepository {
         resortName: row.data['resort_name'] as String?,
         liveaboardName: row.data['liveaboard_name'] as String?,
         notes: (row.data['notes'] as String?) ?? '',
+        tripType: TripType.fromName(
+          (row.data['trip_type'] as String?) ?? 'shore',
+        ),
         createdAt: DateTime.fromMillisecondsSinceEpoch(
           row.data['created_at'] as int,
         ),
@@ -390,6 +402,7 @@ class TripRepository {
       resortName: row.resortName,
       liveaboardName: row.liveaboardName,
       notes: row.notes,
+      tripType: TripType.fromName(row.tripType),
       createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt),
     );

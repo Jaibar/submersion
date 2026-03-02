@@ -1119,18 +1119,21 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
           )
         : null;
 
-    final tissueCard = CompactTissueLoadingCard(
-      status: status,
-      decoStatuses: analysis.decoStatuses,
-      selectedIndex: selectedPointIndex,
-      subtitle: timeSubtitle,
-      onHeatMapHover: (index) {
-        _selectedPointNotifier.value = index;
-        setState(() {
-          _heatMapHoverIndex = index;
-        });
-      },
-    );
+    Widget buildTissueCard({bool expandVisualization = false}) {
+      return CompactTissueLoadingCard(
+        status: status,
+        decoStatuses: analysis.decoStatuses,
+        selectedIndex: selectedPointIndex,
+        subtitle: timeSubtitle,
+        expandVisualization: expandVisualization,
+        onHeatMapHover: (index) {
+          _selectedPointNotifier.value = index;
+          setState(() {
+            _heatMapHoverIndex = index;
+          });
+        },
+      );
+    }
 
     final decoCard = CompactDecoStatusCard(
       status: status,
@@ -1171,7 +1174,7 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
           // Narrow: stack vertically at full width
           return Column(
             children: [
-              tissueCard,
+              buildTissueCard(),
               const SizedBox(height: 8),
               decoCard,
               const SizedBox(height: 8),
@@ -1194,7 +1197,7 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                 ),
               ),
               const SizedBox(width: 8),
-              Expanded(child: tissueCard),
+              Expanded(child: buildTissueCard(expandVisualization: true)),
             ],
           ),
         );

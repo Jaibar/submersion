@@ -1413,12 +1413,14 @@ class UddfExportBuilders {
               );
             }
 
-            // Trip extended data (resort/liveaboard names - not in UDDF standard)
+            // Trip extended data (resort/liveaboard names, trip type - not in UDDF standard)
             if (trips != null && trips.isNotEmpty) {
               final tripsWithExtendedData = trips.where(
                 (t) =>
-                    t.resortName != null && t.resortName!.isNotEmpty ||
-                    t.liveaboardName != null && t.liveaboardName!.isNotEmpty,
+                    (t.resortName != null && t.resortName!.isNotEmpty) ||
+                    (t.liveaboardName != null &&
+                        t.liveaboardName!.isNotEmpty) ||
+                    t.tripType != TripType.shore,
               );
               if (tripsWithExtendedData.isNotEmpty) {
                 builder.element(
@@ -1441,6 +1443,12 @@ class UddfExportBuilders {
                             builder.element(
                               'liveaboardname',
                               nest: trip.liveaboardName,
+                            );
+                          }
+                          if (trip.tripType != TripType.shore) {
+                            builder.element(
+                              'triptype',
+                              nest: trip.tripType.name,
                             );
                           }
                         },

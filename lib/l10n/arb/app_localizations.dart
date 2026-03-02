@@ -22351,6 +22351,330 @@ abstract class AppLocalizations {
   /// **'Upcoming'**
   String get trips_summary_upcomingTitle;
 
+  /// No description provided for @trips_type_shore.
+  ///
+  /// In en, this message translates to:
+  /// **'Shore'**
+  String get trips_type_shore;
+
+  /// No description provided for @trips_type_liveaboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Liveaboard'**
+  String get trips_type_liveaboard;
+
+  /// No description provided for @trips_type_resort.
+  ///
+  /// In en, this message translates to:
+  /// **'Resort'**
+  String get trips_type_resort;
+
+  /// No description provided for @trips_type_dayTrip.
+  ///
+  /// In en, this message translates to:
+  /// **'Day Trip'**
+  String get trips_type_dayTrip;
+
+  /// No description provided for @trips_edit_label_tripType.
+  ///
+  /// In en, this message translates to:
+  /// **'Trip Type'**
+  String get trips_edit_label_tripType;
+
+  /// No description provided for @trips_edit_sectionTitle_vessel.
+  ///
+  /// In en, this message translates to:
+  /// **'Vessel Details'**
+  String get trips_edit_sectionTitle_vessel;
+
+  /// No description provided for @trips_edit_label_vesselName.
+  ///
+  /// In en, this message translates to:
+  /// **'Vessel Name *'**
+  String get trips_edit_label_vesselName;
+
+  /// No description provided for @trips_edit_hint_vesselName.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Ocean Explorer'**
+  String get trips_edit_hint_vesselName;
+
+  /// No description provided for @trips_edit_label_operatorName.
+  ///
+  /// In en, this message translates to:
+  /// **'Operator / Charter'**
+  String get trips_edit_label_operatorName;
+
+  /// No description provided for @trips_edit_hint_operatorName.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Red Sea Divers'**
+  String get trips_edit_hint_operatorName;
+
+  /// No description provided for @trips_edit_label_vesselType.
+  ///
+  /// In en, this message translates to:
+  /// **'Vessel Type'**
+  String get trips_edit_label_vesselType;
+
+  /// No description provided for @trips_edit_label_cabinType.
+  ///
+  /// In en, this message translates to:
+  /// **'Cabin Type'**
+  String get trips_edit_label_cabinType;
+
+  /// No description provided for @trips_edit_hint_cabinType.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Deluxe Double'**
+  String get trips_edit_hint_cabinType;
+
+  /// No description provided for @trips_edit_label_capacity.
+  ///
+  /// In en, this message translates to:
+  /// **'Passenger Capacity'**
+  String get trips_edit_label_capacity;
+
+  /// No description provided for @trips_edit_sectionTitle_embarkDisembark.
+  ///
+  /// In en, this message translates to:
+  /// **'Embark / Disembark'**
+  String get trips_edit_sectionTitle_embarkDisembark;
+
+  /// No description provided for @trips_edit_label_embarkPort.
+  ///
+  /// In en, this message translates to:
+  /// **'Embark Port'**
+  String get trips_edit_label_embarkPort;
+
+  /// No description provided for @trips_edit_hint_embarkPort.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Hurghada Marina'**
+  String get trips_edit_hint_embarkPort;
+
+  /// No description provided for @trips_edit_label_disembarkPort.
+  ///
+  /// In en, this message translates to:
+  /// **'Disembark Port'**
+  String get trips_edit_label_disembarkPort;
+
+  /// No description provided for @trips_edit_hint_disembarkPort.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g. Hurghada Marina'**
+  String get trips_edit_hint_disembarkPort;
+
+  /// No description provided for @trips_edit_validation_vesselRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Vessel name is required for liveaboard trips'**
+  String get trips_edit_validation_vesselRequired;
+
+  /// No description provided for @trips_detail_tab_overview.
+  ///
+  /// In en, this message translates to:
+  /// **'Overview'**
+  String get trips_detail_tab_overview;
+
+  /// No description provided for @trips_detail_tab_itinerary.
+  ///
+  /// In en, this message translates to:
+  /// **'Itinerary'**
+  String get trips_detail_tab_itinerary;
+
+  /// No description provided for @trips_detail_tab_photos.
+  ///
+  /// In en, this message translates to:
+  /// **'Photos'**
+  String get trips_detail_tab_photos;
+
+  /// No description provided for @trips_detail_tab_dives.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives'**
+  String get trips_detail_tab_dives;
+
+  /// No description provided for @trips_detail_sectionTitle_vessel.
+  ///
+  /// In en, this message translates to:
+  /// **'Vessel'**
+  String get trips_detail_sectionTitle_vessel;
+
+  /// No description provided for @trips_detail_label_operator.
+  ///
+  /// In en, this message translates to:
+  /// **'Operator'**
+  String get trips_detail_label_operator;
+
+  /// No description provided for @trips_detail_label_vesselType.
+  ///
+  /// In en, this message translates to:
+  /// **'Type'**
+  String get trips_detail_label_vesselType;
+
+  /// No description provided for @trips_detail_label_cabin.
+  ///
+  /// In en, this message translates to:
+  /// **'Cabin'**
+  String get trips_detail_label_cabin;
+
+  /// No description provided for @trips_detail_label_capacity.
+  ///
+  /// In en, this message translates to:
+  /// **'Capacity'**
+  String get trips_detail_label_capacity;
+
+  /// No description provided for @trips_detail_label_embark.
+  ///
+  /// In en, this message translates to:
+  /// **'Embark'**
+  String get trips_detail_label_embark;
+
+  /// No description provided for @trips_detail_label_disembark.
+  ///
+  /// In en, this message translates to:
+  /// **'Disembark'**
+  String get trips_detail_label_disembark;
+
+  /// No description provided for @trips_detail_stat_divesPerDay.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives per day'**
+  String get trips_detail_stat_divesPerDay;
+
+  /// No description provided for @trips_detail_stat_diveDays.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive days'**
+  String get trips_detail_stat_diveDays;
+
+  /// No description provided for @trips_detail_stat_seaDays.
+  ///
+  /// In en, this message translates to:
+  /// **'Sea days'**
+  String get trips_detail_stat_seaDays;
+
+  /// No description provided for @trips_detail_stat_sitesVisited.
+  ///
+  /// In en, this message translates to:
+  /// **'Sites visited'**
+  String get trips_detail_stat_sitesVisited;
+
+  /// No description provided for @trips_detail_stat_speciesSeen.
+  ///
+  /// In en, this message translates to:
+  /// **'Species seen'**
+  String get trips_detail_stat_speciesSeen;
+
+  /// No description provided for @trips_detail_sectionTitle_dailyBreakdown.
+  ///
+  /// In en, this message translates to:
+  /// **'Daily Breakdown'**
+  String get trips_detail_sectionTitle_dailyBreakdown;
+
+  /// No description provided for @trips_breakdown_column_day.
+  ///
+  /// In en, this message translates to:
+  /// **'Day'**
+  String get trips_breakdown_column_day;
+
+  /// No description provided for @trips_breakdown_column_type.
+  ///
+  /// In en, this message translates to:
+  /// **'Type'**
+  String get trips_breakdown_column_type;
+
+  /// No description provided for @trips_breakdown_column_dives.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives'**
+  String get trips_breakdown_column_dives;
+
+  /// No description provided for @trips_breakdown_column_bottomTime.
+  ///
+  /// In en, this message translates to:
+  /// **'Bottom Time'**
+  String get trips_breakdown_column_bottomTime;
+
+  /// No description provided for @trips_breakdown_column_sites.
+  ///
+  /// In en, this message translates to:
+  /// **'Sites'**
+  String get trips_breakdown_column_sites;
+
+  /// No description provided for @trips_detail_sectionTitle_voyageMap.
+  ///
+  /// In en, this message translates to:
+  /// **'Voyage Route'**
+  String get trips_detail_sectionTitle_voyageMap;
+
+  /// No description provided for @trips_itinerary_dayLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Day {dayNumber}'**
+  String trips_itinerary_dayLabel(int dayNumber);
+
+  /// No description provided for @trips_itinerary_diveCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 dive} other{{count} dives}}'**
+  String trips_itinerary_diveCount(int count);
+
+  /// No description provided for @trips_itinerary_editDay.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit Day'**
+  String get trips_itinerary_editDay;
+
+  /// No description provided for @trips_itinerary_dayType_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Day Type'**
+  String get trips_itinerary_dayType_label;
+
+  /// No description provided for @trips_itinerary_portName_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Port / Anchorage'**
+  String get trips_itinerary_portName_label;
+
+  /// No description provided for @trips_itinerary_notes_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Notes'**
+  String get trips_itinerary_notes_label;
+
+  /// No description provided for @trips_itinerary_noDives.
+  ///
+  /// In en, this message translates to:
+  /// **'No dives'**
+  String get trips_itinerary_noDives;
+
+  /// No description provided for @trips_vesselType_catamaran.
+  ///
+  /// In en, this message translates to:
+  /// **'Catamaran'**
+  String get trips_vesselType_catamaran;
+
+  /// No description provided for @trips_vesselType_motorYacht.
+  ///
+  /// In en, this message translates to:
+  /// **'Motor Yacht'**
+  String get trips_vesselType_motorYacht;
+
+  /// No description provided for @trips_vesselType_sailingYacht.
+  ///
+  /// In en, this message translates to:
+  /// **'Sailing Yacht'**
+  String get trips_vesselType_sailingYacht;
+
+  /// No description provided for @trips_vesselType_other.
+  ///
+  /// In en, this message translates to:
+  /// **'Other'**
+  String get trips_vesselType_other;
+
   /// Symbol for feet altitude unit
   ///
   /// In en, this message translates to:

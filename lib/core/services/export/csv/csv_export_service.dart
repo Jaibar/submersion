@@ -70,6 +70,7 @@ class CsvExportService {
   Future<String> exportTripsToCsv(List<Trip> trips) async {
     final headers = [
       'Name',
+      'Trip Type',
       'Start Date',
       'End Date',
       'Duration (days)',
@@ -84,6 +85,7 @@ class CsvExportService {
     for (final trip in trips) {
       rows.add([
         sanitizeCsvField(trip.name),
+        trip.tripType.name,
         _dateFormat.format(trip.startDate),
         _dateFormat.format(trip.endDate),
         trip.durationDays,

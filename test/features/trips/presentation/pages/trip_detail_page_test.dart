@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/features/trips/presentation/pages/trip_detail_page.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
@@ -54,6 +55,9 @@ void main() {
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
+            }),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -80,6 +84,9 @@ void main() {
             }),
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
+            }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
             }),
           ],
           child: MaterialApp(
@@ -109,6 +116,9 @@ void main() {
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
+            }),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -135,6 +145,9 @@ void main() {
             }),
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
+            }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
             }),
           ],
           child: MaterialApp(
@@ -164,6 +177,9 @@ void main() {
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
+            }),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -192,6 +208,9 @@ void main() {
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
+            }),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -203,7 +222,7 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(find.text('Max Depth'), findsOneWidget);
-      expect(find.text('32.5 m'), findsOneWidget);
+      expect(find.text('32.5m'), findsOneWidget);
     });
 
     testWidgets('should display Trip Details section with location', (
@@ -221,6 +240,9 @@ void main() {
             }),
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
+            }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
             }),
           ],
           child: MaterialApp(
@@ -250,6 +272,9 @@ void main() {
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
+            }),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -277,6 +302,9 @@ void main() {
             }),
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
+            }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
             }),
           ],
           child: MaterialApp(
@@ -311,6 +339,9 @@ void main() {
             }),
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
+            }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
             }),
           ],
           child: MaterialApp(
@@ -348,6 +379,9 @@ void main() {
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
+            }),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -382,6 +416,9 @@ void main() {
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
+            }),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -410,6 +447,9 @@ void main() {
             }),
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
+            }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
             }),
           ],
           child: MaterialApp(
@@ -445,6 +485,9 @@ void main() {
             }),
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
+            }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
             }),
           ],
           child: MaterialApp(
@@ -492,6 +535,9 @@ void main() {
             tripListNotifierProvider.overrideWith((ref) {
               return _MockTripListNotifier([]);
             }),
+            settingsProvider.overrideWith((ref) {
+              return _MockSettingsNotifier();
+            }),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -506,6 +552,15 @@ void main() {
       expect(find.byIcon(Icons.sailing), findsWidgets);
     });
   });
+}
+
+/// Mock settings notifier that returns default AppSettings without SharedPreferences.
+class _MockSettingsNotifier extends StateNotifier<AppSettings>
+    implements SettingsNotifier {
+  _MockSettingsNotifier() : super(const AppSettings());
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// Mock notifier

@@ -36,6 +36,12 @@ class CompactTissueLoadingCard extends ConsumerStatefulWidget {
   /// Called when user hovers over a time index on the heat map.
   final ValueChanged<int?>? onHeatMapHover;
 
+  /// When true, the visualization (heat map / area chart) fills the
+  /// remaining vertical space in the card instead of using a fixed height.
+  /// Enable this when the card is stretched to match a taller sibling
+  /// (e.g. in the wide two-column layout).
+  final bool expandVisualization;
+
   const CompactTissueLoadingCard({
     super.key,
     required this.status,
@@ -43,6 +49,7 @@ class CompactTissueLoadingCard extends ConsumerStatefulWidget {
     this.selectedIndex,
     this.subtitle,
     this.onHeatMapHover,
+    this.expandVisualization = false,
   });
 
   @override
@@ -52,9 +59,16 @@ class CompactTissueLoadingCard extends ConsumerStatefulWidget {
 
 class _CompactTissueLoadingCardState
     extends ConsumerState<CompactTissueLoadingCard> {
-  /// Index of the compartment currently hovered on either chart (0-based).
-  /// When null, the detail panel shows the leading compartment (highest GF).
+  /// Index of the compartment currently hovered on any chart (0-based).
+  /// Drives visual emphasis (bar opacity, heat map outline, area chart line).
   int? _hoveredCompartmentIndex;
+
+  /// Whether the current hover originated from the bar chart.
+  /// When true, the detail panel shows the hovered compartment.
+  /// When false (heat map / area chart), the detail panel shows the leading
+  /// compartment instead, since those charts already have their own tooltips
+  /// showing per-compartment details.
+  bool _hoverFromBarChart = false;
 
   @override
   Widget build(BuildContext context) {
@@ -62,11 +76,32 @@ class _CompactTissueLoadingCardState
     final textTheme = Theme.of(context).textTheme;
     final vizMode = ref.watch(tissueVizModeProvider);
 
+    final expand = widget.expandVisualization;
+    final hasViz =
+        widget.decoStatuses != null && widget.decoStatuses!.isNotEmpty;
+    final vizWidget = hasViz
+        ? switch (vizMode) {
+            TissueVizMode.heatMap => _buildHeatMapSection(
+              context,
+              colorScheme,
+              textTheme,
+              expandToFill: expand,
+            ),
+            TissueVizMode.stackedArea => _buildAreaChartSection(
+              context,
+              colorScheme,
+              textTheme,
+              expandToFill: expand,
+            ),
+          }
+        : null;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
           children: [
             Row(
               children: [
@@ -91,31 +126,19 @@ class _CompactTissueLoadingCardState
             ),
             const SizedBox(height: 14),
 
+            // Compartment detail panel (above charts for proximity to title)
+            if (widget.status.compartments.isNotEmpty) ...[
+              _buildCompartmentDetail(context, colorScheme, textTheme),
+              const SizedBox(height: 6),
+            ],
+
             // Tissue pressure bar chart (with per-bar hover)
             _buildTissuePressureDiagram(context, colorScheme),
             const SizedBox(height: 6),
 
-            // Visualization (switches by mode)
-            if (widget.decoStatuses != null &&
-                widget.decoStatuses!.isNotEmpty) ...[
-              switch (vizMode) {
-                TissueVizMode.heatMap => _buildHeatMapSection(
-                  context,
-                  colorScheme,
-                  textTheme,
-                ),
-                TissueVizMode.stackedArea => _buildAreaChartSection(
-                  context,
-                  colorScheme,
-                  textTheme,
-                ),
-              },
-              const SizedBox(height: 6),
-            ],
-
-            // Compartment detail panel
-            if (widget.status.compartments.isNotEmpty)
-              _buildCompartmentDetail(context, colorScheme, textTheme),
+            // Visualization (expanded to fill remaining space when possible)
+            if (vizWidget != null)
+              if (expand) Expanded(child: vizWidget) else vizWidget,
           ],
         ),
       ),
@@ -135,6 +158,8 @@ class _CompactTissueLoadingCardState
       fontSize: 11,
       color: colorScheme.onSurfaceVariant,
     );
+
+    final highlightedIdx = _barChartDisplayIndex();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -164,14 +189,19 @@ class _CompactTissueLoadingCardState
                       child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 0.5),
                         child: MouseRegion(
-                          onEnter: (_) => _setHoveredCompartment(idx),
+                          onEnter: (_) =>
+                              _setHoveredCompartment(idx, fromBarChart: true),
                           onExit: (_) => _clearHoveredCompartment(),
                           child: GestureDetector(
-                            onTapDown: (_) => _setHoveredCompartment(idx),
-                            child: _buildSubsurfaceBar(
-                              comp,
-                              chartHeight,
-                              maxLoadingPercent,
+                            onTapDown: (_) =>
+                                _setHoveredCompartment(idx, fromBarChart: true),
+                            child: Opacity(
+                              opacity: idx == highlightedIdx ? 1.0 : 0.4,
+                              child: _buildSubsurfaceBar(
+                                comp,
+                                chartHeight,
+                                maxLoadingPercent,
+                              ),
                             ),
                           ),
                         ),
@@ -213,10 +243,9 @@ class _CompactTissueLoadingCardState
     final barHeight = chartHeight * (totalLoading / maxLoading);
 
     final totalGas = comp.totalInertGas;
-    final n2Ratio = totalGas > 0 ? comp.currentPN2 / totalGas : 1.0;
     final heRatio = totalGas > 0 ? comp.currentPHe / totalGas : 0.0;
 
-    final n2Height = barHeight * n2Ratio;
+    final n2Height = barHeight * (1.0 - heRatio);
     final heHeight = barHeight * heRatio;
 
     final n2Color = _getN2Color(totalLoading);
@@ -261,8 +290,9 @@ class _CompactTissueLoadingCardState
   Widget _buildHeatMapSection(
     BuildContext context,
     ColorScheme colorScheme,
-    TextTheme textTheme,
-  ) {
+    TextTheme textTheme, {
+    bool expandToFill = false,
+  }) {
     final tissueScheme = ref.watch(tissueColorSchemeProvider);
     final colorFn = colorFnForScheme(tissueScheme);
 
@@ -270,6 +300,40 @@ class _CompactTissueLoadingCardState
       fontSize: 11,
       color: colorScheme.onSurfaceVariant,
     );
+
+    Widget buildStripRow({bool flexible = false}) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Column(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Fast', style: labelStyle),
+              Text('Slow', style: labelStyle),
+            ],
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: TissueHeatMapStrip(
+              decoStatuses: widget.decoStatuses!,
+              selectedIndex: widget.selectedIndex,
+              height: 72,
+              flexible: flexible,
+              colorFn: colorFn,
+              hoveredCompartmentIndex: _highlightedCompartmentIndex(),
+              onHoverIndexChanged: widget.onHeatMapHover,
+              onCompartmentHoverChanged: (compIdx) {
+                if (compIdx != null) {
+                  _setHoveredCompartment(compIdx);
+                } else {
+                  _clearHoveredCompartment();
+                }
+              },
+            ),
+          ),
+        ],
+      );
+    }
 
     return Column(
       children: [
@@ -286,36 +350,10 @@ class _CompactTissueLoadingCardState
           ],
         ),
         const SizedBox(height: 4),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Column(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('Fast', style: labelStyle),
-                const SizedBox(height: 44),
-                Text('Slow', style: labelStyle),
-              ],
-            ),
-            const SizedBox(width: 4),
-            Expanded(
-              child: TissueHeatMapStrip(
-                decoStatuses: widget.decoStatuses!,
-                selectedIndex: widget.selectedIndex,
-                height: 72,
-                colorFn: colorFn,
-                onHoverIndexChanged: widget.onHeatMapHover,
-                onCompartmentHoverChanged: (compIdx) {
-                  if (compIdx != null) {
-                    _setHoveredCompartment(compIdx);
-                  } else {
-                    _clearHoveredCompartment();
-                  }
-                },
-              ),
-            ),
-          ],
-        ),
+        if (expandToFill)
+          Expanded(child: buildStripRow(flexible: true))
+        else
+          SizedBox(height: 72, child: buildStripRow()),
       ],
     );
   }
@@ -323,8 +361,9 @@ class _CompactTissueLoadingCardState
   Widget _buildAreaChartSection(
     BuildContext context,
     ColorScheme colorScheme,
-    TextTheme textTheme,
-  ) {
+    TextTheme textTheme, {
+    bool expandToFill = false,
+  }) {
     final tissueScheme = ref.watch(tissueColorSchemeProvider);
     final colorFn = colorFnForScheme(tissueScheme);
 
@@ -333,7 +372,10 @@ class _CompactTissueLoadingCardState
       selectedIndex: widget.selectedIndex,
       height: 92,
       isExpanded: true,
+      flexible: expandToFill,
       colorFn: colorFn,
+      leadingCompartmentIndex: _leadingCompartmentIndex(),
+      hoveredCompartmentIndex: _hoveredCompartmentIndex,
       onHoverIndexChanged: widget.onHeatMapHover,
       onCompartmentHoverChanged: (compIdx) {
         if (compIdx != null) {
@@ -345,34 +387,25 @@ class _CompactTissueLoadingCardState
     );
   }
 
-  /// Displays one compartment's key values below the charts.
+  /// Displays one compartment's key values above the charts.
   ///
-  /// Shows whichever compartment is being hovered on either chart,
-  /// or falls back to the leading compartment (highest GF at depth).
+  /// Bar chart hover shows the specific hovered compartment.
+  /// Heat map, area chart, and dive profile hover show the leading
+  /// compartment (highest subsurface percentage at depth), since those
+  /// charts already provide their own per-compartment tooltips.
   Widget _buildCompartmentDetail(
     BuildContext context,
     ColorScheme colorScheme,
     TextTheme textTheme,
   ) {
     final comps = widget.status.compartments;
+    final ambient = widget.status.ambientPressureBar;
+    final leadingIdx = _leadingCompartmentIndex();
+    final displayIdx = _barChartDisplayIndex();
+    final comp = comps[displayIdx];
 
-    // Use hovered compartment if valid, otherwise leading compartment
-    final TissueCompartment comp;
-    final bool isHovered;
-    if (_hoveredCompartmentIndex != null &&
-        _hoveredCompartmentIndex! < comps.length) {
-      comp = comps[_hoveredCompartmentIndex!];
-      isHovered = true;
-    } else {
-      comp = comps.reduce(
-        (a, b) => a.percentLoading > b.percentLoading ? a : b,
-      );
-      isHovered = false;
-    }
-
-    final gf = (comp.gradientFactor(widget.status.ambientPressureBar) * 100)
-        .clamp(0.0, double.infinity);
-    final isOffgassing = comp.totalInertGas > widget.status.ambientPressureBar;
+    final gf = (comp.gradientFactor(ambient) * 100).clamp(0.0, double.infinity);
+    final isOffgassing = comp.totalInertGas > ambient;
     final gfColor = _getGfColor(gf);
 
     final labelStyle = textTheme.labelSmall?.copyWith(
@@ -384,7 +417,9 @@ class _CompactTissueLoadingCardState
       fontWeight: FontWeight.bold,
     );
 
-    final titlePrefix = isHovered ? 'Compartment' : 'Leading';
+    // Show "Leading" when displaying the leading compartment (whether
+    // auto-selected or hovered), "Compartment" for any other.
+    final titlePrefix = displayIdx == leadingIdx ? 'Leading' : 'Compartment';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -546,15 +581,51 @@ class _CompactTissueLoadingCardState
     );
   }
 
-  void _setHoveredCompartment(int index) {
+  /// Returns the 0-based index of the leading compartment using the
+  /// depth-aware subsurfacePercentage metric consistent with heat map
+  /// coloring and area chart visualization.
+  int _leadingCompartmentIndex() {
+    final comps = widget.status.compartments;
+    final ambient = widget.status.ambientPressureBar;
+    int leading = 0;
+    double maxPct = -1;
+    for (int i = 0; i < comps.length; i++) {
+      final pct = subsurfacePercentage(comps[i], ambient);
+      if (pct > maxPct) {
+        maxPct = pct;
+        leading = i;
+      }
+    }
+    return leading;
+  }
+
+  /// Returns the compartment index to visually emphasize on cross-chart
+  /// widgets (heat map outline, area chart bold line): whichever compartment
+  /// is hovered, regardless of source, or the leading compartment.
+  int _highlightedCompartmentIndex() {
+    return _hoveredCompartmentIndex ?? _leadingCompartmentIndex();
+  }
+
+  /// Returns the compartment index for the bar chart and detail panel:
+  /// only bar-chart hovers override the leading compartment, since the
+  /// heat map and area chart have their own per-compartment tooltips.
+  int _barChartDisplayIndex() {
+    return (_hoveredCompartmentIndex != null && _hoverFromBarChart)
+        ? _hoveredCompartmentIndex!
+        : _leadingCompartmentIndex();
+  }
+
+  void _setHoveredCompartment(int index, {bool fromBarChart = false}) {
     setState(() {
       _hoveredCompartmentIndex = index;
+      _hoverFromBarChart = fromBarChart;
     });
   }
 
   void _clearHoveredCompartment() {
     setState(() {
       _hoveredCompartmentIndex = null;
+      _hoverFromBarChart = false;
     });
   }
 

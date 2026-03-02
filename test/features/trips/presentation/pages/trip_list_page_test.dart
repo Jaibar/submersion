@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
@@ -209,6 +210,7 @@ void main() {
             name: 'Liveaboard Trip',
             startDate: DateTime(2024, 1, 15),
             endDate: DateTime(2024, 1, 22),
+            tripType: TripType.liveaboard,
             liveaboardName: 'MY Explorer',
             createdAt: DateTime.now(),
             updatedAt: DateTime.now(),

@@ -482,8 +482,8 @@ class CompactO2ToxicityPanel extends StatelessWidget {
         _buildCnsProgress(context, colorScheme, textTheme),
         const SizedBox(height: 6),
 
-        // OTU breakdown (This Dive, Daily, Weekly)
-        _buildOtuBreakdown(context, colorScheme, textTheme),
+        // OTU progress bars (Daily + Weekly)
+        _buildOtuProgress(context, colorScheme, textTheme),
         const SizedBox(height: 4),
 
         // ppO2 metrics row
@@ -712,70 +712,215 @@ class CompactO2ToxicityPanel extends StatelessWidget {
     );
   }
 
-  Widget _buildOtuBreakdown(
+  Widget _buildOtuProgress(
     BuildContext context,
     ColorScheme colorScheme,
     TextTheme textTheme,
   ) {
-    // This dive OTU — show cursor value when scrubbing
-    final String diveOtuValue;
-    if (selectedOtu != null) {
-      diveOtuValue =
-          '${selectedOtu!.toStringAsFixed(0)} / ${exposure.otu.toStringAsFixed(0)}';
-    } else {
-      diveOtuValue = exposure.otu.toStringAsFixed(0);
-    }
-
-    // Daily cumulative
+    // Daily data
+    final dailyTotal = exposure.otuDaily;
     final dailyPct = exposure.otuDailyPercentOfLimit;
-    final dailyValue =
-        '${exposure.otuDaily.toStringAsFixed(0)} / '
-        '${O2Exposure.dailyOtuLimit.toStringAsFixed(0)}';
+    final dailyColor = _getOtuLimitColor(dailyPct, colorScheme);
 
-    // Weekly rolling total
+    // Weekly data
     final weeklyTotal = weeklyOtu ?? exposure.otu;
+    final weeklyPrior = (weeklyTotal - exposure.otu).clamp(
+      0.0,
+      double.infinity,
+    );
     final weeklyPct = (weeklyTotal / O2Exposure.weeklyOtuLimit) * 100;
-    final weeklyValue =
-        '${weeklyTotal.toStringAsFixed(0)} / '
-        '${O2Exposure.weeklyOtuLimit.toStringAsFixed(0)}';
+    final weeklyColor = _getOtuLimitColor(weeklyPct, colorScheme);
 
-    return Row(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // This Dive
-        Expanded(
-          child: _buildOtuMetric(
-            context,
-            value: diveOtuValue,
-            label: 'This Dive',
-            textTheme: textTheme,
-            colorScheme: colorScheme,
-          ),
+        Text(
+          context.l10n.diveLog_o2tox_oxygenToleranceUnits,
+          style: textTheme.bodyMedium,
         ),
+        const SizedBox(height: 8),
 
-        // Daily
-        Expanded(
-          child: _buildOtuMetric(
-            context,
-            value: dailyValue,
-            label: 'Daily (${dailyPct.toStringAsFixed(0)}%)',
-            textTheme: textTheme,
-            colorScheme: colorScheme,
-            valueColor: _getOtuLimitColor(dailyPct, colorScheme),
-          ),
+        // Daily OTU bar
+        _buildOtuBarSection(
+          colorScheme: colorScheme,
+          textTheme: textTheme,
+          label: 'Daily',
+          total: dailyTotal,
+          limit: O2Exposure.dailyOtuLimit,
+          prior: exposure.otuStart,
+          thisDive: exposure.otu,
+          percent: dailyPct,
+          color: dailyColor,
+          priorLabel: 'Start: ${exposure.otuStart.toStringAsFixed(0)} OTU',
         ),
+        const SizedBox(height: 8),
 
-        // Weekly
-        Expanded(
-          child: _buildOtuMetric(
-            context,
-            value: weeklyValue,
-            label: 'Weekly (${weeklyPct.toStringAsFixed(0)}%)',
-            textTheme: textTheme,
-            colorScheme: colorScheme,
-            valueColor: _getOtuLimitColor(weeklyPct, colorScheme),
-          ),
+        // Weekly OTU bar
+        _buildOtuBarSection(
+          colorScheme: colorScheme,
+          textTheme: textTheme,
+          label: 'Weekly',
+          total: weeklyTotal,
+          limit: O2Exposure.weeklyOtuLimit,
+          prior: weeklyPrior,
+          thisDive: exposure.otu,
+          percent: weeklyPct,
+          color: weeklyColor,
+          priorLabel: 'Prior: ${weeklyPrior.toStringAsFixed(0)} OTU',
         ),
       ],
+    );
+  }
+
+  Widget _buildOtuBarSection({
+    required ColorScheme colorScheme,
+    required TextTheme textTheme,
+    required String label,
+    required double total,
+    required double limit,
+    required double prior,
+    required double thisDive,
+    required double percent,
+    required Color color,
+    required String priorLabel,
+  }) {
+    // Header value: "cursor / total / limit" or "total / limit"
+    final String headerValue;
+    if (selectedOtu != null) {
+      headerValue =
+          '${selectedOtu!.toStringAsFixed(0)} / '
+          '${total.toStringAsFixed(0)} / '
+          '${limit.toStringAsFixed(0)} OTU';
+    } else {
+      headerValue =
+          '${total.toStringAsFixed(0)} / ${limit.toStringAsFixed(0)} OTU';
+    }
+
+    return Semantics(
+      label:
+          '$label: ${total.toStringAsFixed(0)} of '
+          '${limit.toStringAsFixed(0)} OTU, '
+          '${percent.toStringAsFixed(0)} percent',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header row
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(label, style: textTheme.bodySmall),
+              Text(
+                headerValue,
+                style: textTheme.bodySmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+
+          // Stacked bar
+          _buildStackedOtuBar(
+            colorScheme: colorScheme,
+            endColor: color,
+            totalFraction: (total / limit).clamp(0.0, 1.0),
+            priorFraction: (prior / limit).clamp(0.0, 1.0),
+            selectedDelta: selectedOtu,
+            limit: limit,
+          ),
+          const SizedBox(height: 2),
+
+          // Footer row
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                priorLabel,
+                style: textTheme.labelSmall?.copyWith(
+                  fontSize: 11,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+              Text(
+                '+${thisDive.toStringAsFixed(0)} this dive',
+                style: textTheme.labelSmall?.copyWith(
+                  fontSize: 11,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Builds the stacked OTU bar with up to four layers:
+  ///   1. Background track (full width = limit)
+  ///   2. Colored bar: total OTU as fraction of limit
+  ///   3. Primary overlay: OTU at cursor point during this dive
+  ///   4. Prior segment: OTU from prior dives (always visible)
+  Widget _buildStackedOtuBar({
+    required ColorScheme colorScheme,
+    required Color endColor,
+    required double totalFraction,
+    required double priorFraction,
+    required double? selectedDelta,
+    required double limit,
+  }) {
+    const barHeight = 16.0;
+    const barRadius = BorderRadius.all(Radius.circular(5));
+
+    return ClipRRect(
+      borderRadius: barRadius,
+      child: SizedBox(
+        height: barHeight,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final totalWidth = constraints.maxWidth;
+
+            return Stack(
+              children: [
+                // Background track
+                Container(
+                  width: totalWidth,
+                  height: barHeight,
+                  color: colorScheme.surfaceContainerHighest,
+                ),
+                // Colored bar: total OTU as fraction of limit
+                Container(
+                  width: totalWidth * totalFraction,
+                  height: barHeight,
+                  color: endColor,
+                ),
+                // Primary overlay: OTU at cursor point
+                if (selectedDelta != null && selectedDelta > 0)
+                  Positioned(
+                    left: totalWidth * priorFraction,
+                    child: Container(
+                      width:
+                          totalWidth *
+                          (selectedDelta / limit).clamp(
+                            0.0,
+                            1.0 - priorFraction,
+                          ),
+                      height: barHeight,
+                      color: colorScheme.primary,
+                    ),
+                  ),
+                // Prior segment: OTU from prior dives (always on top)
+                if (priorFraction > 0)
+                  Container(
+                    width: totalWidth * priorFraction,
+                    height: barHeight,
+                    color: Colors.blueGrey,
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
     );
   }
 
@@ -830,42 +975,6 @@ class CompactO2ToxicityPanel extends StatelessWidget {
             Text(
               value,
               style: textTheme.bodyMedium?.copyWith(
-                fontWeight: FontWeight.bold,
-                color: valueColor,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-            Text(
-              label,
-              style: textTheme.labelSmall?.copyWith(
-                fontSize: 10,
-                color: colorScheme.onSurfaceVariant,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildOtuMetric(
-    BuildContext context, {
-    required String value,
-    required String label,
-    required TextTheme textTheme,
-    required ColorScheme colorScheme,
-    Color? valueColor,
-  }) {
-    return Semantics(
-      label: '$label: $value OTU',
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-        child: Column(
-          children: [
-            Text(
-              value,
-              style: textTheme.bodySmall?.copyWith(
                 fontWeight: FontWeight.bold,
                 color: valueColor,
               ),

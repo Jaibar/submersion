@@ -356,6 +356,7 @@ class UddfEntityImporter {
       final uddfId = tripData['uddfId'] as String?;
       final newId = _uuid.v4();
 
+      final tripTypeStr = tripData['tripType'] as String?;
       final trip = Trip(
         id: newId,
         diverId: diverId,
@@ -365,6 +366,9 @@ class UddfEntityImporter {
         location: tripData['location'] as String?,
         resortName: tripData['resortName'] as String?,
         liveaboardName: tripData['liveaboardName'] as String?,
+        tripType: tripTypeStr != null
+            ? TripType.fromName(tripTypeStr)
+            : TripType.shore,
         notes: tripData['notes'] as String? ?? '',
         createdAt: now,
         updatedAt: now,

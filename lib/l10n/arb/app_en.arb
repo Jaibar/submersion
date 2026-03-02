@@ -7075,6 +7075,74 @@
   "trips_summary_stat_totalTrips": "Total Trips",
   "trips_summary_upcomingSubtitle": "{date} • In {days} days",
   "trips_summary_upcomingTitle": "Upcoming",
+  "trips_type_shore": "Shore",
+  "trips_type_liveaboard": "Liveaboard",
+  "trips_type_resort": "Resort",
+  "trips_type_dayTrip": "Day Trip",
+  "trips_edit_label_tripType": "Trip Type",
+  "trips_edit_sectionTitle_vessel": "Vessel Details",
+  "trips_edit_label_vesselName": "Vessel Name *",
+  "trips_edit_hint_vesselName": "e.g. Ocean Explorer",
+  "trips_edit_label_operatorName": "Operator / Charter",
+  "trips_edit_hint_operatorName": "e.g. Red Sea Divers",
+  "trips_edit_label_vesselType": "Vessel Type",
+  "trips_edit_label_cabinType": "Cabin Type",
+  "trips_edit_hint_cabinType": "e.g. Deluxe Double",
+  "trips_edit_label_capacity": "Passenger Capacity",
+  "trips_edit_sectionTitle_embarkDisembark": "Embark / Disembark",
+  "trips_edit_label_embarkPort": "Embark Port",
+  "trips_edit_hint_embarkPort": "e.g. Hurghada Marina",
+  "trips_edit_label_disembarkPort": "Disembark Port",
+  "trips_edit_hint_disembarkPort": "e.g. Hurghada Marina",
+  "trips_edit_validation_vesselRequired": "Vessel name is required for liveaboard trips",
+  "trips_detail_tab_overview": "Overview",
+  "trips_detail_tab_itinerary": "Itinerary",
+  "trips_detail_tab_photos": "Photos",
+  "trips_detail_tab_dives": "Dives",
+  "trips_detail_sectionTitle_vessel": "Vessel",
+  "trips_detail_label_operator": "Operator",
+  "trips_detail_label_vesselType": "Type",
+  "trips_detail_label_cabin": "Cabin",
+  "trips_detail_label_capacity": "Capacity",
+  "trips_detail_label_embark": "Embark",
+  "trips_detail_label_disembark": "Disembark",
+  "trips_detail_stat_divesPerDay": "Dives per day",
+  "trips_detail_stat_diveDays": "Dive days",
+  "trips_detail_stat_seaDays": "Sea days",
+  "trips_detail_stat_sitesVisited": "Sites visited",
+  "trips_detail_stat_speciesSeen": "Species seen",
+  "trips_detail_sectionTitle_dailyBreakdown": "Daily Breakdown",
+  "trips_breakdown_column_day": "Day",
+  "trips_breakdown_column_type": "Type",
+  "trips_breakdown_column_dives": "Dives",
+  "trips_breakdown_column_bottomTime": "Bottom Time",
+  "trips_breakdown_column_sites": "Sites",
+  "trips_detail_sectionTitle_voyageMap": "Voyage Route",
+  "trips_itinerary_dayLabel": "Day {dayNumber}",
+  "@trips_itinerary_dayLabel": {
+    "placeholders": {
+      "dayNumber": {
+        "type": "int"
+      }
+    }
+  },
+  "trips_itinerary_diveCount": "{count, plural, =1{1 dive} other{{count} dives}}",
+  "@trips_itinerary_diveCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "trips_itinerary_editDay": "Edit Day",
+  "trips_itinerary_dayType_label": "Day Type",
+  "trips_itinerary_portName_label": "Port / Anchorage",
+  "trips_itinerary_notes_label": "Notes",
+  "trips_itinerary_noDives": "No dives",
+  "trips_vesselType_catamaran": "Catamaran",
+  "trips_vesselType_motorYacht": "Motor Yacht",
+  "trips_vesselType_sailingYacht": "Sailing Yacht",
+  "trips_vesselType_other": "Other",
   "@trips_detail_dialog_deleteContent": {
     "placeholders": {
       "name": {

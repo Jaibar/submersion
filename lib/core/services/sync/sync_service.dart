@@ -581,6 +581,16 @@ class SyncService {
           (type: 'buddies', records: data.buddies, hasUpdatedAt: true),
           (type: 'diveCenters', records: data.diveCenters, hasUpdatedAt: true),
           (type: 'trips', records: data.trips, hasUpdatedAt: true),
+          (
+            type: 'liveaboardDetails',
+            records: data.liveaboardDetails,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'itineraryDays',
+            records: data.itineraryDays,
+            hasUpdatedAt: true,
+          ),
           (type: 'equipment', records: data.equipment, hasUpdatedAt: true),
           (
             type: 'equipmentSets',

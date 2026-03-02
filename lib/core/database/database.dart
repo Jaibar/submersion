@@ -52,6 +52,47 @@ class Trips extends Table {
   TextColumn get location => text().nullable()();
   TextColumn get resortName => text().nullable()();
   TextColumn get liveaboardName => text().nullable()();
+  TextColumn get tripType => text().withDefault(const Constant('shore'))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  IntColumn get createdAt => integer()();
+  IntColumn get updatedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// Liveaboard-specific details, 1:1 with trips
+class LiveaboardDetailRecords extends Table {
+  TextColumn get id => text()();
+  TextColumn get tripId => text().references(Trips, #id)();
+  TextColumn get vesselName => text()();
+  TextColumn get operatorName => text().nullable()();
+  TextColumn get vesselType => text().nullable()();
+  TextColumn get cabinType => text().nullable()();
+  IntColumn get capacity => integer().nullable()();
+  TextColumn get embarkPort => text().nullable()();
+  RealColumn get embarkLatitude => real().nullable()();
+  RealColumn get embarkLongitude => real().nullable()();
+  TextColumn get disembarkPort => text().nullable()();
+  RealColumn get disembarkLatitude => real().nullable()();
+  RealColumn get disembarkLongitude => real().nullable()();
+  IntColumn get createdAt => integer()();
+  IntColumn get updatedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// Itinerary days for trip planning
+class TripItineraryDays extends Table {
+  TextColumn get id => text()();
+  TextColumn get tripId => text().references(Trips, #id)();
+  IntColumn get dayNumber => integer()();
+  IntColumn get date => integer()(); // Unix timestamp
+  TextColumn get dayType => text().withDefault(const Constant('diveDay'))();
+  TextColumn get portName => text().nullable()();
+  RealColumn get latitude => real().nullable()();
+  RealColumn get longitude => real().nullable()();
   TextColumn get notes => text().withDefault(const Constant(''))();
   IntColumn get createdAt => integer()();
   IntColumn get updatedAt => integer()();
@@ -1113,13 +1154,16 @@ class ScheduledNotifications extends Table {
     ScheduledNotifications,
     // User-defined custom fields
     DiveCustomFields,
+    // Liveaboard tracking (v2.0)
+    LiveaboardDetailRecords,
+    TripItineraryDays,
   ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 45;
+  int get schemaVersion => 46;
 
   @override
   MigrationStrategy get migration {
@@ -2049,6 +2093,90 @@ class AppDatabase extends _$AppDatabase {
               "ALTER TABLE diver_settings ADD COLUMN tissue_viz_mode TEXT NOT NULL DEFAULT 'heatMap'",
             );
           }
+        }
+
+        if (from < 46) {
+          // Add trip type column to trips
+          final tripsInfo = await customSelect(
+            'PRAGMA table_info(trips)',
+          ).get();
+          final tripsCols = tripsInfo
+              .map((r) => r.read<String>('name'))
+              .toSet();
+          if (!tripsCols.contains('trip_type')) {
+            await customStatement(
+              "ALTER TABLE trips ADD COLUMN trip_type TEXT NOT NULL DEFAULT 'shore'",
+            );
+          }
+
+          // Create liveaboard_detail_records table
+          await customStatement('''
+            CREATE TABLE IF NOT EXISTS liveaboard_detail_records (
+              id TEXT NOT NULL PRIMARY KEY,
+              trip_id TEXT NOT NULL REFERENCES trips(id),
+              vessel_name TEXT NOT NULL,
+              operator_name TEXT,
+              vessel_type TEXT,
+              cabin_type TEXT,
+              capacity INTEGER,
+              embark_port TEXT,
+              embark_latitude REAL,
+              embark_longitude REAL,
+              disembark_port TEXT,
+              disembark_latitude REAL,
+              disembark_longitude REAL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            )
+          ''');
+
+          // Create trip_itinerary_days table
+          await customStatement('''
+            CREATE TABLE IF NOT EXISTS trip_itinerary_days (
+              id TEXT NOT NULL PRIMARY KEY,
+              trip_id TEXT NOT NULL REFERENCES trips(id),
+              day_number INTEGER NOT NULL,
+              date INTEGER NOT NULL,
+              day_type TEXT NOT NULL DEFAULT 'diveDay',
+              port_name TEXT,
+              latitude REAL,
+              longitude REAL,
+              notes TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            )
+          ''');
+
+          // Migrate existing liveaboard trips
+          await customStatement('''
+            UPDATE trips SET trip_type = 'liveaboard'
+            WHERE liveaboard_name IS NOT NULL AND liveaboard_name != ''
+          ''');
+
+          // Migrate existing resort trips (only non-liveaboard)
+          await customStatement('''
+            UPDATE trips SET trip_type = 'resort'
+            WHERE resort_name IS NOT NULL AND resort_name != ''
+              AND trip_type = 'shore'
+          ''');
+
+          // Create liveaboard_detail_records for existing liveaboard trips
+          await customStatement('''
+            INSERT INTO liveaboard_detail_records (
+              id, trip_id, vessel_name, created_at, updated_at
+            )
+            SELECT
+              lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' ||
+                substr(hex(randomblob(2)),2) || '-' ||
+                substr('89ab', abs(random()) % 4 + 1, 1) ||
+                substr(hex(randomblob(2)),2) || '-' || hex(randomblob(6))),
+              id,
+              liveaboard_name,
+              created_at,
+              updated_at
+            FROM trips
+            WHERE trip_type = 'liveaboard'
+          ''');
         }
       },
       beforeOpen: (details) async {

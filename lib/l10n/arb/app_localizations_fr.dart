@@ -13172,6 +13172,179 @@ class AppLocalizationsFr extends AppLocalizations {
   String get trips_summary_upcomingTitle => 'A venir';
 
   @override
+  String get trips_type_shore => 'Shore';
+
+  @override
+  String get trips_type_liveaboard => 'Liveaboard';
+
+  @override
+  String get trips_type_resort => 'Resort';
+
+  @override
+  String get trips_type_dayTrip => 'Day Trip';
+
+  @override
+  String get trips_edit_label_tripType => 'Trip Type';
+
+  @override
+  String get trips_edit_sectionTitle_vessel => 'Vessel Details';
+
+  @override
+  String get trips_edit_label_vesselName => 'Vessel Name *';
+
+  @override
+  String get trips_edit_hint_vesselName => 'e.g. Ocean Explorer';
+
+  @override
+  String get trips_edit_label_operatorName => 'Operator / Charter';
+
+  @override
+  String get trips_edit_hint_operatorName => 'e.g. Red Sea Divers';
+
+  @override
+  String get trips_edit_label_vesselType => 'Vessel Type';
+
+  @override
+  String get trips_edit_label_cabinType => 'Cabin Type';
+
+  @override
+  String get trips_edit_hint_cabinType => 'e.g. Deluxe Double';
+
+  @override
+  String get trips_edit_label_capacity => 'Passenger Capacity';
+
+  @override
+  String get trips_edit_sectionTitle_embarkDisembark => 'Embark / Disembark';
+
+  @override
+  String get trips_edit_label_embarkPort => 'Embark Port';
+
+  @override
+  String get trips_edit_hint_embarkPort => 'e.g. Hurghada Marina';
+
+  @override
+  String get trips_edit_label_disembarkPort => 'Disembark Port';
+
+  @override
+  String get trips_edit_hint_disembarkPort => 'e.g. Hurghada Marina';
+
+  @override
+  String get trips_edit_validation_vesselRequired =>
+      'Vessel name is required for liveaboard trips';
+
+  @override
+  String get trips_detail_tab_overview => 'Overview';
+
+  @override
+  String get trips_detail_tab_itinerary => 'Itinerary';
+
+  @override
+  String get trips_detail_tab_photos => 'Photos';
+
+  @override
+  String get trips_detail_tab_dives => 'Dives';
+
+  @override
+  String get trips_detail_sectionTitle_vessel => 'Vessel';
+
+  @override
+  String get trips_detail_label_operator => 'Operator';
+
+  @override
+  String get trips_detail_label_vesselType => 'Type';
+
+  @override
+  String get trips_detail_label_cabin => 'Cabin';
+
+  @override
+  String get trips_detail_label_capacity => 'Capacity';
+
+  @override
+  String get trips_detail_label_embark => 'Embark';
+
+  @override
+  String get trips_detail_label_disembark => 'Disembark';
+
+  @override
+  String get trips_detail_stat_divesPerDay => 'Dives per day';
+
+  @override
+  String get trips_detail_stat_diveDays => 'Dive days';
+
+  @override
+  String get trips_detail_stat_seaDays => 'Sea days';
+
+  @override
+  String get trips_detail_stat_sitesVisited => 'Sites visited';
+
+  @override
+  String get trips_detail_stat_speciesSeen => 'Species seen';
+
+  @override
+  String get trips_detail_sectionTitle_dailyBreakdown => 'Daily Breakdown';
+
+  @override
+  String get trips_breakdown_column_day => 'Day';
+
+  @override
+  String get trips_breakdown_column_type => 'Type';
+
+  @override
+  String get trips_breakdown_column_dives => 'Dives';
+
+  @override
+  String get trips_breakdown_column_bottomTime => 'Bottom Time';
+
+  @override
+  String get trips_breakdown_column_sites => 'Sites';
+
+  @override
+  String get trips_detail_sectionTitle_voyageMap => 'Voyage Route';
+
+  @override
+  String trips_itinerary_dayLabel(int dayNumber) {
+    return 'Day $dayNumber';
+  }
+
+  @override
+  String trips_itinerary_diveCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count dives',
+      one: '1 dive',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get trips_itinerary_editDay => 'Edit Day';
+
+  @override
+  String get trips_itinerary_dayType_label => 'Day Type';
+
+  @override
+  String get trips_itinerary_portName_label => 'Port / Anchorage';
+
+  @override
+  String get trips_itinerary_notes_label => 'Notes';
+
+  @override
+  String get trips_itinerary_noDives => 'No dives';
+
+  @override
+  String get trips_vesselType_catamaran => 'Catamaran';
+
+  @override
+  String get trips_vesselType_motorYacht => 'Motor Yacht';
+
+  @override
+  String get trips_vesselType_sailingYacht => 'Sailing Yacht';
+
+  @override
+  String get trips_vesselType_other => 'Other';
+
+  @override
   String get units_altitude_feet => 'ft';
 
   @override
