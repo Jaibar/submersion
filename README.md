@@ -171,6 +171,58 @@ You only need to do this once — subsequent launches will work normally.
 
 > **Note:** This build cannot be distributed via the Mac App Store (which requires sandboxing). It's intended for local testing and direct distribution.
 
+### Windows: Building from Source
+
+Windows builds require no code signing for local use. You need [Visual Studio](https://visualstudio.microsoft.com/) with the **Desktop development with C++** workload installed (the free Community edition works).
+
+```bash
+# Build the app
+flutter build windows --release
+```
+
+The built app will be at `build\windows\x64\runner\Release\`.
+
+> **Note:** Windows SmartScreen may show an "unrecognized app" warning for unsigned executables. Click "More info" then "Run anyway" to proceed.
+
+### Linux: Building from Source
+
+Linux builds require GTK3 and several native development libraries. Install them first:
+
+**Debian/Ubuntu:**
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  clang cmake ninja-build pkg-config \
+  libgtk-3-dev liblzma-dev libstdc++-12-dev \
+  libsqlite3-dev libsecret-1-dev
+```
+
+**Fedora:**
+
+```bash
+sudo dnf install -y \
+  clang cmake ninja-build pkg-config \
+  gtk3-devel xz-devel libstdc++-devel \
+  sqlite-devel libsecret-devel
+```
+
+**Arch Linux:**
+
+```bash
+sudo pacman -S --needed \
+  clang cmake ninja pkg-config \
+  gtk3 xz sqlite libsecret
+```
+
+Then build:
+
+```bash
+flutter build linux --release
+```
+
+The built app will be at `build/linux/x64/release/bundle/`.
+
 ## Architecture
 
 Submersion follows clean architecture principles with clear separation of concerns:
