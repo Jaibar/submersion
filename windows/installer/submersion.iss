@@ -30,7 +30,6 @@ OutputBaseFilename=Submersion-v{#APP_VERSION}-Windows-Setup
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
-ArchitecturesInstallMode=x64compatible
 PrivilegesRequired=admin
 WizardStyle=modern
 VersionInfoVersion={#APP_VERSION}.{#APP_VERSION_CODE}
