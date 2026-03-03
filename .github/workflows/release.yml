@@ -109,7 +109,12 @@ jobs:
             exit 1
           fi
           echo "Signing with: $IDENTITY"
+          # Pass 1: Sign all nested frameworks/dylibs (no entitlements)
           codesign --deep --force --options runtime \
+            --sign "$IDENTITY" \
+            "$APP_PATH"
+          # Pass 2: Re-sign only the top-level app with entitlements
+          codesign --force --options runtime \
             --entitlements "macos/Runner/ReleaseNoSandbox.entitlements" \
             --sign "$IDENTITY" \
             "$APP_PATH"

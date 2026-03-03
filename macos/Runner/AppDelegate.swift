@@ -6,19 +6,28 @@ class AppDelegate: FlutterAppDelegate {
   private var bookmarkHandler: SecurityScopedBookmarkHandler?
   private var icloudHandler: ICloudContainerHandler?
   private var metadataHandler: MetadataWriteHandler?
+  private var updateChannel: FlutterMethodChannel?
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
     NSLog("[AppDelegate] applicationDidFinishLaunching called")
-    // Get the Flutter engine's binary messenger
     if let controller = mainFlutterWindow?.contentViewController as? FlutterViewController {
       NSLog("[AppDelegate] Got FlutterViewController, setting up handlers...")
-      bookmarkHandler = SecurityScopedBookmarkHandler(messenger: controller.engine.binaryMessenger)
-      icloudHandler = ICloudContainerHandler(messenger: controller.engine.binaryMessenger)
-      metadataHandler = MetadataWriteHandler(messenger: controller.engine.binaryMessenger)
+      let messenger = controller.engine.binaryMessenger
+      bookmarkHandler = SecurityScopedBookmarkHandler(messenger: messenger)
+      icloudHandler = ICloudContainerHandler(messenger: messenger)
+      metadataHandler = MetadataWriteHandler(messenger: messenger)
+      updateChannel = FlutterMethodChannel(
+        name: "app.submersion/updates",
+        binaryMessenger: messenger
+      )
       NSLog("[AppDelegate] All handlers initialized")
     } else {
       NSLog("[AppDelegate] ERROR: Could not get FlutterViewController!")
     }
+  }
+
+  @IBAction func checkForUpdates(_ sender: Any) {
+    updateChannel?.invokeMethod("checkForUpdateInteractively", arguments: nil)
   }
 
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -26,7 +35,6 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   override func applicationWillTerminate(_ notification: Notification) {
-    // Clean up security-scoped resource access
     bookmarkHandler?.cleanup()
   }
 

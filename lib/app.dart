@@ -7,6 +7,7 @@ import 'package:submersion/core/theme/app_theme_registry.dart';
 import 'package:submersion/core/router/app_router.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
+import 'package:submersion/features/auto_update/presentation/providers/update_menu_channel.dart';
 
 class SubmersionApp extends ConsumerStatefulWidget {
   const SubmersionApp({super.key});
@@ -21,6 +22,7 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    registerUpdateMenuChannel(ref);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _maybeSyncOnLaunch();
     });

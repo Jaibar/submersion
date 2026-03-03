@@ -2,6 +2,9 @@
 
 #include <optional>
 
+#include <flutter/method_channel.h>
+#include <flutter/standard_method_codec.h>
+
 #include "flutter/generated_plugin_registrant.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -36,6 +39,14 @@ bool FlutterWindow::OnCreate() {
   // window is shown. It is a no-op if the first frame hasn't completed yet.
   flutter_controller_->ForceRedraw();
 
+  // Add "Check for Updates..." to the window system menu
+  HMENU sys_menu = GetSystemMenu(GetHandle(), FALSE);
+  if (sys_menu) {
+    AppendMenu(sys_menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(sys_menu, MF_STRING, kCheckForUpdatesCmd,
+               L"Check for Updates...");
+  }
+
   return true;
 }
 
@@ -64,6 +75,19 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   switch (message) {
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
+      break;
+    case WM_SYSCOMMAND:
+      if ((wparam & 0xFFF0) == kCheckForUpdatesCmd) {
+        if (flutter_controller_) {
+          flutter_controller_->engine()->ProcessMessages();
+          auto channel = flutter::MethodChannel<flutter::EncodableValue>(
+              flutter_controller_->engine()->messenger(),
+              "app.submersion/updates",
+              &flutter::StandardMethodCodec::GetInstance());
+          channel.InvokeMethod("checkForUpdateInteractively", nullptr);
+        }
+        return 0;
+      }
       break;
   }
 
