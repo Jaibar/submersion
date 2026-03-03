@@ -7,6 +7,8 @@ import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/trips/data/repositories/itinerary_day_repository.dart';
+import 'package:submersion/features/trips/data/repositories/liveaboard_details_repository.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart' as domain;
 
 class TripRepository {
@@ -169,19 +171,25 @@ class TripRepository {
     }
   }
 
-  /// Delete a trip (sets trip_id to null on associated dives)
+  /// Delete a trip and all associated child records.
+  /// Removes liveaboard details, itinerary days, and dive associations
+  /// before deleting the trip itself.
   Future<void> deleteTrip(String id) async {
     try {
       _log.info('Deleting trip: $id');
 
-      // First, remove trip association from dives using customUpdate
+      // Delete child records with non-nullable FKs first
+      await LiveaboardDetailsRepository().deleteByTripId(id);
+      await ItineraryDayRepository().deleteByTripId(id);
+
+      // Remove trip association from dives (nullable FK)
       await _db.customUpdate(
         'UPDATE dives SET trip_id = NULL WHERE trip_id = ?',
         variables: [Variable.withString(id)],
         updates: {_db.dives},
       );
 
-      // Then delete the trip
+      // Delete the trip
       await (_db.delete(_db.trips)..where((t) => t.id.equals(id))).go();
       await _syncRepository.logDeletion(entityType: 'trips', recordId: id);
       SyncEventBus.notifyLocalChange();
