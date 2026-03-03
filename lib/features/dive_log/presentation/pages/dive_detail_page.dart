@@ -27,6 +27,7 @@ import 'package:submersion/features/dive_log/data/services/profile_analysis_serv
 import 'package:submersion/features/dive_log/data/services/profile_markers_service.dart';
 import 'package:submersion/features/dive_log/domain/entities/cylinder_sac.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_computer.dart';
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_detail_ui_providers.dart';
@@ -2847,28 +2848,7 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
     return computersAsync.when(
       data: (computers) {
         if (computers.isNotEmpty) {
-          final computer = computers.first;
-          return [
-            _buildDetailRow(
-              context,
-              context.l10n.diveLog_detail_label_diveComputer,
-              computer.displayName,
-            ),
-            if (computer.serialNumber != null &&
-                computer.serialNumber!.isNotEmpty)
-              _buildDetailRow(
-                context,
-                context.l10n.diveLog_detail_label_serialNumber,
-                computer.serialNumber!,
-              ),
-            if (computer.firmwareVersion != null &&
-                computer.firmwareVersion!.isNotEmpty)
-              _buildDetailRow(
-                context,
-                context.l10n.diveLog_detail_label_firmwareVersion,
-                computer.firmwareVersion!,
-              ),
-          ];
+          return [_buildLinkedComputerRow(context, computers.first)];
         }
         // Fall back to string fields on Dive entity
         return _buildDiveComputerStringRows(context, dive);
@@ -2904,6 +2884,71 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
           dive.diveComputerFirmware!,
         ),
     ];
+  }
+
+  /// Build a tappable row for a linked dive computer that navigates to
+  /// the device detail page.
+  Widget _buildLinkedComputerRow(BuildContext context, DiveComputer computer) {
+    return Semantics(
+      button: true,
+      label: 'View dive computer ${computer.displayName}',
+      child: InkWell(
+        onTap: () => context.push('/dive-computers/${computer.id}'),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                context.l10n.diveLog_detail_label_diveComputer,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+              Flexible(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(
+                            computer.displayName,
+                            style: Theme.of(context).textTheme.bodyMedium,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (computer.serialNumber != null &&
+                              computer.serialNumber!.isNotEmpty)
+                            Text(
+                              'S/N ${computer.serialNumber}',
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                  ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    ExcludeSemantics(
+                      child: Icon(
+                        Icons.chevron_right,
+                        size: 16,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildTripRow(BuildContext context, Dive dive) {
