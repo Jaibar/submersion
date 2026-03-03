@@ -122,9 +122,9 @@
 		</dict>
 	</array>
 	<key>SUFeedURL</key>
-	<string>https://github.com/ericgriffin/submersion/releases/latest/download/appcast.xml</string>
+	<string>https://github.com/submersion-app/submersion/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>PLACEHOLDER_EDDSA_PUBLIC_KEY</string>
+	<string>XHQ9oigpC8fdjMcsVJQn5gfgYoWocVOb2G4M6IvexJk=</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUAutomaticallyUpdate</key>

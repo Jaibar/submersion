@@ -10,7 +10,9 @@
 #   macos_dmg_url - Download URL for macOS DMG
 #   windows_url     - Download URL for Windows installer
 #
-# Requires: SPARKLE_EDDSA_SIGNATURE env var (EdDSA signature of macOS DMG)
+# Requires:
+#   SPARKLE_EDDSA_SIGNATURE env var (EdDSA signature of macOS DMG)
+#   SPARKLE_DMG_LENGTH env var (byte length of macOS DMG)
 
 set -euo pipefail
 
@@ -20,6 +22,7 @@ DATE="${3}"
 MACOS_URL="${4}"
 WINDOWS_URL="${5}"
 EDDSA_SIG="${SPARKLE_EDDSA_SIGNATURE:-}"
+DMG_LENGTH="${SPARKLE_DMG_LENGTH:-0}"
 
 cat <<APPCAST
 <?xml version="1.0" encoding="utf-8"?>
@@ -35,6 +38,7 @@ cat <<APPCAST
       <enclosure
         url="${MACOS_URL}"
         sparkle:edSignature="${EDDSA_SIG}"
+        length="${DMG_LENGTH}"
         type="application/octet-stream"
         sparkle:os="macos"
       />

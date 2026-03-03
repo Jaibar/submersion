@@ -30,6 +30,9 @@ jobs:
     name: Build macOS
     runs-on: macos-15
     timeout-minutes: 45
+    outputs:
+      eddsa-signature: ${{ steps.sparkle-sign.outputs.eddsa-signature }}
+      dmg-length: ${{ steps.sparkle-sign.outputs.dmg-length }}
 
     steps:
       - name: Checkout repository
@@ -159,6 +162,47 @@ jobs:
             sleep 30
           done
           xcrun stapler staple "$DMG"
+
+      - name: Sign DMG with Sparkle EdDSA
+        id: sparkle-sign
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          DMG="Submersion-${TAG_NAME}-macOS.dmg"
+
+          if [ -z "$SPARKLE_EDDSA_PRIVATE_KEY" ]; then
+            echo "Error: SPARKLE_EDDSA_PRIVATE_KEY secret is not configured"
+            exit 1
+          fi
+
+          # sign_update is installed by CocoaPods as part of the Sparkle framework
+          # (pulled in by the auto_updater Flutter package during flutter build macos).
+          # Output format: sparkle:edSignature="<sig>" length="<len>"
+          SIGN_OUTPUT=$(echo "$SPARKLE_EDDSA_PRIVATE_KEY" | ./macos/Pods/Sparkle/bin/sign_update --ed-key-file - "$DMG")
+
+          # Parse signature and length from output
+          EDDSA_SIG=$(echo "$SIGN_OUTPUT" | sed -n 's/.*edSignature="\([^"]*\)".*/\1/p')
+
+          if [ -z "$EDDSA_SIG" ]; then
+            echo "Error: Failed to extract EdDSA signature from sign_update output"
+            exit 1
+          fi
+
+          # Mask the signature immediately so it cannot appear in subsequent logs
+          echo "::add-mask::${EDDSA_SIG}"
+
+          DMG_LENGTH=$(echo "$SIGN_OUTPUT" | sed -n 's/.*length="\([^"]*\)".*/\1/p')
+
+          if [ -z "$DMG_LENGTH" ]; then
+            echo "Error: Failed to extract length from sign_update output"
+            exit 1
+          fi
+
+          echo "DMG length: ${DMG_LENGTH} bytes"
+
+          echo "eddsa-signature=${EDDSA_SIG}" >> "$GITHUB_OUTPUT"
+          echo "dmg-length=${DMG_LENGTH}" >> "$GITHUB_OUTPUT"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v7
@@ -598,7 +642,8 @@ jobs:
       - name: Generate appcast.xml
         env:
           TAG_NAME: ${{ github.ref_name }}
-          SPARKLE_EDDSA_SIGNATURE: ${{ secrets.SPARKLE_EDDSA_SIGNATURE }}
+          SPARKLE_EDDSA_SIGNATURE: ${{ needs.build-macos.outputs.eddsa-signature }}
+          SPARKLE_DMG_LENGTH: ${{ needs.build-macos.outputs.dmg-length }}
         run: |
           VERSION="${TAG_NAME#v}"
           BUILD_NUMBER=$(grep '^version:' pubspec.yaml | sed 's/.*+//')
