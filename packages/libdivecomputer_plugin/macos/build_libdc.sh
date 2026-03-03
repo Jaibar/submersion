@@ -10,13 +10,31 @@ CONFIG_DIR="${SCRIPT_DIR}/config"
 BUILD_DIR="${SCRIPT_DIR}/build"
 OUTPUT_LIB="${BUILD_DIR}/libdivecomputer.a"
 
-# Skip rebuild if already built
-if [ -f "${OUTPUT_LIB}" ]; then
-    echo "libdivecomputer.a already built, skipping."
-    exit 0
+mkdir -p "${BUILD_DIR}"
+
+# Determine architectures to build for.
+# ARCHS is set by Xcode during the build phase.
+if [ -z "${ARCHS:-}" ]; then
+    ARCHS="$(uname -m)"
 fi
 
-mkdir -p "${BUILD_DIR}"
+# Skip rebuild if the library already contains all requested architectures.
+if [ -f "${OUTPUT_LIB}" ]; then
+    EXISTING_ARCHS=$(xcrun lipo -archs "${OUTPUT_LIB}" 2>/dev/null || echo "")
+    NEEDS_REBUILD=false
+    for arch in ${ARCHS}; do
+        if ! echo "${EXISTING_ARCHS}" | grep -qw "${arch}"; then
+            NEEDS_REBUILD=true
+            break
+        fi
+    done
+    if [ "${NEEDS_REBUILD}" = false ]; then
+        echo "libdivecomputer.a already contains [${EXISTING_ARCHS}], skipping."
+        exit 0
+    fi
+    echo "libdivecomputer.a has [${EXISTING_ARCHS}] but need [${ARCHS}], rebuilding."
+    rm -f "${OUTPUT_LIB}"
+fi
 
 # All source files from Makefile.am (excluding Windows-specific files)
 SOURCES=(
@@ -93,12 +111,6 @@ CFLAGS=(
 # Add macOS SDK
 SDKROOT=$(xcrun --show-sdk-path)
 CFLAGS+=(-isysroot "${SDKROOT}")
-
-# Determine architectures to build for.
-# ARCHS is set by Xcode during the build phase.
-if [ -z "${ARCHS:-}" ]; then
-    ARCHS="$(uname -m)"
-fi
 
 echo "Building libdivecomputer for macOS (architectures: ${ARCHS})..."
 
