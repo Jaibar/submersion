@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
@@ -719,23 +720,25 @@ class _ComputersSectionContent extends ConsumerWidget {
               ],
             ),
           ),
-          const SizedBox(height: 16),
-          _buildSectionHeader(
-            context,
-            context.l10n.transfer_computers_appleWatchHeader,
-          ),
-          const SizedBox(height: 8),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.watch),
-              title: Text(context.l10n.transfer_computers_appleWatchTitle),
-              subtitle: Text(
-                context.l10n.transfer_computers_appleWatchSubtitle,
-              ),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => context.push('/settings/wearable-import'),
+          if (Platform.isIOS) ...[
+            const SizedBox(height: 16),
+            _buildSectionHeader(
+              context,
+              context.l10n.transfer_computers_appleWatchHeader,
             ),
-          ),
+            const SizedBox(height: 8),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.watch),
+                title: Text(context.l10n.transfer_computers_appleWatchTitle),
+                subtitle: Text(
+                  context.l10n.transfer_computers_appleWatchSubtitle,
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => context.push('/settings/wearable-import'),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           _buildInfoCard(
             context,
