@@ -12,6 +12,7 @@ import 'package:submersion/features/trips/domain/entities/liveaboard_details.dar
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/trips/presentation/widgets/dive_assignment_dialog.dart';
 
 class TripEditPage extends ConsumerStatefulWidget {
   final String? tripId;
@@ -783,6 +784,58 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
         await liveaboardRepo.deleteByTripId(savedId);
         final itineraryRepo = ItineraryDayRepository();
         await itineraryRepo.deleteByTripId(savedId);
+      }
+
+      // Scan for candidate dives (on create, or when dates changed on edit)
+      final datesChanged =
+          !isEditing ||
+          _originalTrip?.startDate != _startDate ||
+          _originalTrip?.endDate != _endDate;
+
+      if (mounted && datesChanged && trip.diverId != null) {
+        final candidates = await ref
+            .read(tripRepositoryProvider)
+            .findCandidateDivesForTrip(
+              tripId: savedId,
+              startDate: _startDate,
+              endDate: _endDate,
+              diverId: trip.diverId!,
+            );
+
+        if (candidates.isNotEmpty && mounted) {
+          final selectedIds = await showDiveAssignmentDialog(
+            context: context,
+            candidates: candidates,
+          );
+
+          if (selectedIds != null && selectedIds.isNotEmpty && mounted) {
+            // Collect old trip IDs for provider invalidation
+            final oldTripIds = candidates
+                .where(
+                  (c) => selectedIds.contains(c.dive.id) && !c.isUnassigned,
+                )
+                .map((c) => c.currentTripId!)
+                .toSet();
+
+            await ref
+                .read(tripListNotifierProvider.notifier)
+                .assignDivesToTrip(
+                  selectedIds,
+                  savedId,
+                  oldTripIds: oldTripIds,
+                );
+
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    context.l10n.trips_diveScan_added(selectedIds.length),
+                  ),
+                ),
+              );
+            }
+          }
+        }
       }
 
       if (mounted) {
