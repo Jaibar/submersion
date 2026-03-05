@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -13,23 +14,32 @@ void main() {
   // expected google_fonts font-loading errors (fonts are not bundled in
   // test assets) do not escape as unhandled async exceptions.
   setUpAll(() async {
-    await runZonedGuarded(
-      () async {
-        // Touching .presets triggers lazy init of consoleLight, tropicalLight,
-        // etc., which call GoogleFonts.*TextTheme() and fire off font loads
-        // that will fail in the test environment.
-        // ignore: unnecessary_statements
-        AppThemeRegistry.presets;
-        try {
-          await GoogleFonts.pendingFonts();
-        } catch (_) {
-          // Expected: fonts are not bundled in test assets.
-        }
-      },
-      (error, stack) {
-        // Silently absorb google_fonts errors in test environment.
-      },
-    );
+    // Suppress debugPrint output from google_fonts during font loading.
+    // The fonts are not bundled in test assets, so google_fonts logs
+    // expected errors that are harmless but noisy.
+    final originalDebugPrint = debugPrint;
+    debugPrint = (String? message, {int? wrapWidth}) {};
+    try {
+      await runZonedGuarded(
+        () async {
+          // Touching .presets triggers lazy init of consoleLight,
+          // tropicalLight, etc., which call GoogleFonts.*TextTheme()
+          // and fire off font loads that will fail in the test environment.
+          // ignore: unnecessary_statements
+          AppThemeRegistry.presets;
+          try {
+            await GoogleFonts.pendingFonts();
+          } catch (_) {
+            // Expected: fonts are not bundled in test assets.
+          }
+        },
+        (error, stack) {
+          // Silently absorb google_fonts errors in test environment.
+        },
+      );
+    } finally {
+      debugPrint = originalDebugPrint;
+    }
   });
 
   group('AppThemeRegistry', () {
