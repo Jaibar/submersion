@@ -7,8 +7,10 @@ import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/trips/data/repositories/itinerary_day_repository.dart';
 import 'package:submersion/features/trips/data/repositories/liveaboard_details_repository.dart';
+import 'package:submersion/features/trips/domain/entities/dive_candidate.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart' as domain;
 
 class TripRepository {
@@ -260,6 +262,74 @@ class TripRepository {
       _log.info('Removed dive from trip');
     } catch (e, stackTrace) {
       _log.error('Failed to remove dive from trip', e, stackTrace);
+      rethrow;
+    }
+  }
+
+  /// Find dives within a trip's date range that are either unassigned
+  /// or assigned to a different trip (excludes dives already on this trip).
+  Future<List<DiveCandidate>> findCandidateDivesForTrip({
+    required String tripId,
+    required DateTime startDate,
+    required DateTime endDate,
+    required String diverId,
+  }) async {
+    try {
+      _log.info('Scanning for candidate dives: $startDate - $endDate');
+      final startMs = startDate.millisecondsSinceEpoch;
+      final endMs = endDate.millisecondsSinceEpoch;
+
+      final rows = await _db
+          .customSelect(
+            '''
+        SELECT d.id as dive_id, t.id as other_trip_id, t.name as other_trip_name
+        FROM dives d
+        LEFT JOIN trips t ON d.trip_id = t.id AND d.trip_id != ?
+        WHERE d.dive_date_time >= ? AND d.dive_date_time <= ?
+          AND d.diver_id = ?
+          AND (d.trip_id IS NULL OR d.trip_id != ?)
+        ORDER BY d.dive_date_time ASC
+      ''',
+            variables: [
+              Variable.withString(tripId),
+              Variable.withInt(startMs),
+              Variable.withInt(endMs),
+              Variable.withString(diverId),
+              Variable.withString(tripId),
+            ],
+          )
+          .get();
+
+      if (rows.isEmpty) return [];
+
+      // Load full dive objects
+      final diveRepository = DiveRepository();
+      final diveIds = rows.map((r) => r.data['dive_id'] as String).toList();
+      final dives = await diveRepository.getDivesByIds(diveIds);
+
+      // Build a map for quick lookup
+      final diveMap = {for (final d in dives) d.id: d};
+
+      // Build candidates, preserving order from query
+      final candidates = <DiveCandidate>[];
+      for (final row in rows) {
+        final diveId = row.data['dive_id'] as String;
+        final dive = diveMap[diveId];
+        if (dive == null) continue;
+
+        candidates.add(
+          DiveCandidate(
+            dive: dive,
+            currentTripId: row.data['other_trip_id'] as String?,
+            currentTripName: row.data['other_trip_name'] as String?,
+          ),
+        );
+      }
+
+      _log.info('Found ${candidates.length} candidate dives');
+      return candidates;
+    } catch (e, stackTrace) {
+      _log.error('Failed to find candidate dives', e, stackTrace);
       rethrow;
     }
   }
