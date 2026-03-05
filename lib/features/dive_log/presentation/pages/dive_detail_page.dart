@@ -1292,7 +1292,9 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
       }
     }
 
-    // Determine which segment the selected point falls into
+    // Determine which phase the selected point falls into (using original
+    // non-overlapping segments for correct timestamp matching)
+    DivePhase? selectedPhase;
     int? selectedSegmentIndex;
     if (selectedPointIndex != null &&
         dive.profile.isNotEmpty &&
@@ -1302,14 +1304,22 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
         if (selectedTimestamp >= displaySegments[i].startTimestamp &&
             selectedTimestamp <= displaySegments[i].endTimestamp) {
           selectedSegmentIndex = i;
+          selectedPhase = displaySegments[i].phase;
           break;
         }
       }
     }
 
+    // For phase mode, consolidate same-phase segments for compact display.
+    // Other modes show segments as-is.
+    final isPhaseMode = selectedMethod == SacSegmentationType.depthPhase;
+    final renderSegments = isPhaseMode
+        ? _consolidateForDisplay(displaySegments)
+        : displaySegments;
+
     // Build collapsed subtitle based on method
     String getSubtitle() {
-      final count = displaySegments.length;
+      final count = renderSegments.length;
       return switch (selectedMethod) {
         SacSegmentationType.timeInterval => '$count segments (5-min intervals)',
         SacSegmentationType.depthBased => '$count depth segments',
@@ -1346,18 +1356,23 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                 const SizedBox(height: 12),
 
                 // Segment list
-                ...displaySegments.asMap().entries.map((entry) {
+                ...renderSegments.asMap().entries.map((entry) {
                   final index = entry.key;
                   final segment = entry.value;
                   final avgDepthDisplay = units.formatDepth(segment.avgDepth);
-                  final isSelected = index == selectedSegmentIndex;
+
+                  // In phase mode, highlight by matching phase name;
+                  // otherwise match by index into the original list
+                  final isSelected = isPhaseMode
+                      ? segment.phase == selectedPhase
+                      : index == selectedSegmentIndex;
 
                   // Get segment label based on type
                   final segmentLabel = segment.displayLabel;
 
                   return Container(
                     margin: EdgeInsets.only(
-                      bottom: index < displaySegments.length - 1 ? 8 : 0,
+                      bottom: index < renderSegments.length - 1 ? 8 : 0,
                     ),
                     padding: const EdgeInsets.symmetric(
                       horizontal: 8,
@@ -1406,7 +1421,7 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                           child: _buildSacBar(
                             context,
                             segment.sacRate,
-                            displaySegments
+                            renderSegments
                                 .map((s) => s.sacRate)
                                 .reduce((a, b) => a > b ? a : b),
                           ),
@@ -1498,6 +1513,66 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
         );
       }).toList(),
     );
+  }
+
+  /// Consolidate phase segments for compact display.
+  ///
+  /// Groups non-consecutive segments of the same phase (e.g., two Ascent
+  /// segments separated by a Safety Stop) into a single display row with
+  /// duration-weighted SAC rate and average depth. Preserves chronological
+  /// order based on each phase's earliest occurrence.
+  List<SacSegment> _consolidateForDisplay(List<SacSegment> segments) {
+    if (segments.isEmpty) return segments;
+
+    // Group by phase, preserving chronological order of first occurrence
+    final phaseOrder = <DivePhase>[];
+    final phaseGroups = <DivePhase, List<SacSegment>>{};
+
+    for (final seg in segments) {
+      if (seg.phase == null) return segments;
+      final phase = seg.phase!;
+      if (!phaseGroups.containsKey(phase)) {
+        phaseOrder.add(phase);
+        phaseGroups[phase] = [];
+      }
+      phaseGroups[phase]!.add(seg);
+    }
+
+    // If nothing was consolidated, return as-is
+    if (phaseOrder.length == segments.length) return segments;
+
+    return phaseOrder.map((phase) {
+      final group = phaseGroups[phase]!;
+      if (group.length == 1) return group.first;
+
+      // Duration-weighted merge for display
+      final totalDuration = group.fold(
+        0.0,
+        (sum, s) => sum + s.durationMinutes,
+      );
+      final weightedSac =
+          group.fold(0.0, (sum, s) => sum + s.sacRate * s.durationMinutes) /
+          totalDuration;
+      final weightedAvgDepth =
+          group.fold(0.0, (sum, s) => sum + s.avgDepth * s.durationMinutes) /
+          totalDuration;
+      final totalGasConsumed = group.fold(0.0, (sum, s) => sum + s.gasConsumed);
+
+      return SacSegment(
+        startTimestamp: group.first.startTimestamp,
+        endTimestamp: group.last.endTimestamp,
+        avgDepth: weightedAvgDepth,
+        minDepth: group.map((s) => s.minDepth).reduce((a, b) => a < b ? a : b),
+        maxDepth: group.map((s) => s.maxDepth).reduce((a, b) => a > b ? a : b),
+        sacRate: weightedSac,
+        gasConsumed: totalGasConsumed,
+        tankId: group.first.tankId,
+        tankName: group.first.tankName,
+        gasMix: group.first.gasMix,
+        phase: phase,
+        segmentationType: SacSegmentationType.depthPhase,
+      );
+    }).toList();
   }
 
   /// Get icon for segmentation method
@@ -2583,16 +2658,41 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
     final collapsedSubtitle =
         '${record.tideState.displayName} • ${DepthUnit.meters.convert(record.heightMeters, settings.depthUnit).toStringAsFixed(1)}${settings.depthUnit.symbol}';
 
+    // Compute cycle time range for the header
+    final (cycleStart, cycleEnd) = _calculateCycleTimes(
+      record.highTideTime,
+      record.lowTideTime,
+    );
+    final dateRef = entryTime ?? record.highTideTime ?? record.lowTideTime;
+    final dateStr = dateRef != null
+        ? DateFormat('EEE, MMM d').format(dateRef.toLocal())
+        : '';
+    final timeRangeStr = cycleStart != null && cycleEnd != null
+        ? '${DateFormat(settings.timeFormat.pattern).format(cycleStart.toLocal())} - ${DateFormat(settings.timeFormat.pattern).format(cycleEnd.toLocal())}'
+        : '';
+    final dateTimeLabel = [
+      dateStr,
+      timeRangeStr,
+    ].where((s) => s.isNotEmpty).join(' | ');
+
     return CollapsibleCardSection(
       title: context.l10n.diveLog_detail_section_tide,
       icon: Icons.waves,
       collapsedSubtitle: collapsedSubtitle,
-      trailing: isCalculated
+      collapsedTrailing: isCalculated
           ? Tooltip(
               message: context.l10n.diveLog_detail_tideCalculated,
               child: Icon(
                 Icons.calculate_outlined,
                 size: 16,
+                color: colorScheme.onSurfaceVariant,
+              ),
+            )
+          : null,
+      trailing: isExpanded && dateTimeLabel.isNotEmpty
+          ? Text(
+              dateTimeLabel,
+              style: theme.textTheme.bodySmall?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),
             )
@@ -2659,6 +2759,24 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
         ),
       ),
     );
+  }
+
+  /// Calculate the start and end times for the tide cycle (low -> high -> low).
+  (DateTime?, DateTime?) _calculateCycleTimes(
+    DateTime? highTideTime,
+    DateTime? lowTideTime,
+  ) {
+    if (highTideTime == null || lowTideTime == null) {
+      return (null, null);
+    }
+
+    final halfCycle = highTideTime.difference(lowTideTime).abs();
+
+    if (lowTideTime.isBefore(highTideTime)) {
+      return (lowTideTime, highTideTime.add(halfCycle));
+    } else {
+      return (highTideTime.subtract(halfCycle), lowTideTime);
+    }
   }
 
   /// Format a DateTime as a time string using the given time format.

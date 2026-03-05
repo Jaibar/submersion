@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart' show DateFormat;
 
+import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/tide/entities/tide_extremes.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -219,12 +222,26 @@ class _TideSectionContent extends ConsumerWidget {
               const Divider(),
               const SizedBox(height: 16),
 
-              // Tide Chart
-              Text(
-                context.l10n.tides_chart_24hourForecast,
-                style: Theme.of(
-                  context,
-                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
+              // Tide Chart header with date/time extent
+              Row(
+                children: [
+                  Text(
+                    context.l10n.tides_chart_24hourForecast,
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  extremesAsync.when(
+                    data: (extremes) => _buildChartTimeRange(
+                      context,
+                      extremes,
+                      settings.timeFormat,
+                    ),
+                    loading: () => const SizedBox.shrink(),
+                    error: (_, _) => const SizedBox.shrink(),
+                  ),
+                ],
               ),
               const SizedBox(height: 8),
               predictionsAsync.when(
@@ -311,6 +328,56 @@ class _TideSectionContent extends ConsumerWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  /// Build a date and time range label matching the TideChart's visible window.
+  Widget _buildChartTimeRange(
+    BuildContext context,
+    List<TideExtreme> extremes,
+    TimeFormat timeFormat,
+  ) {
+    if (extremes.isEmpty) return const SizedBox.shrink();
+
+    final now = DateTime.now();
+
+    // Replicate TideChart's window calculation from extremes
+    final pastExtremes = extremes.where((e) => e.time.isBefore(now)).toList()
+      ..sort((a, b) => b.time.compareTo(a.time));
+    final futureExtremes = extremes.where((e) => !e.time.isBefore(now)).toList()
+      ..sort((a, b) => a.time.compareTo(b.time));
+
+    final DateTime windowStart;
+    if (pastExtremes.isNotEmpty) {
+      windowStart = pastExtremes.first.time.subtract(
+        const Duration(minutes: 30),
+      );
+    } else {
+      windowStart = now.subtract(const Duration(hours: 6));
+    }
+
+    final DateTime windowEnd;
+    if (futureExtremes.length >= 2) {
+      windowEnd = futureExtremes[1].time.add(const Duration(minutes: 30));
+    } else if (futureExtremes.isNotEmpty) {
+      windowEnd = futureExtremes.first.time.add(const Duration(hours: 6));
+    } else {
+      windowEnd = now.add(const Duration(hours: 12));
+    }
+
+    final dateStr = DateFormat('EEE, MMM d').format(windowStart.toLocal());
+    final startTimeStr = DateFormat(
+      timeFormat.pattern,
+    ).format(windowStart.toLocal());
+    final endTimeStr = DateFormat(
+      timeFormat.pattern,
+    ).format(windowEnd.toLocal());
+
+    return Text(
+      '$dateStr | $startTimeStr - $endTimeStr',
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+        color: Theme.of(context).colorScheme.onSurfaceVariant,
       ),
     );
   }

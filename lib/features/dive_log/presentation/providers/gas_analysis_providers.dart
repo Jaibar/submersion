@@ -83,7 +83,7 @@ final cylinderSacProvider = FutureProvider.family<List<CylinderSac>, String>((
 
 /// Currently selected segmentation method for the SAC segments display
 final selectedSegmentationProvider = StateProvider<SacSegmentationType>(
-  (ref) => SacSegmentationType.timeInterval,
+  (ref) => SacSegmentationType.depthPhase,
 );
 
 /// Provider that returns the active segments based on selected segmentation method
