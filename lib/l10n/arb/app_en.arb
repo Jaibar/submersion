@@ -6987,6 +6987,55 @@
   "trips_detail_tooltip_editShort": "Edit",
   "trips_detail_tooltip_moreOptions": "More options",
   "trips_detail_tooltip_viewOnMap": "View on Map",
+  "trips_diveScan_addButton": "Add {count} Dives",
+  "@trips_diveScan_addButton": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "trips_diveScan_added": "Added {count} dives to trip",
+  "@trips_diveScan_added": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "trips_diveScan_cancel": "Cancel",
+  "trips_diveScan_currentTrip": "Currently on: {tripName}",
+  "@trips_diveScan_currentTrip": {
+    "placeholders": {
+      "tripName": {"type": "String"}
+    }
+  },
+  "trips_diveScan_deselectAll": "Deselect all",
+  "trips_diveScan_error": "Error scanning for dives: {error}",
+  "@trips_diveScan_error": {
+    "placeholders": {
+      "error": {"type": "String"}
+    }
+  },
+  "trips_diveScan_findButton": "Find matching dives",
+  "trips_diveScan_groupOtherTrips": "On other trips ({count})",
+  "@trips_diveScan_groupOtherTrips": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "trips_diveScan_groupUnassigned": "Unassigned ({count})",
+  "@trips_diveScan_groupUnassigned": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "trips_diveScan_noMatches": "No matching dives found",
+  "trips_diveScan_selectAll": "Select all",
+  "trips_diveScan_subtitle": "{count} dives found in date range",
+  "@trips_diveScan_subtitle": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "trips_diveScan_title": "Add Dives to Trip",
+  "trips_diveScan_unknownSite": "Unknown Site",
   "trips_edit_appBar_add": "Add Trip",
   "trips_edit_appBar_edit": "Edit Trip",
   "trips_edit_button_add": "Add Trip",

@@ -12768,6 +12768,62 @@ class AppLocalizationsDe extends AppLocalizations {
   String get trips_detail_tooltip_viewOnMap => 'Auf Karte anzeigen';
 
   @override
+  String trips_diveScan_addButton(int count) {
+    return 'Add $count Dives';
+  }
+
+  @override
+  String trips_diveScan_added(int count) {
+    return 'Added $count dives to trip';
+  }
+
+  @override
+  String get trips_diveScan_cancel => 'Cancel';
+
+  @override
+  String trips_diveScan_currentTrip(String tripName) {
+    return 'Currently on: $tripName';
+  }
+
+  @override
+  String get trips_diveScan_deselectAll => 'Deselect all';
+
+  @override
+  String trips_diveScan_error(String error) {
+    return 'Error scanning for dives: $error';
+  }
+
+  @override
+  String get trips_diveScan_findButton => 'Find matching dives';
+
+  @override
+  String trips_diveScan_groupOtherTrips(int count) {
+    return 'On other trips ($count)';
+  }
+
+  @override
+  String trips_diveScan_groupUnassigned(int count) {
+    return 'Unassigned ($count)';
+  }
+
+  @override
+  String get trips_diveScan_noMatches => 'No matching dives found';
+
+  @override
+  String get trips_diveScan_selectAll => 'Select all';
+
+  @override
+  String trips_diveScan_subtitle(int count) {
+    return '$count dives found in date range';
+  }
+
+  @override
+  String get trips_diveScan_title => 'Add Dives to Trip';
+
+  @override
+  String get trips_diveScan_unknownSite => 'Unknown Site';
+
+  @override
   String get trips_edit_appBar_add => 'Reise hinzufuegen';
 
   @override

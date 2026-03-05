@@ -21787,6 +21787,90 @@ abstract class AppLocalizations {
   /// **'View on Map'**
   String get trips_detail_tooltip_viewOnMap;
 
+  /// No description provided for @trips_diveScan_addButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Add {count} Dives'**
+  String trips_diveScan_addButton(int count);
+
+  /// No description provided for @trips_diveScan_added.
+  ///
+  /// In en, this message translates to:
+  /// **'Added {count} dives to trip'**
+  String trips_diveScan_added(int count);
+
+  /// No description provided for @trips_diveScan_cancel.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get trips_diveScan_cancel;
+
+  /// No description provided for @trips_diveScan_currentTrip.
+  ///
+  /// In en, this message translates to:
+  /// **'Currently on: {tripName}'**
+  String trips_diveScan_currentTrip(String tripName);
+
+  /// No description provided for @trips_diveScan_deselectAll.
+  ///
+  /// In en, this message translates to:
+  /// **'Deselect all'**
+  String get trips_diveScan_deselectAll;
+
+  /// No description provided for @trips_diveScan_error.
+  ///
+  /// In en, this message translates to:
+  /// **'Error scanning for dives: {error}'**
+  String trips_diveScan_error(String error);
+
+  /// No description provided for @trips_diveScan_findButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Find matching dives'**
+  String get trips_diveScan_findButton;
+
+  /// No description provided for @trips_diveScan_groupOtherTrips.
+  ///
+  /// In en, this message translates to:
+  /// **'On other trips ({count})'**
+  String trips_diveScan_groupOtherTrips(int count);
+
+  /// No description provided for @trips_diveScan_groupUnassigned.
+  ///
+  /// In en, this message translates to:
+  /// **'Unassigned ({count})'**
+  String trips_diveScan_groupUnassigned(int count);
+
+  /// No description provided for @trips_diveScan_noMatches.
+  ///
+  /// In en, this message translates to:
+  /// **'No matching dives found'**
+  String get trips_diveScan_noMatches;
+
+  /// No description provided for @trips_diveScan_selectAll.
+  ///
+  /// In en, this message translates to:
+  /// **'Select all'**
+  String get trips_diveScan_selectAll;
+
+  /// No description provided for @trips_diveScan_subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} dives found in date range'**
+  String trips_diveScan_subtitle(int count);
+
+  /// No description provided for @trips_diveScan_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Add Dives to Trip'**
+  String get trips_diveScan_title;
+
+  /// No description provided for @trips_diveScan_unknownSite.
+  ///
+  /// In en, this message translates to:
+  /// **'Unknown Site'**
+  String get trips_diveScan_unknownSite;
+
   /// No description provided for @trips_edit_appBar_add.
   ///
   /// In en, this message translates to:
