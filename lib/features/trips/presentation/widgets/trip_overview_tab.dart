@@ -576,7 +576,7 @@ class TripOverviewTab extends ConsumerWidget {
       final dives = await ref.read(divesForTripProvider(tripId).future);
 
       if (dives.isEmpty) {
-        if (context.mounted) Navigator.of(context).pop();
+        if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -609,7 +609,7 @@ class TripOverviewTab extends ConsumerWidget {
       );
 
       if (!context.mounted) return;
-      Navigator.of(context).pop(); // Dismiss loading
+      Navigator.of(context, rootNavigator: true).pop(); // Dismiss loading
 
       if (result == null) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -630,7 +630,7 @@ class TripOverviewTab extends ConsumerWidget {
       // Import selected photos
       await _importPhotos(context, ref, tripId, dialogResult.selectedPhotos);
     } catch (e) {
-      if (context.mounted) Navigator.of(context).pop();
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -688,7 +688,7 @@ class TripOverviewTab extends ConsumerWidget {
       ref.invalidate(flatMediaListForTripProvider(tripId));
 
       if (!context.mounted) return;
-      Navigator.of(context).pop(); // Dismiss progress
+      Navigator.of(context, rootNavigator: true).pop(); // Dismiss progress
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -698,7 +698,7 @@ class TripOverviewTab extends ConsumerWidget {
         ),
       );
     } catch (e) {
-      if (context.mounted) Navigator.of(context).pop();
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -731,7 +731,7 @@ class TripOverviewTab extends ConsumerWidget {
           );
 
       if (!context.mounted) return;
-      Navigator.of(context).pop(); // Dismiss loading
+      Navigator.of(context, rootNavigator: true).pop(); // Dismiss loading
 
       if (candidates.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -769,7 +769,7 @@ class TripOverviewTab extends ConsumerWidget {
         );
       }
     } catch (e) {
-      if (context.mounted) Navigator.of(context).pop();
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(context.l10n.trips_diveScan_error('$e'))),
