@@ -2668,7 +2668,22 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
         ? DateFormat('EEE, MMM d').format(dateRef.toLocal())
         : '';
     final timeRangeStr = cycleStart != null && cycleEnd != null
-        ? '${DateFormat(settings.timeFormat.pattern).format(cycleStart.toLocal())} - ${DateFormat(settings.timeFormat.pattern).format(cycleEnd.toLocal())}'
+        ? () {
+            final startLocal = cycleStart.toLocal();
+            final endLocal = cycleEnd.toLocal();
+            final timeFmt = DateFormat(settings.timeFormat.pattern);
+            final startStr = timeFmt.format(startLocal);
+            final endStr = timeFmt.format(endLocal);
+            final spansNewDay =
+                startLocal.year != endLocal.year ||
+                startLocal.month != endLocal.month ||
+                startLocal.day != endLocal.day;
+            if (spansNewDay) {
+              final endDateStr = DateFormat('MMM d').format(endLocal);
+              return '$startStr - $endStr ($endDateStr)';
+            }
+            return '$startStr - $endStr';
+          }()
         : '';
     final dateTimeLabel = [
       dateStr,

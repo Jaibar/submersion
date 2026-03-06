@@ -366,16 +366,21 @@ class _TideSectionContent extends ConsumerWidget {
       windowEnd = now.add(const Duration(hours: 12));
     }
 
-    final dateStr = DateFormat('EEE, MMM d').format(windowStart.toLocal());
-    final startTimeStr = DateFormat(
-      timeFormat.pattern,
-    ).format(windowStart.toLocal());
-    final endTimeStr = DateFormat(
-      timeFormat.pattern,
-    ).format(windowEnd.toLocal());
+    final startLocal = windowStart.toLocal();
+    final endLocal = windowEnd.toLocal();
+    final dateStr = DateFormat('EEE, MMM d').format(startLocal);
+    final startTimeStr = DateFormat(timeFormat.pattern).format(startLocal);
+    final endTimeStr = DateFormat(timeFormat.pattern).format(endLocal);
+    final spansNewDay =
+        startLocal.year != endLocal.year ||
+        startLocal.month != endLocal.month ||
+        startLocal.day != endLocal.day;
+    final timeRange = spansNewDay
+        ? '$startTimeStr - $endTimeStr (${DateFormat('MMM d').format(endLocal)})'
+        : '$startTimeStr - $endTimeStr';
 
     return Text(
-      '$dateStr | $startTimeStr - $endTimeStr',
+      '$dateStr | $timeRange',
       style: Theme.of(context).textTheme.bodySmall?.copyWith(
         color: Theme.of(context).colorScheme.onSurfaceVariant,
       ),
