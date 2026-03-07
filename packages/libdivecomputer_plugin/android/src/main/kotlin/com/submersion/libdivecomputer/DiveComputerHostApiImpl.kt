@@ -197,18 +197,27 @@ class DiveComputerHostApiImpl(
 
         // Run the download.
         val errorBuf = ByteArray(256)
-        val result = LibdcWrapper.nativeDownloadRun(
-            sessionPtr,
-            device.vendor, device.product,
-            device.model.toInt(), transportValue,
-            bleStream, downloadCallback, errorBuf
-        )
+        android.util.Log.d("DiveComputerHost", "nativeDownloadRun: vendor=${device.vendor} product=${device.product} model=${device.model} name=${device.name}")
+        val result = try {
+            LibdcWrapper.nativeDownloadRun(
+                sessionPtr,
+                device.vendor, device.product,
+                device.model.toInt(), transportValue,
+                bleStream, device.name,
+                downloadCallback, errorBuf
+            )
+        } catch (e: Throwable) {
+            android.util.Log.e("DiveComputerHost", "nativeDownloadRun threw", e)
+            -999
+        }
+        android.util.Log.d("DiveComputerHost", "nativeDownloadRun returned: $result")
 
         // Report completion or error.
         if (result == 0) {
             mainHandler.post { flutterApi.onDownloadComplete(0, null, null) { } }
         } else if (result != LIBDC_STATUS_CANCELLED) {
             val errorMsg = String(errorBuf).trim('\u0000')
+            android.util.Log.e("DiveComputerHost", "download error: $errorMsg")
             reportError("download_error", errorMsg)
         }
 
@@ -224,6 +233,9 @@ class DiveComputerHostApiImpl(
         val fingerprint = LibdcWrapper.nativeGetDiveFingerprint(divePtr)
 
         // Convert datetime to epoch seconds.
+        // libdivecomputer provides LOCAL time + timezone offset (seconds east of UTC).
+        // We create a UTC calendar with the local time components, then subtract
+        // the timezone offset to get the correct UTC epoch.
         val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
         cal.set(
             LibdcWrapper.nativeGetDiveYear(divePtr),
@@ -233,6 +245,7 @@ class DiveComputerHostApiImpl(
             LibdcWrapper.nativeGetDiveMinute(divePtr),
             LibdcWrapper.nativeGetDiveSecond(divePtr)
         )
+        cal.set(Calendar.MILLISECOND, 0)
         val epoch = cal.timeInMillis / 1000
 
         // Convert samples.

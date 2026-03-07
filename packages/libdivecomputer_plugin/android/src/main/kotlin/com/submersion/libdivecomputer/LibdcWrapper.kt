@@ -33,6 +33,7 @@ object LibdcWrapper {
         model: Int,
         transport: Int,
         ioHandler: BleIoHandler,
+        devName: String?,
         downloadCallback: DownloadCallback,
         errorBuf: ByteArray
     ): Int
@@ -78,6 +79,7 @@ class DescriptorInfo {
 interface BleIoHandler {
     fun read(size: Int, timeoutMs: Int): ByteArray?
     fun write(data: ByteArray, timeoutMs: Int): Int
+    fun purge(direction: Int)
     fun close()
 }
 

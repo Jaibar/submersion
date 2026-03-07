@@ -171,6 +171,7 @@ struct JniIoContext {
     JavaVM *jvm;
     jobject ioHandler;  // Global ref to Kotlin BleIoHandler
     int timeout_ms;
+    char ble_name[128];  // BLE device name for DC_IOCTL_BLE_GET_NAME
 };
 
 static int jni_io_set_timeout(void *userdata, int timeout) {
@@ -247,6 +248,61 @@ static int jni_io_write(void *userdata, const void *data, size_t size, size_t *a
     return LIBDC_STATUS_SUCCESS;
 }
 
+// BLE ioctl constants matching libdivecomputer's encoding.
+// DC_IOCTL('b', 0) = (0x62 << 8) | 0 = 0x6200
+#define BLE_IOCTL_GET_NAME 0x6200
+
+static int jni_io_ioctl(void *userdata, unsigned int request,
+                         void *data, size_t size) {
+    auto *ctx = static_cast<JniIoContext *>(userdata);
+
+    unsigned int ioctl_type = (request >> 8) & 0xFF;
+    unsigned int ioctl_nr = request & 0xFF;
+    __android_log_print(ANDROID_LOG_DEBUG, TAG,
+        "ioctl: request=0x%x type=0x%x nr=%u size=%zu name='%s'",
+        request, ioctl_type, ioctl_nr, size, ctx->ble_name);
+
+    // Handle BLE_GET_NAME: return the BLE device name.
+    if (ioctl_type == 0x62 && ioctl_nr == 0) {
+        if (data == nullptr || size == 0) {
+            return LIBDC_STATUS_INVALIDARGS;
+        }
+        size_t name_len = strlen(ctx->ble_name);
+        if (name_len == 0) {
+            return LIBDC_STATUS_UNSUPPORTED;
+        }
+        size_t copy_len = name_len + 1;  // include null terminator
+        if (copy_len > size) {
+            copy_len = size;
+        }
+        memcpy(data, ctx->ble_name, copy_len);
+        // Ensure null termination.
+        static_cast<char *>(data)[size - 1] = '\0';
+        return LIBDC_STATUS_SUCCESS;
+    }
+
+    return LIBDC_STATUS_UNSUPPORTED;
+}
+
+static int jni_io_purge(void *userdata, unsigned int direction) {
+    auto *ctx = static_cast<JniIoContext *>(userdata);
+    JNIEnv *env;
+    bool attached = false;
+    if (ctx->jvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        ctx->jvm->AttachCurrentThread(&env, nullptr);
+        attached = true;
+    }
+
+    jclass cls = env->GetObjectClass(ctx->ioHandler);
+    jmethodID method = env->GetMethodID(cls, "purge", "(I)V");
+    if (method) {
+        env->CallVoidMethod(ctx->ioHandler, method, static_cast<jint>(direction));
+    }
+
+    if (attached) ctx->jvm->DetachCurrentThread();
+    return LIBDC_STATUS_SUCCESS;
+}
+
 static int jni_io_close(void *userdata) {
     auto *ctx = static_cast<JniIoContext *>(userdata);
     JNIEnv *env;
@@ -272,6 +328,7 @@ Java_com_submersion_libdivecomputer_LibdcWrapper_nativeDownloadRun(
     jlong sessionPtr,
     jstring vendor, jstring product, jint model, jint transport,
     jobject ioHandler,
+    jstring devName,
     jobject downloadCallback,
     jbyteArray errorBuf) {
 
@@ -285,16 +342,27 @@ Java_com_submersion_libdivecomputer_LibdcWrapper_nativeDownloadRun(
     env->GetJavaVM(&jvm);
 
     JniIoContext ioCtx;
+    memset(&ioCtx, 0, sizeof(ioCtx));
     ioCtx.jvm = jvm;
     ioCtx.ioHandler = env->NewGlobalRef(ioHandler);
     ioCtx.timeout_ms = 10000;
+
+    // Store BLE device name for DC_IOCTL_BLE_GET_NAME.
+    if (devName != nullptr) {
+        const char *nameStr = env->GetStringUTFChars(devName, nullptr);
+        strncpy(ioCtx.ble_name, nameStr, sizeof(ioCtx.ble_name) - 1);
+        ioCtx.ble_name[sizeof(ioCtx.ble_name) - 1] = '\0';
+        env->ReleaseStringUTFChars(devName, nameStr);
+    }
 
     libdc_io_callbacks_t io_callbacks;
     memset(&io_callbacks, 0, sizeof(io_callbacks));
     io_callbacks.set_timeout = jni_io_set_timeout;
     io_callbacks.read = jni_io_read;
     io_callbacks.write = jni_io_write;
+    io_callbacks.ioctl = jni_io_ioctl;
     io_callbacks.close = jni_io_close;
+    io_callbacks.purge = jni_io_purge;
     io_callbacks.userdata = &ioCtx;
 
     // Set up download callbacks.
