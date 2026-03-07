@@ -1,5 +1,6 @@
 package com.submersion.libdivecomputer
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
@@ -11,6 +12,8 @@ private const val LIBDC_TRANSPORT_BLE = 1 shl 5
 
 // Scans for BLE dive computers using Android's BluetoothLeScanner
 // and matches discovered devices against libdivecomputer's descriptor database.
+// Bluetooth permissions are requested at the Dart layer before these methods are called.
+@SuppressLint("MissingPermission")
 class BleScanner(private val context: Context) {
     private var scanCallback: ScanCallback? = null
     private val seenAddresses = mutableSetOf<String>()

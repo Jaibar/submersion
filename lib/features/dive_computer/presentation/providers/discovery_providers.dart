@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
+import 'package:permission_handler/permission_handler.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_computer/domain/entities/device_model.dart';
 
@@ -120,6 +122,29 @@ class DiscoveryNotifier extends StateNotifier<DiscoveryState> {
   /// Start scanning for devices via BLE.
   Future<void> startScan() async {
     try {
+      // Request Bluetooth permissions on Android before scanning.
+      if (Platform.isAndroid) {
+        final statuses = await [
+          Permission.bluetoothScan,
+          Permission.bluetoothConnect,
+        ].request();
+
+        final denied = statuses.entries
+            .where((e) => !e.value.isGranted)
+            .map((e) => e.key.toString())
+            .toList();
+
+        if (denied.isNotEmpty) {
+          state = state.copyWith(
+            isScanning: false,
+            errorMessage:
+                'Bluetooth permissions are required to scan for dive computers. '
+                'Please grant Bluetooth access in Settings.',
+          );
+          return;
+        }
+      }
+
       state = state.copyWith(
         isScanning: true,
         clearError: true,

@@ -1,5 +1,6 @@
 package com.submersion.libdivecomputer
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
@@ -18,6 +19,8 @@ private const val LIBDC_TRANSPORT_BLE = 1 shl 5
 private const val LIBDC_STATUS_CANCELLED = -10
 private const val UINT32_SENTINEL: Long = 4294967295L  // UINT32_MAX = unavailable
 
+// Bluetooth permissions are requested at the Dart layer before BLE methods are called.
+@SuppressLint("MissingPermission")
 class DiveComputerHostApiImpl(
     private val context: Context,
     private val messenger: BinaryMessenger
@@ -76,12 +79,24 @@ class DiveComputerHostApiImpl(
         transport: TransportType,
         callback: (Result<Unit>) -> Unit
     ) {
-        when (transport) {
-            TransportType.BLE -> startBleDiscovery()
-            else -> reportError("unsupported_transport",
-                "Transport $transport not yet supported on Android")
+        try {
+            when (transport) {
+                TransportType.BLE -> startBleDiscovery()
+                else -> reportError("unsupported_transport",
+                    "Transport $transport not yet supported on Android")
+            }
+            callback(Result.success(Unit))
+        } catch (e: SecurityException) {
+            callback(Result.failure(
+                FlutterError("permission_denied",
+                    "Bluetooth permission not granted. Please allow Bluetooth access in Settings.",
+                    e.message)))
+        } catch (e: Exception) {
+            callback(Result.failure(
+                FlutterError("discovery_error",
+                    "Failed to start discovery: ${e.message}",
+                    e.message)))
         }
-        callback(Result.success(Unit))
     }
 
     override fun stopDiscovery() {

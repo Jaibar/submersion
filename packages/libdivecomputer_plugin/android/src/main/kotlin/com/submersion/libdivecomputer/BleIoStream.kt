@@ -1,5 +1,6 @@
 package com.submersion.libdivecomputer
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
@@ -21,6 +22,8 @@ private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 // libdivecomputer calls read/write synchronously on a background thread.
 // This class translates those calls to async BluetoothGatt operations,
 // blocking with semaphores until the BLE operation completes.
+// Bluetooth permissions are requested at the Dart layer before these methods are called.
+@SuppressLint("MissingPermission")
 class BleIoStream(
     private val context: Context,
     private val device: BluetoothDevice
