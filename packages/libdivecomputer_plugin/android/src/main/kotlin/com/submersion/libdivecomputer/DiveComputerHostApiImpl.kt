@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import io.flutter.plugin.common.BinaryMessenger
 import java.util.Calendar
 import java.util.TimeZone
@@ -28,6 +30,7 @@ class DiveComputerHostApiImpl(
 
     private val flutterApi = DiveComputerFlutterApi(messenger)
     private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var bleScanner: BleScanner? = null
     private var downloadSessionPtr: Long = 0
     private var activeBleStream: BleIoStream? = null
@@ -107,10 +110,10 @@ class DiveComputerHostApiImpl(
     private fun startBleDiscovery() {
         val scanner = BleScanner(context)
         scanner.onDeviceDiscovered = { device ->
-            flutterApi.onDeviceDiscovered(device) { }
+            mainHandler.post { flutterApi.onDeviceDiscovered(device) { } }
         }
         scanner.onComplete = {
-            flutterApi.onDiscoveryComplete { }
+            mainHandler.post { flutterApi.onDiscoveryComplete { } }
         }
         bleScanner = scanner
         scanner.start()
@@ -183,12 +186,12 @@ class DiveComputerHostApiImpl(
                     total = maximum.toLong(),
                     status = "downloading"
                 )
-                flutterApi.onDownloadProgress(progress) { }
+                mainHandler.post { flutterApi.onDownloadProgress(progress) { } }
             }
 
             override fun onDive(divePtr: Long) {
                 val parsedDive = convertParsedDive(divePtr)
-                flutterApi.onDiveDownloaded(parsedDive) { }
+                mainHandler.post { flutterApi.onDiveDownloaded(parsedDive) { } }
             }
         }
 
@@ -203,7 +206,7 @@ class DiveComputerHostApiImpl(
 
         // Report completion or error.
         if (result == 0) {
-            flutterApi.onDownloadComplete(0, null, null) { }
+            mainHandler.post { flutterApi.onDownloadComplete(0, null, null) { } }
         } else if (result != LIBDC_STATUS_CANCELLED) {
             val errorMsg = String(errorBuf).trim('\u0000')
             reportError("download_error", errorMsg)
@@ -349,7 +352,9 @@ class DiveComputerHostApiImpl(
     // MARK: - Helpers
 
     private fun reportError(code: String, message: String) {
-        flutterApi.onError(DiveComputerError(code = code, message = message)) { }
+        mainHandler.post {
+            flutterApi.onError(DiveComputerError(code = code, message = message)) { }
+        }
     }
 
     private fun mapEventType(type: Int): String = when (type) {
