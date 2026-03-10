@@ -52,6 +52,9 @@ class ProfileLegendState {
   // Per-tank pressure visibility (keyed by tank ID)
   final Map<String, bool> showTankPressure;
 
+  // Collapsible section expanded/collapsed state (session-only)
+  final Map<String, bool> sectionExpanded;
+
   const ProfileLegendState({
     this.rightAxisMetric,
     this.showTemperature = true,
@@ -81,6 +84,14 @@ class ProfileLegendState {
     this.ttsSource = MetricDataSource.calculated,
     this.cnsSource = MetricDataSource.calculated,
     this.showTankPressure = const {},
+    this.sectionExpanded = const {
+      'overlays': true,
+      'decompression': true,
+      'markers': false,
+      'gasAnalysis': false,
+      'other': false,
+      'tankPressures': true,
+    },
   });
 
   /// Count of active secondary toggles (for badge display)
@@ -142,6 +153,7 @@ class ProfileLegendState {
     MetricDataSource? ttsSource,
     MetricDataSource? cnsSource,
     Map<String, bool>? showTankPressure,
+    Map<String, bool>? sectionExpanded,
   }) {
     return ProfileLegendState(
       rightAxisMetric: clearRightAxisMetric
@@ -174,6 +186,7 @@ class ProfileLegendState {
       ttsSource: ttsSource ?? this.ttsSource,
       cnsSource: cnsSource ?? this.cnsSource,
       showTankPressure: showTankPressure ?? this.showTankPressure,
+      sectionExpanded: sectionExpanded ?? this.sectionExpanded,
     );
   }
 
@@ -209,7 +222,8 @@ class ProfileLegendState {
           ceilingSource == other.ceilingSource &&
           ttsSource == other.ttsSource &&
           cnsSource == other.cnsSource &&
-          mapEquals(showTankPressure, other.showTankPressure);
+          mapEquals(showTankPressure, other.showTankPressure) &&
+          mapEquals(sectionExpanded, other.sectionExpanded);
 
   @override
   int get hashCode => Object.hashAll([
@@ -241,6 +255,7 @@ class ProfileLegendState {
     ttsSource,
     cnsSource,
     ...showTankPressure.entries,
+    ...sectionExpanded.entries,
   ]);
 }
 
