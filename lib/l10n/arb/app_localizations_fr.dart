@@ -3855,6 +3855,30 @@ class AppLocalizationsFr extends AppLocalizations {
   String get diveLog_legend_label_tts => 'TTS';
 
   @override
+  String get diveLog_legend_source_dc => 'DC';
+
+  @override
+  String get diveLog_legend_source_calc => 'Calc';
+
+  @override
+  String get diveLog_chartSection_overlays => 'Overlays';
+
+  @override
+  String get diveLog_chartSection_markers => 'Markers';
+
+  @override
+  String get diveLog_chartSection_decompression => 'Decompression';
+
+  @override
+  String get diveLog_chartSection_gasAnalysis => 'Gas Analysis';
+
+  @override
+  String get diveLog_chartSection_other => 'Other';
+
+  @override
+  String get diveLog_chartSection_tankPressures => 'Tank Pressures';
+
+  @override
   String get diveLog_listPage_appBar_diveMap => 'Carte des plongees';
 
   @override

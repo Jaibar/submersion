@@ -6550,6 +6550,54 @@ abstract class AppLocalizations {
   /// **'TTS'**
   String get diveLog_legend_label_tts;
 
+  /// No description provided for @diveLog_legend_source_dc.
+  ///
+  /// In en, this message translates to:
+  /// **'DC'**
+  String get diveLog_legend_source_dc;
+
+  /// No description provided for @diveLog_legend_source_calc.
+  ///
+  /// In en, this message translates to:
+  /// **'Calc'**
+  String get diveLog_legend_source_calc;
+
+  /// No description provided for @diveLog_chartSection_overlays.
+  ///
+  /// In en, this message translates to:
+  /// **'Overlays'**
+  String get diveLog_chartSection_overlays;
+
+  /// No description provided for @diveLog_chartSection_markers.
+  ///
+  /// In en, this message translates to:
+  /// **'Markers'**
+  String get diveLog_chartSection_markers;
+
+  /// No description provided for @diveLog_chartSection_decompression.
+  ///
+  /// In en, this message translates to:
+  /// **'Decompression'**
+  String get diveLog_chartSection_decompression;
+
+  /// No description provided for @diveLog_chartSection_gasAnalysis.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas Analysis'**
+  String get diveLog_chartSection_gasAnalysis;
+
+  /// No description provided for @diveLog_chartSection_other.
+  ///
+  /// In en, this message translates to:
+  /// **'Other'**
+  String get diveLog_chartSection_other;
+
+  /// No description provided for @diveLog_chartSection_tankPressures.
+  ///
+  /// In en, this message translates to:
+  /// **'Tank Pressures'**
+  String get diveLog_chartSection_tankPressures;
+
   /// No description provided for @diveLog_listPage_appBar_diveMap.
   ///
   /// In en, this message translates to:

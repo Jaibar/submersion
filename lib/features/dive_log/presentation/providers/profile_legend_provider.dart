@@ -52,6 +52,9 @@ class ProfileLegendState {
   // Per-tank pressure visibility (keyed by tank ID)
   final Map<String, bool> showTankPressure;
 
+  // Collapsible section expanded/collapsed state (session-only)
+  final Map<String, bool> sectionExpanded;
+
   const ProfileLegendState({
     this.rightAxisMetric,
     this.showTemperature = true,
@@ -81,15 +84,23 @@ class ProfileLegendState {
     this.ttsSource = MetricDataSource.calculated,
     this.cnsSource = MetricDataSource.calculated,
     this.showTankPressure = const {},
+    this.sectionExpanded = const {
+      'overlays': true,
+      'decompression': true,
+      'markers': false,
+      'gasAnalysis': false,
+      'other': false,
+      'tankPressures': true,
+    },
   });
 
   /// Count of active secondary toggles (for badge display)
   int get activeSecondaryCount {
     var count = 0;
+    if (showCeiling) count++;
     if (showHeartRate) count++;
     if (showSac) count++;
     if (showAscentRateColors) count++;
-    if (showEvents) count++;
     if (showMaxDepthMarker) count++;
     if (showPressureMarkers) count++;
     if (showGasSwitchMarkers) count++;
@@ -142,6 +153,7 @@ class ProfileLegendState {
     MetricDataSource? ttsSource,
     MetricDataSource? cnsSource,
     Map<String, bool>? showTankPressure,
+    Map<String, bool>? sectionExpanded,
   }) {
     return ProfileLegendState(
       rightAxisMetric: clearRightAxisMetric
@@ -174,6 +186,7 @@ class ProfileLegendState {
       ttsSource: ttsSource ?? this.ttsSource,
       cnsSource: cnsSource ?? this.cnsSource,
       showTankPressure: showTankPressure ?? this.showTankPressure,
+      sectionExpanded: sectionExpanded ?? this.sectionExpanded,
     );
   }
 
@@ -209,7 +222,8 @@ class ProfileLegendState {
           ceilingSource == other.ceilingSource &&
           ttsSource == other.ttsSource &&
           cnsSource == other.cnsSource &&
-          mapEquals(showTankPressure, other.showTankPressure);
+          mapEquals(showTankPressure, other.showTankPressure) &&
+          mapEquals(sectionExpanded, other.sectionExpanded);
 
   @override
   int get hashCode => Object.hashAll([
@@ -241,6 +255,7 @@ class ProfileLegendState {
     ttsSource,
     cnsSource,
     ...showTankPressure.entries,
+    ...sectionExpanded.entries,
   ]);
 }
 
@@ -395,36 +410,35 @@ class ProfileLegend extends _$ProfileLegend {
     state = state.copyWith(showOtu: !state.showOtu);
   }
 
-  // Data source cycle methods
-  void cycleNdlSource() {
+  // Data source set methods (for SegmentedButton)
+  void setCeilingSource(MetricDataSource source) {
+    state = state.copyWith(ceilingSource: source);
+  }
+
+  void setNdlSource(MetricDataSource source) {
+    state = state.copyWith(ndlSource: source);
+  }
+
+  void setTtsSource(MetricDataSource source) {
+    state = state.copyWith(ttsSource: source);
+  }
+
+  void setCnsSource(MetricDataSource source) {
+    state = state.copyWith(cnsSource: source);
+  }
+
+  // Section expand/collapse
+  void toggleSection(String sectionKey) {
+    final current = state.sectionExpanded[sectionKey] ?? false;
     state = state.copyWith(
-      ndlSource: state.ndlSource == MetricDataSource.computer
-          ? MetricDataSource.calculated
-          : MetricDataSource.computer,
+      sectionExpanded: {...state.sectionExpanded, sectionKey: !current},
     );
   }
 
-  void cycleCeilingSource() {
+  /// Set a section's expanded state directly (avoids toggle desync risk)
+  void setSectionExpanded(String sectionKey, bool expanded) {
     state = state.copyWith(
-      ceilingSource: state.ceilingSource == MetricDataSource.computer
-          ? MetricDataSource.calculated
-          : MetricDataSource.computer,
-    );
-  }
-
-  void cycleTtsSource() {
-    state = state.copyWith(
-      ttsSource: state.ttsSource == MetricDataSource.computer
-          ? MetricDataSource.calculated
-          : MetricDataSource.computer,
-    );
-  }
-
-  void cycleCnsSource() {
-    state = state.copyWith(
-      cnsSource: state.cnsSource == MetricDataSource.computer
-          ? MetricDataSource.calculated
-          : MetricDataSource.computer,
+      sectionExpanded: {...state.sectionExpanded, sectionKey: expanded},
     );
   }
 
