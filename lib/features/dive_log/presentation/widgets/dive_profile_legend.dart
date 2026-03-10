@@ -828,7 +828,6 @@ class _ChartOptionsDialog extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
               isEnabled ? Icons.check_box : Icons.check_box_outline_blank,
@@ -847,7 +846,7 @@ class _ChartOptionsDialog extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            Flexible(child: Text(label)),
+            Expanded(child: Text(label)),
           ],
         ),
       ),
