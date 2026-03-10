@@ -54,10 +54,26 @@ jobs:
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: stable
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
+
+      - name: Cache pub dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.pub-cache
+            ${{ github.workspace }}/.dart_tool
+          key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -173,10 +189,26 @@ jobs:
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: stable
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
+
+      - name: Cache pub dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.pub-cache
+            ${{ github.workspace }}/.dart_tool
+          key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
 
       - name: Setup Python
         uses: actions/setup-python@v6

@@ -30,10 +30,16 @@ jobs:
         run: echo "version=$(cat ${{ env.FLUTTER_VERSION_FILE }})" >> "$GITHUB_OUTPUT"
 
       - uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: 'stable'
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
 
       - name: Cache pub dependencies
         uses: actions/cache@v5
@@ -71,10 +77,16 @@ jobs:
         run: echo "version=$(cat ${{ env.FLUTTER_VERSION_FILE }})" >> "$GITHUB_OUTPUT"
 
       - uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: 'stable'
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
 
       - name: Cache pub dependencies
         uses: actions/cache@v5
@@ -123,10 +135,16 @@ jobs:
           xcode-version: 'latest-stable'
 
       - uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: 'stable'
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
 
       - name: Cache pub dependencies
         uses: actions/cache@v5
@@ -176,10 +194,16 @@ jobs:
           xcode-version: 'latest-stable'
 
       - uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: 'stable'
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
 
       - name: Cache pub dependencies
         uses: actions/cache@v5
@@ -240,10 +264,16 @@ jobs:
           xcode-version: 'latest-stable'
 
       - uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: 'stable'
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
 
       - name: Cache pub dependencies
         uses: actions/cache@v5
@@ -331,10 +361,16 @@ jobs:
           java-version: '21'
 
       - uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: 'stable'
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
 
       - name: Cache pub dependencies
         uses: actions/cache@v5
@@ -387,10 +423,16 @@ jobs:
         run: echo "version=$(cat ${{ env.FLUTTER_VERSION_FILE }})" >> "$GITHUB_OUTPUT"
 
       - uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: 'stable'
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
 
       - name: Cache pub dependencies
         uses: actions/cache@v5
@@ -446,10 +488,16 @@ jobs:
         run: echo "version=$(cat ${{ env.FLUTTER_VERSION_FILE }})" >> "$GITHUB_OUTPUT"
 
       - uses: subosito/flutter-action@v2
+        id: setup-flutter
         with:
           flutter-version: ${{ steps.flutter-ver.outputs.version }}
           channel: 'stable'
-          cache: true
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.setup-flutter.outputs.CACHE-PATH }}
+          key: ${{ steps.setup-flutter.outputs.CACHE-KEY }}
 
       - name: Cache pub dependencies
         uses: actions/cache@v5
