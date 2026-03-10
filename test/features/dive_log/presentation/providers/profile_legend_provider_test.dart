@@ -53,6 +53,32 @@ void main() {
       });
     });
 
+    group('activeSecondaryCount', () {
+      test('includes showCeiling in count', () {
+        const isolatedState = ProfileLegendState(
+          showCeiling: true,
+          showAscentRateColors: false,
+          showEvents: false,
+          showMaxDepthMarker: false,
+          showPressureMarkers: false,
+          showGasSwitchMarkers: false,
+        );
+        expect(isolatedState.activeSecondaryCount, 1);
+      });
+
+      test('does NOT include showEvents in count', () {
+        const state = ProfileLegendState(
+          showEvents: true,
+          showAscentRateColors: false,
+          showMaxDepthMarker: false,
+          showPressureMarkers: false,
+          showGasSwitchMarkers: false,
+          showCeiling: false,
+        );
+        expect(state.activeSecondaryCount, 0);
+      });
+    });
+
     group('toggleSection', () {
       test('toggles a collapsed section to expanded', () {
         const state = ProfileLegendState();

@@ -97,10 +97,10 @@ class ProfileLegendState {
   /// Count of active secondary toggles (for badge display)
   int get activeSecondaryCount {
     var count = 0;
+    if (showCeiling) count++;
     if (showHeartRate) count++;
     if (showSac) count++;
     if (showAscentRateColors) count++;
-    if (showEvents) count++;
     if (showMaxDepthMarker) count++;
     if (showPressureMarkers) count++;
     if (showGasSwitchMarkers) count++;
