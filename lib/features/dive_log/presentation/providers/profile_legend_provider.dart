@@ -410,40 +410,7 @@ class ProfileLegend extends _$ProfileLegend {
     state = state.copyWith(showOtu: !state.showOtu);
   }
 
-  // Data source cycle methods
-  void cycleNdlSource() {
-    state = state.copyWith(
-      ndlSource: state.ndlSource == MetricDataSource.computer
-          ? MetricDataSource.calculated
-          : MetricDataSource.computer,
-    );
-  }
-
-  void cycleCeilingSource() {
-    state = state.copyWith(
-      ceilingSource: state.ceilingSource == MetricDataSource.computer
-          ? MetricDataSource.calculated
-          : MetricDataSource.computer,
-    );
-  }
-
-  void cycleTtsSource() {
-    state = state.copyWith(
-      ttsSource: state.ttsSource == MetricDataSource.computer
-          ? MetricDataSource.calculated
-          : MetricDataSource.computer,
-    );
-  }
-
-  void cycleCnsSource() {
-    state = state.copyWith(
-      cnsSource: state.cnsSource == MetricDataSource.computer
-          ? MetricDataSource.calculated
-          : MetricDataSource.computer,
-    );
-  }
-
-  // Explicit data source set methods (for SegmentedButton)
+  // Data source set methods (for SegmentedButton)
   void setCeilingSource(MetricDataSource source) {
     state = state.copyWith(ceilingSource: source);
   }
