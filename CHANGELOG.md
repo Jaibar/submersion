@@ -7,6 +7,17 @@ All notable changes to Submersion are documented in this file.
 
 ### Bug Fixes
 
+- retry location capture when first attempt fails on cold start
+
+### Chores
+
+- bump version to 1.2.24+72
+
+
+## 1.2.24 (2026-03-11)
+
+### Bug Fixes
+
 - decouple store uploads from GitHub release and notify on upload failures
 
 ### Chores
