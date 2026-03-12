@@ -151,6 +151,28 @@ static void on_dive_downloaded(const libdc_parsed_dive_t* dive,
   }
 }
 
+struct PinCallbackData {
+    LibdivecomputerPluginDiveComputerFlutterApi* flutter_api;
+    gchar* address;
+};
+
+static gboolean pin_callback_idle(gpointer data) {
+    auto* cbd = static_cast<PinCallbackData*>(data);
+    libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required(
+        cbd->flutter_api, cbd->address, nullptr, nullptr, nullptr);
+    g_free(cbd->address);
+    delete cbd;
+    return G_SOURCE_REMOVE;
+}
+
+static void on_pin_code_required(const gchar* address, gpointer user_data) {
+    auto* ctx = static_cast<HostApiContext*>(user_data);
+    auto* cbd = new PinCallbackData();
+    cbd->flutter_api = ctx->flutter_api;
+    cbd->address = g_strdup(address);
+    g_idle_add(pin_callback_idle, cbd);
+}
+
 static gpointer download_thread_func(gpointer data) {
   auto* td = static_cast<DownloadThreadData*>(data);
   HostApiContext* ctx = td->ctx;
@@ -185,6 +207,8 @@ static gpointer download_thread_func(gpointer data) {
         g_strdup_printf("/org/bluez/hci0/dev_%s", addr_underscored);
 
     ctx->ble_stream = ble_io_stream_new();
+    ble_io_stream_set_device_address(ctx->ble_stream, td->address);
+    ble_io_stream_set_pin_callback(ctx->ble_stream, on_pin_code_required, ctx);
     if (!ble_io_stream_connect(ctx->ble_stream, device_path)) {
       LibdivecomputerPluginDiveComputerError* error =
           libdivecomputer_plugin_dive_computer_error_new(
@@ -426,6 +450,17 @@ handle_cancel_download(gpointer user_data) {
   return libdivecomputer_plugin_dive_computer_host_api_cancel_download_response_new();
 }
 
+static LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse*
+handle_submit_pin_code(
+    const gchar* pin_code,
+    gpointer user_data) {
+  auto* ctx = static_cast<HostApiContext*>(user_data);
+  if (ctx->ble_stream != nullptr) {
+    ble_io_stream_submit_pin(ctx->ble_stream, pin_code);
+  }
+  return libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_new();
+}
+
 static LibdivecomputerPluginDiveComputerHostApiGetLibdivecomputerVersionResponse*
 handle_get_libdivecomputer_version(gpointer user_data) {
   const char* version = libdc_get_version();
@@ -453,6 +488,7 @@ void dive_computer_host_api_impl_register(FlBinaryMessenger* messenger) {
       .stop_discovery = handle_stop_discovery,
       .start_download = handle_start_download,
       .cancel_download = handle_cancel_download,
+      .submit_pin_code = handle_submit_pin_code,
       .get_libdivecomputer_version = handle_get_libdivecomputer_version,
   };
 

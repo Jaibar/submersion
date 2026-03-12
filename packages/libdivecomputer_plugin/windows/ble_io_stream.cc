@@ -23,6 +23,8 @@ const winrt::guid BleIoStream::kPreferredNotifyUuid{
 
 static constexpr uint32_t kBleIoctlType = 'b';
 static constexpr uint32_t kBleIoctlGetName = 0;
+static constexpr uint32_t kBleIoctlGetPinCode = 1;
+static constexpr uint32_t kBleIoctlAccessCode = 2;
 static constexpr uint32_t kDirectionInput = 1;
 
 BleIoStream::BleIoStream() = default;
@@ -210,6 +212,68 @@ void BleIoStream::Close() {
     }
 }
 
+void BleIoStream::SubmitPinCode(const std::string& pin) {
+    std::lock_guard<std::mutex> lock(pin_mutex_);
+    pending_pin_ = pin;
+    pin_ready_ = true;
+    pin_cv_.notify_one();
+}
+
+void BleIoStream::SetDeviceAddress(const std::string& address) {
+    device_address_ = address;
+}
+
+void BleIoStream::SetOnPinCodeRequired(
+    std::function<void(const std::string&)> callback) {
+    on_pin_code_required_ = std::move(callback);
+}
+
+static std::wstring AccessCodeKey(const std::string& address) {
+    std::wstring key = L"ble_access_code_";
+    for (char c : address) key += static_cast<wchar_t>(c);
+    return key;
+}
+
+std::vector<uint8_t> BleIoStream::LoadAccessCode() {
+    try {
+        auto settings = winrt::Windows::Storage::ApplicationData::Current()
+            .LocalSettings();
+        auto key = AccessCodeKey(device_address_);
+        auto value = settings.Values().TryLookup(winrt::hstring(key));
+        if (!value) return {};
+        auto str = winrt::unbox_value<winrt::hstring>(value);
+        // Stored as hex string.
+        std::vector<uint8_t> result;
+        std::string hex(winrt::to_string(str));
+        for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+            result.push_back(
+                static_cast<uint8_t>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+        }
+        return result;
+    } catch (...) {
+        return {};
+    }
+}
+
+void BleIoStream::SaveAccessCode(const uint8_t* data, size_t size) {
+    try {
+        auto settings = winrt::Windows::Storage::ApplicationData::Current()
+            .LocalSettings();
+        auto key = AccessCodeKey(device_address_);
+        // Store as hex string.
+        std::string hex;
+        char buf[3];
+        for (size_t i = 0; i < size; i++) {
+            std::snprintf(buf, sizeof(buf), "%02x", data[i]);
+            hex += buf;
+        }
+        settings.Values().Insert(
+            winrt::hstring(key), winrt::box_value(winrt::to_hstring(hex)));
+    } catch (...) {
+        // Best effort.
+    }
+}
+
 // -- C callback implementations --
 
 int BleIoStream::SetTimeoutCallback(void* userdata, int timeout) {
@@ -263,6 +327,60 @@ int BleIoStream::IoctlCallback(void* userdata, unsigned int request,
         static_cast<char*>(data)[copy_len - 1] = '\0';
         return LIBDC_STATUS_SUCCESS;
     }
+
+    if (ioctl_type == kBleIoctlType && ioctl_number == kBleIoctlGetPinCode) {
+        if (!data || size == 0) return LIBDC_STATUS_INVALIDARGS;
+
+        // Reset state.
+        {
+            std::lock_guard<std::mutex> lock(stream->pin_mutex_);
+            stream->pending_pin_.clear();
+            stream->pin_ready_ = false;
+        }
+
+        // Dispatch callback (must reach main thread).
+        if (stream->on_pin_code_required_) {
+            stream->on_pin_code_required_(stream->device_address_);
+        }
+
+        // Block until SubmitPinCode is called (60s timeout).
+        {
+            std::unique_lock<std::mutex> lock(stream->pin_mutex_);
+            if (!stream->pin_cv_.wait_for(lock, std::chrono::seconds(60),
+                    [stream] { return stream->pin_ready_; })) {
+                return LIBDC_STATUS_TIMEOUT;
+            }
+        }
+
+        if (stream->pending_pin_.empty()) {
+            return LIBDC_STATUS_CANCELLED;
+        }
+
+        size_t copy_len = std::min(stream->pending_pin_.size() + 1, size);
+        std::memcpy(data, stream->pending_pin_.c_str(), copy_len);
+        static_cast<char*>(data)[copy_len - 1] = '\0';
+        return LIBDC_STATUS_SUCCESS;
+    }
+
+    if (ioctl_type == kBleIoctlType && ioctl_number == kBleIoctlAccessCode) {
+        if (!data || size == 0) return LIBDC_STATUS_INVALIDARGS;
+        uint32_t direction = (request >> 30) & 0x3;
+
+        if (direction == 1) {
+            // GET access code.
+            auto stored = stream->LoadAccessCode();
+            if (stored.empty()) return LIBDC_STATUS_UNSUPPORTED;
+            size_t copy_len = std::min(stored.size(), size);
+            std::memcpy(data, stored.data(), copy_len);
+            return LIBDC_STATUS_SUCCESS;
+        }
+        if (direction == 2) {
+            // SET access code.
+            stream->SaveAccessCode(static_cast<const uint8_t*>(data), size);
+            return LIBDC_STATUS_SUCCESS;
+        }
+    }
+
     return LIBDC_STATUS_UNSUPPORTED;
 }
 

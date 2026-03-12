@@ -140,6 +140,14 @@ std::optional<FlutterError> DiveComputerHostApiImpl::CancelDownload() {
     return std::nullopt;
 }
 
+std::optional<FlutterError> DiveComputerHostApiImpl::SubmitPinCode(
+    const std::string& pin_code) {
+    if (ble_stream_) {
+        ble_stream_->SubmitPinCode(pin_code);
+    }
+    return std::nullopt;
+}
+
 ErrorOr<std::string> DiveComputerHostApiImpl::GetLibdivecomputerVersion() {
     const char* version = libdc_get_version();
     return std::string(version);
@@ -181,6 +189,12 @@ void DiveComputerHostApiImpl::PerformDownload(
         uint64_t ble_address = std::strtoull(
             device.address().c_str(), nullptr, 16);
         ble_stream_ = std::make_unique<BleIoStream>();
+        ble_stream_->SetDeviceAddress(device.address());
+        ble_stream_->SetOnPinCodeRequired(
+            [this](const std::string& address) {
+                flutter_api_->OnPinCodeRequired(
+                    address, [] {}, [](const auto&) {});
+            });
         if (ble_stream_->ConnectAndDiscover(ble_address)) {
             io_callbacks = ble_stream_->MakeCallbacks();
             connected = true;

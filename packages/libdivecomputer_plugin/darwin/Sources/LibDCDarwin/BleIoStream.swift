@@ -527,7 +527,7 @@ class BleIoStream: NSObject, CBPeripheralDelegate {
                     return Int32(LIBDC_STATUS_UNSUPPORTED)
                 }
                 let copyCount = min(stored.count, Int(size))
-                stored.withUnsafeBytes { bytes in
+                _ = stored.withUnsafeBytes { bytes in
                     memcpy(data, bytes.baseAddress!, copyCount)
                 }
                 NSLog("[BleIoStream] ioctl BLE_GET_ACCESSCODE -> found (%d bytes)", stored.count)

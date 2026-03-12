@@ -13,6 +13,7 @@
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
 
 extern "C" {
@@ -43,6 +44,15 @@ class BleIoStream {
 
   // Disconnect and clean up.
   void Close();
+
+  // Submit a PIN code entered by the user.
+  void SubmitPinCode(const std::string& pin);
+
+  // Set the device address for access code storage.
+  void SetDeviceAddress(const std::string& address);
+
+  // Set callback for PIN code requests.
+  void SetOnPinCodeRequired(std::function<void(const std::string&)> callback);
 
  private:
   // Discover GATT services and find the best write/notify characteristic
@@ -90,6 +100,20 @@ class BleIoStream {
 
   int timeout_ms_ = 10000;
   std::string device_name_;
+
+  // PIN code authentication support.
+  std::mutex pin_mutex_;
+  std::condition_variable pin_cv_;
+  std::string pending_pin_;
+  bool pin_ready_ = false;
+  std::string device_address_;
+
+  // Callback when PIN code is needed (called on download thread,
+  // must dispatch to main thread internally).
+  std::function<void(const std::string&)> on_pin_code_required_;
+
+  std::vector<uint8_t> LoadAccessCode();
+  void SaveAccessCode(const uint8_t* data, size_t size);
 };
 
 }  // namespace libdivecomputer_plugin

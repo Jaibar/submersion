@@ -41,6 +41,8 @@ class DiveComputerHostApiImpl : public DiveComputerHostApi,
 
   std::optional<FlutterError> CancelDownload() override;
 
+  std::optional<FlutterError> SubmitPinCode(const std::string& pin_code) override;
+
   ErrorOr<std::string> GetLibdivecomputerVersion() override;
 
  private:

@@ -23,6 +23,16 @@ typedef struct {
 
     gint timeout_ms;
     gchar* device_name;
+
+    GMutex pin_mutex;
+    GCond pin_cond;
+    gchar* pending_pin;
+    gboolean pin_ready;
+    gchar* device_address;
+
+    // Callback when PIN code is needed.
+    void (*on_pin_code_required)(const gchar* address, gpointer user_data);
+    gpointer pin_callback_data;
 } BleIoStream;
 
 // Create a new BLE I/O stream.
@@ -42,6 +52,19 @@ void ble_io_stream_close(BleIoStream* stream);
 
 // Free the stream and all resources.
 void ble_io_stream_free(BleIoStream* stream);
+
+// Submit a PIN code entered by the user.
+void ble_io_stream_submit_pin(BleIoStream* stream, const gchar* pin);
+
+// Set the device address for access code storage.
+void ble_io_stream_set_device_address(BleIoStream* stream,
+                                       const gchar* address);
+
+// Set callback for PIN code requests.
+void ble_io_stream_set_pin_callback(
+    BleIoStream* stream,
+    void (*callback)(const gchar* address, gpointer user_data),
+    gpointer user_data);
 
 G_END_DECLS
 

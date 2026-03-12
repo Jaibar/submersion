@@ -14,6 +14,8 @@ static const char* PREFERRED_NOTIFY_UUID =
 
 static const guint32 BLE_IOCTL_TYPE = 'b';
 static const guint32 BLE_IOCTL_GET_NAME = 0;
+static const guint32 BLE_IOCTL_GET_PINCODE_NR = 1;
+static const guint32 BLE_IOCTL_ACCESSCODE_NR = 2;
 static const guint32 DIRECTION_INPUT = 1;
 
 BleIoStream* ble_io_stream_new(void) {
@@ -22,6 +24,13 @@ BleIoStream* ble_io_stream_new(void) {
     g_cond_init(&stream->read_cond);
     stream->read_buffer = g_byte_array_new();
     stream->timeout_ms = 10000;
+    g_mutex_init(&stream->pin_mutex);
+    g_cond_init(&stream->pin_cond);
+    stream->pending_pin = NULL;
+    stream->pin_ready = FALSE;
+    stream->device_address = NULL;
+    stream->on_pin_code_required = NULL;
+    stream->pin_callback_data = NULL;
     return stream;
 }
 
@@ -368,6 +377,61 @@ static int ble_close(void* userdata) {
     return LIBDC_STATUS_SUCCESS;
 }
 
+static gchar* get_access_code_path(void) {
+    return g_build_filename(
+        g_get_user_config_dir(), "submersion", "ble_access_codes.ini", NULL);
+}
+
+static GBytes* load_access_code(const gchar* address) {
+    g_autofree gchar* path = get_access_code_path();
+    g_autoptr(GKeyFile) kf = g_key_file_new();
+
+    if (!g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+        return NULL;
+    }
+
+    gchar* key = g_strdup_printf("ble_access_code_%s", address);
+    g_autofree gchar* hex = g_key_file_get_string(kf, "access_codes", key, NULL);
+    g_free(key);
+
+    if (hex == NULL) return NULL;
+
+    // Decode hex string to bytes.
+    gsize hex_len = strlen(hex);
+    if (hex_len == 0 || hex_len % 2 != 0) return NULL;
+    gsize byte_len = hex_len / 2;
+    guint8* bytes = g_malloc(byte_len);
+    for (gsize i = 0; i < byte_len; i++) {
+        char buf[3] = { hex[i*2], hex[i*2+1], '\0' };
+        bytes[i] = (guint8)g_ascii_strtoull(buf, NULL, 16);
+    }
+    return g_bytes_new_take(bytes, byte_len);
+}
+
+static void save_access_code(const gchar* address,
+                              const void* data, gsize size) {
+    g_autofree gchar* path = get_access_code_path();
+    g_autofree gchar* dir = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0700);
+
+    g_autoptr(GKeyFile) kf = g_key_file_new();
+    g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL);
+
+    // Encode bytes as hex string.
+    GString* hex = g_string_sized_new(size * 2);
+    const guint8* bytes = (const guint8*)data;
+    for (gsize i = 0; i < size; i++) {
+        g_string_append_printf(hex, "%02x", bytes[i]);
+    }
+
+    gchar* key = g_strdup_printf("ble_access_code_%s", address);
+    g_key_file_set_string(kf, "access_codes", key, hex->str);
+    g_free(key);
+    g_string_free(hex, TRUE);
+
+    g_key_file_save_to_file(kf, path, NULL);
+}
+
 static int ble_ioctl(void* userdata, unsigned int request,
                      void* data, size_t size) {
     BleIoStream* stream = (BleIoStream*)userdata;
@@ -386,6 +450,67 @@ static int ble_ioctl(void* userdata, unsigned int request,
         memcpy(data, stream->device_name, copy_len);
         ((char*)data)[copy_len - 1] = '\0';
         return LIBDC_STATUS_SUCCESS;
+    }
+
+    if (ioctl_type == BLE_IOCTL_TYPE && ioctl_number == BLE_IOCTL_GET_PINCODE_NR) {
+        if (!data || size == 0) return LIBDC_STATUS_INVALIDARGS;
+
+        g_mutex_lock(&stream->pin_mutex);
+        g_free(stream->pending_pin);
+        stream->pending_pin = NULL;
+        stream->pin_ready = FALSE;
+        g_mutex_unlock(&stream->pin_mutex);
+
+        // Dispatch callback.
+        if (stream->on_pin_code_required) {
+            stream->on_pin_code_required(
+                stream->device_address, stream->pin_callback_data);
+        }
+
+        // Block until submitPinCode is called (60s timeout).
+        g_mutex_lock(&stream->pin_mutex);
+        gint64 end_time = g_get_monotonic_time() + 60 * G_TIME_SPAN_SECOND;
+        while (!stream->pin_ready) {
+            if (!g_cond_wait_until(&stream->pin_cond, &stream->pin_mutex,
+                                    end_time)) {
+                g_mutex_unlock(&stream->pin_mutex);
+                return LIBDC_STATUS_TIMEOUT;
+            }
+        }
+
+        if (stream->pending_pin == NULL || stream->pending_pin[0] == '\0') {
+            g_mutex_unlock(&stream->pin_mutex);
+            return LIBDC_STATUS_CANCELLED;
+        }
+
+        size_t pin_len = strlen(stream->pending_pin) + 1;
+        size_t copy_len = MIN(pin_len, size);
+        memcpy(data, stream->pending_pin, copy_len);
+        ((char*)data)[copy_len - 1] = '\0';
+        g_mutex_unlock(&stream->pin_mutex);
+        return LIBDC_STATUS_SUCCESS;
+    }
+
+    if (ioctl_type == BLE_IOCTL_TYPE && ioctl_number == BLE_IOCTL_ACCESSCODE_NR) {
+        if (!data || size == 0) return LIBDC_STATUS_INVALIDARGS;
+        guint32 direction = (request >> 30) & 0x3;
+
+        if (direction == 1) {
+            // GET access code.
+            GBytes* stored = load_access_code(stream->device_address);
+            if (stored == NULL) return LIBDC_STATUS_UNSUPPORTED;
+            gsize stored_size;
+            const void* stored_data = g_bytes_get_data(stored, &stored_size);
+            size_t copy_len = MIN(stored_size, size);
+            memcpy(data, stored_data, copy_len);
+            g_bytes_unref(stored);
+            return LIBDC_STATUS_SUCCESS;
+        }
+        if (direction == 2) {
+            // SET access code.
+            save_access_code(stream->device_address, data, size);
+            return LIBDC_STATUS_SUCCESS;
+        }
     }
 
     return LIBDC_STATUS_UNSUPPORTED;
@@ -481,6 +606,33 @@ void ble_io_stream_free(BleIoStream* stream) {
     g_free(stream->write_path);
     g_free(stream->notify_path);
     g_free(stream->device_name);
+    g_mutex_clear(&stream->pin_mutex);
+    g_cond_clear(&stream->pin_cond);
+    g_free(stream->pending_pin);
+    g_free(stream->device_address);
     if (stream->connection) g_object_unref(stream->connection);
     g_free(stream);
+}
+
+void ble_io_stream_submit_pin(BleIoStream* stream, const gchar* pin) {
+    g_mutex_lock(&stream->pin_mutex);
+    g_free(stream->pending_pin);
+    stream->pending_pin = g_strdup(pin);
+    stream->pin_ready = TRUE;
+    g_cond_signal(&stream->pin_cond);
+    g_mutex_unlock(&stream->pin_mutex);
+}
+
+void ble_io_stream_set_device_address(BleIoStream* stream,
+                                       const gchar* address) {
+    g_free(stream->device_address);
+    stream->device_address = g_strdup(address);
+}
+
+void ble_io_stream_set_pin_callback(
+    BleIoStream* stream,
+    void (*callback)(const gchar* address, gpointer user_data),
+    gpointer user_data) {
+    stream->on_pin_code_required = callback;
+    stream->pin_callback_data = user_data;
 }
