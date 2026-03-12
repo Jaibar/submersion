@@ -3,6 +3,32 @@
 All notable changes to Submersion are documented in this file.
 
 
+## 1.2.25 (2026-03-12)
+
+### Features
+
+- add PIN code auth and access code support
+- wire PIN code callback and submitPinCode in HostApiImpl
+- handle PIN code and access code ioctls in JNI layer
+- add PIN code and access code support to BleIoHandler/BleIoStream
+- wire PIN code callback and submitPinCode in HostApiImpl
+- add PIN code and access code ioctl handlers to BleIoStream
+- wire PIN code dialog into download UI pages
+- create PIN code dialog widget for BLE authentication
+- add pinRequired phase, submitPinCode, remove setDialogContext
+- add PinCodeRequestEvent and submitPinCode to DiveComputerService
+- add PIN code Pigeon API (submitPinCode + onPinCodeRequired)
+
+### Bug Fixes
+
+- resolve location failure after fresh permission grant
+
+### Chores
+
+- bump version to 1.2.25+73
+- add ble pin code plan
+
+
 ## 1.2.24 (2026-03-11)
 
 ### Bug Fixes
