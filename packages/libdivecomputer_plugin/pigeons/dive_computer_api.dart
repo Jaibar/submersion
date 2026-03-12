@@ -187,6 +187,8 @@ abstract class DiveComputerHostApi {
 
   void cancelDownload();
 
+  void submitPinCode(String pinCode);
+
   String getLibdivecomputerVersion();
 }
 
@@ -204,4 +206,5 @@ abstract class DiveComputerFlutterApi {
     String? firmwareVersion,
   );
   void onError(DiveComputerError error);
+  void onPinCodeRequired(String deviceAddress);
 }

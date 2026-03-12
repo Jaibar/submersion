@@ -536,6 +536,7 @@ protocol DiveComputerHostApi {
   func stopDiscovery() throws
   func startDownload(device: DiscoveredDevice, completion: @escaping (Result<Void, Error>) -> Void)
   func cancelDownload() throws
+  func submitPinCode(pinCode: String) throws
   func getLibdivecomputerVersion() throws -> String
 }
 
@@ -620,6 +621,21 @@ class DiveComputerHostApiSetup {
     } else {
       cancelDownloadChannel.setMessageHandler(nil)
     }
+    let submitPinCodeChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.submitPinCode\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      submitPinCodeChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let pinCodeArg = args[0] as! String
+        do {
+          try api.submitPinCode(pinCode: pinCodeArg)
+          reply(wrapResult(nil))
+        } catch {
+          reply(wrapError(error))
+        }
+      }
+    } else {
+      submitPinCodeChannel.setMessageHandler(nil)
+    }
     let getLibdivecomputerVersionChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.getLibdivecomputerVersion\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       getLibdivecomputerVersionChannel.setMessageHandler { _, reply in
@@ -643,6 +659,7 @@ protocol DiveComputerFlutterApiProtocol {
   func onDiveDownloaded(dive diveArg: ParsedDive, completion: @escaping (Result<Void, PigeonError>) -> Void)
   func onDownloadComplete(totalDives totalDivesArg: Int64, serialNumber serialNumberArg: String?, firmwareVersion firmwareVersionArg: String?, completion: @escaping (Result<Void, PigeonError>) -> Void)
   func onError(error errorArg: DiveComputerError, completion: @escaping (Result<Void, PigeonError>) -> Void)
+  func onPinCodeRequired(deviceAddress deviceAddressArg: String, completion: @escaping (Result<Void, PigeonError>) -> Void)
 }
 class DiveComputerFlutterApi: DiveComputerFlutterApiProtocol {
   private let binaryMessenger: FlutterBinaryMessenger
@@ -748,6 +765,24 @@ class DiveComputerFlutterApi: DiveComputerFlutterApiProtocol {
     let channelName: String = "dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerFlutterApi.onError\(messageChannelSuffix)"
     let channel = FlutterBasicMessageChannel(name: channelName, binaryMessenger: binaryMessenger, codec: codec)
     channel.sendMessage([errorArg] as [Any?]) { response in
+      guard let listResponse = response as? [Any?] else {
+        completion(.failure(createConnectionError(withChannelName: channelName)))
+        return
+      }
+      if listResponse.count > 1 {
+        let code: String = listResponse[0] as! String
+        let message: String? = nilOrValue(listResponse[1])
+        let details: String? = nilOrValue(listResponse[2])
+        completion(.failure(PigeonError(code: code, message: message, details: details)))
+      } else {
+        completion(.success(Void()))
+      }
+    }
+  }
+  func onPinCodeRequired(deviceAddress deviceAddressArg: String, completion: @escaping (Result<Void, PigeonError>) -> Void) {
+    let channelName: String = "dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerFlutterApi.onPinCodeRequired\(messageChannelSuffix)"
+    let channel = FlutterBasicMessageChannel(name: channelName, binaryMessenger: binaryMessenger, codec: codec)
+    channel.sendMessage([deviceAddressArg] as [Any?]) { response in
       guard let listResponse = response as? [Any?] else {
         completion(.failure(createConnectionError(withChannelName: channelName)))
         return

@@ -1655,6 +1655,43 @@ LibdivecomputerPluginDiveComputerHostApiCancelDownloadResponse* libdivecomputer_
   return self;
 }
 
+struct _LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse {
+  GObject parent_instance;
+
+  FlValue* value;
+};
+
+G_DEFINE_TYPE(LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse, libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response, G_TYPE_OBJECT)
+
+static void libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_dispose(GObject* object) {
+  LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* self = LIBDIVECOMPUTER_PLUGIN_DIVE_COMPUTER_HOST_API_SUBMIT_PIN_CODE_RESPONSE(object);
+  g_clear_pointer(&self->value, fl_value_unref);
+  G_OBJECT_CLASS(libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_parent_class)->dispose(object);
+}
+
+static void libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_init(LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* self) {
+}
+
+static void libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_class_init(LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponseClass* klass) {
+  G_OBJECT_CLASS(klass)->dispose = libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_dispose;
+}
+
+LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_new() {
+  LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* self = LIBDIVECOMPUTER_PLUGIN_DIVE_COMPUTER_HOST_API_SUBMIT_PIN_CODE_RESPONSE(g_object_new(libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_get_type(), nullptr));
+  self->value = fl_value_new_list();
+  fl_value_append_take(self->value, fl_value_new_null());
+  return self;
+}
+
+LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_new_error(const gchar* code, const gchar* message, FlValue* details) {
+  LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* self = LIBDIVECOMPUTER_PLUGIN_DIVE_COMPUTER_HOST_API_SUBMIT_PIN_CODE_RESPONSE(g_object_new(libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_get_type(), nullptr));
+  self->value = fl_value_new_list();
+  fl_value_append_take(self->value, fl_value_new_string(code));
+  fl_value_append_take(self->value, fl_value_new_string(message != nullptr ? message : ""));
+  fl_value_append_take(self->value, details != nullptr ? fl_value_ref(details) : fl_value_new_null());
+  return self;
+}
+
 struct _LibdivecomputerPluginDiveComputerHostApiGetLibdivecomputerVersionResponse {
   GObject parent_instance;
 
@@ -1801,6 +1838,27 @@ static void libdivecomputer_plugin_dive_computer_host_api_cancel_download_cb(FlB
   }
 }
 
+static void libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_cb(FlBasicMessageChannel* channel, FlValue* message_, FlBasicMessageChannelResponseHandle* response_handle, gpointer user_data) {
+  LibdivecomputerPluginDiveComputerHostApi* self = LIBDIVECOMPUTER_PLUGIN_DIVE_COMPUTER_HOST_API(user_data);
+
+  if (self->vtable == nullptr || self->vtable->submit_pin_code == nullptr) {
+    return;
+  }
+
+  FlValue* value0 = fl_value_get_list_value(message_, 0);
+  const gchar* pin_code = fl_value_get_string(value0);
+  g_autoptr(LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse) response = self->vtable->submit_pin_code(pin_code, self->user_data);
+  if (response == nullptr) {
+    g_warning("No response returned to %s.%s", "DiveComputerHostApi", "submitPinCode");
+    return;
+  }
+
+  g_autoptr(GError) error = NULL;
+  if (!fl_basic_message_channel_respond(channel, response_handle, response->value, &error)) {
+    g_warning("Failed to send response to %s.%s: %s", "DiveComputerHostApi", "submitPinCode", error->message);
+  }
+}
+
 static void libdivecomputer_plugin_dive_computer_host_api_get_libdivecomputer_version_cb(FlBasicMessageChannel* channel, FlValue* message_, FlBasicMessageChannelResponseHandle* response_handle, gpointer user_data) {
   LibdivecomputerPluginDiveComputerHostApi* self = LIBDIVECOMPUTER_PLUGIN_DIVE_COMPUTER_HOST_API(user_data);
 
@@ -1840,6 +1898,9 @@ void libdivecomputer_plugin_dive_computer_host_api_set_method_handlers(FlBinaryM
   g_autofree gchar* cancel_download_channel_name = g_strdup_printf("dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.cancelDownload%s", dot_suffix);
   g_autoptr(FlBasicMessageChannel) cancel_download_channel = fl_basic_message_channel_new(messenger, cancel_download_channel_name, FL_MESSAGE_CODEC(codec));
   fl_basic_message_channel_set_message_handler(cancel_download_channel, libdivecomputer_plugin_dive_computer_host_api_cancel_download_cb, g_object_ref(api_data), g_object_unref);
+  g_autofree gchar* submit_pin_code_channel_name = g_strdup_printf("dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.submitPinCode%s", dot_suffix);
+  g_autoptr(FlBasicMessageChannel) submit_pin_code_channel = fl_basic_message_channel_new(messenger, submit_pin_code_channel_name, FL_MESSAGE_CODEC(codec));
+  fl_basic_message_channel_set_message_handler(submit_pin_code_channel, libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_cb, g_object_ref(api_data), g_object_unref);
   g_autofree gchar* get_libdivecomputer_version_channel_name = g_strdup_printf("dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.getLibdivecomputerVersion%s", dot_suffix);
   g_autoptr(FlBasicMessageChannel) get_libdivecomputer_version_channel = fl_basic_message_channel_new(messenger, get_libdivecomputer_version_channel_name, FL_MESSAGE_CODEC(codec));
   fl_basic_message_channel_set_message_handler(get_libdivecomputer_version_channel, libdivecomputer_plugin_dive_computer_host_api_get_libdivecomputer_version_cb, g_object_ref(api_data), g_object_unref);
@@ -1864,6 +1925,9 @@ void libdivecomputer_plugin_dive_computer_host_api_clear_method_handlers(FlBinar
   g_autofree gchar* cancel_download_channel_name = g_strdup_printf("dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.cancelDownload%s", dot_suffix);
   g_autoptr(FlBasicMessageChannel) cancel_download_channel = fl_basic_message_channel_new(messenger, cancel_download_channel_name, FL_MESSAGE_CODEC(codec));
   fl_basic_message_channel_set_message_handler(cancel_download_channel, nullptr, nullptr, nullptr);
+  g_autofree gchar* submit_pin_code_channel_name = g_strdup_printf("dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.submitPinCode%s", dot_suffix);
+  g_autoptr(FlBasicMessageChannel) submit_pin_code_channel = fl_basic_message_channel_new(messenger, submit_pin_code_channel_name, FL_MESSAGE_CODEC(codec));
+  fl_basic_message_channel_set_message_handler(submit_pin_code_channel, nullptr, nullptr, nullptr);
   g_autofree gchar* get_libdivecomputer_version_channel_name = g_strdup_printf("dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.getLibdivecomputerVersion%s", dot_suffix);
   g_autoptr(FlBasicMessageChannel) get_libdivecomputer_version_channel = fl_basic_message_channel_new(messenger, get_libdivecomputer_version_channel_name, FL_MESSAGE_CODEC(codec));
   fl_basic_message_channel_set_message_handler(get_libdivecomputer_version_channel, nullptr, nullptr, nullptr);
@@ -2420,4 +2484,83 @@ LibdivecomputerPluginDiveComputerFlutterApiOnErrorResponse* libdivecomputer_plug
     return nullptr;
   }
   return libdivecomputer_plugin_dive_computer_flutter_api_on_error_response_new(response);
+}
+
+struct _LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse {
+  GObject parent_instance;
+
+  FlValue* error;
+};
+
+G_DEFINE_TYPE(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse, libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response, G_TYPE_OBJECT)
+
+static void libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_dispose(GObject* object) {
+  LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* self = LIBDIVECOMPUTER_PLUGIN_DIVE_COMPUTER_FLUTTER_API_ON_PIN_CODE_REQUIRED_RESPONSE(object);
+  g_clear_pointer(&self->error, fl_value_unref);
+  G_OBJECT_CLASS(libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_parent_class)->dispose(object);
+}
+
+static void libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_init(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* self) {
+}
+
+static void libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_class_init(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponseClass* klass) {
+  G_OBJECT_CLASS(klass)->dispose = libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_dispose;
+}
+
+static LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_new(FlValue* response) {
+  LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* self = LIBDIVECOMPUTER_PLUGIN_DIVE_COMPUTER_FLUTTER_API_ON_PIN_CODE_REQUIRED_RESPONSE(g_object_new(libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_type(), nullptr));
+  if (fl_value_get_length(response) > 1) {
+    self->error = fl_value_ref(response);
+  }
+  return self;
+}
+
+gboolean libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_is_error(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* self) {
+  g_return_val_if_fail(LIBDIVECOMPUTER_PLUGIN_IS_DIVE_COMPUTER_FLUTTER_API_ON_PIN_CODE_REQUIRED_RESPONSE(self), FALSE);
+  return self->error != nullptr;
+}
+
+const gchar* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_code(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* self) {
+  g_return_val_if_fail(LIBDIVECOMPUTER_PLUGIN_IS_DIVE_COMPUTER_FLUTTER_API_ON_PIN_CODE_REQUIRED_RESPONSE(self), nullptr);
+  g_assert(libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_is_error(self));
+  return fl_value_get_string(fl_value_get_list_value(self->error, 0));
+}
+
+const gchar* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_message(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* self) {
+  g_return_val_if_fail(LIBDIVECOMPUTER_PLUGIN_IS_DIVE_COMPUTER_FLUTTER_API_ON_PIN_CODE_REQUIRED_RESPONSE(self), nullptr);
+  g_assert(libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_is_error(self));
+  return fl_value_get_string(fl_value_get_list_value(self->error, 1));
+}
+
+FlValue* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_details(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* self) {
+  g_return_val_if_fail(LIBDIVECOMPUTER_PLUGIN_IS_DIVE_COMPUTER_FLUTTER_API_ON_PIN_CODE_REQUIRED_RESPONSE(self), nullptr);
+  g_assert(libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_is_error(self));
+  return fl_value_get_list_value(self->error, 2);
+}
+
+static void libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_cb(GObject* object, GAsyncResult* result, gpointer user_data) {
+  GTask* task = G_TASK(user_data);
+  g_task_return_pointer(task, result, g_object_unref);
+}
+
+void libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required(LibdivecomputerPluginDiveComputerFlutterApi* self, const gchar* device_address, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer user_data) {
+  g_autoptr(FlValue) args = fl_value_new_list();
+  fl_value_append_take(args, fl_value_new_string(device_address));
+  g_autofree gchar* channel_name = g_strdup_printf("dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerFlutterApi.onPinCodeRequired%s", self->suffix);
+  g_autoptr(LibdivecomputerPluginMessageCodec) codec = libdivecomputer_plugin_message_codec_new();
+  FlBasicMessageChannel* channel = fl_basic_message_channel_new(self->messenger, channel_name, FL_MESSAGE_CODEC(codec));
+  GTask* task = g_task_new(self, cancellable, callback, user_data);
+  g_task_set_task_data(task, channel, g_object_unref);
+  fl_basic_message_channel_send(channel, args, cancellable, libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_cb, task);
+}
+
+LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_finish(LibdivecomputerPluginDiveComputerFlutterApi* self, GAsyncResult* result, GError** error) {
+  g_autoptr(GTask) task = G_TASK(result);
+  GAsyncResult* r = G_ASYNC_RESULT(g_task_propagate_pointer(task, nullptr));
+  FlBasicMessageChannel* channel = FL_BASIC_MESSAGE_CHANNEL(g_task_get_task_data(task));
+  g_autoptr(FlValue) response = fl_basic_message_channel_send_finish(channel, r, error);
+  if (response == nullptr) { 
+    return nullptr;
+  }
+  return libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_new(response);
 }

@@ -591,6 +591,7 @@ class DiveComputerHostApi {
     const DiscoveredDevice& device,
     std::function<void(std::optional<FlutterError> reply)> result) = 0;
   virtual std::optional<FlutterError> CancelDownload() = 0;
+  virtual std::optional<FlutterError> SubmitPinCode(const std::string& pin_code) = 0;
   virtual ErrorOr<std::string> GetLibdivecomputerVersion() = 0;
 
   // The codec used by DiveComputerHostApi.
@@ -641,6 +642,10 @@ class DiveComputerFlutterApi {
     std::function<void(const FlutterError&)>&& on_error);
   void OnError(
     const DiveComputerError& error,
+    std::function<void(void)>&& on_success,
+    std::function<void(const FlutterError&)>&& on_error);
+  void OnPinCodeRequired(
+    const std::string& device_address,
     std::function<void(void)>&& on_success,
     std::function<void(const FlutterError&)>&& on_error);
 

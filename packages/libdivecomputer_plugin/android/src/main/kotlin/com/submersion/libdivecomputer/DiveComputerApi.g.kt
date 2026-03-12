@@ -475,6 +475,7 @@ interface DiveComputerHostApi {
   fun stopDiscovery()
   fun startDownload(device: DiscoveredDevice, callback: (Result<Unit>) -> Unit)
   fun cancelDownload()
+  fun submitPinCode(pinCode: String)
   fun getLibdivecomputerVersion(): String
 
   companion object {
@@ -564,6 +565,24 @@ interface DiveComputerHostApi {
           channel.setMessageHandler { _, reply ->
             val wrapped: List<Any?> = try {
               api.cancelDownload()
+              listOf(null)
+            } catch (exception: Throwable) {
+              wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.submitPinCode$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val pinCodeArg = args[0] as String
+            val wrapped: List<Any?> = try {
+              api.submitPinCode(pinCodeArg)
               listOf(null)
             } catch (exception: Throwable) {
               wrapError(exception)
@@ -691,6 +710,23 @@ class DiveComputerFlutterApi(private val binaryMessenger: BinaryMessenger, priva
     val channelName = "dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerFlutterApi.onError$separatedMessageChannelSuffix"
     val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
     channel.send(listOf(errorArg)) {
+      if (it is List<*>) {
+        if (it.size > 1) {
+          callback(Result.failure(FlutterError(it[0] as String, it[1] as String, it[2] as String?)))
+        } else {
+          callback(Result.success(Unit))
+        }
+      } else {
+        callback(Result.failure(createConnectionError(channelName)))
+      } 
+    }
+  }
+  fun onPinCodeRequired(deviceAddressArg: String, callback: (Result<Unit>) -> Unit)
+{
+    val separatedMessageChannelSuffix = if (messageChannelSuffix.isNotEmpty()) ".$messageChannelSuffix" else ""
+    val channelName = "dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerFlutterApi.onPinCodeRequired$separatedMessageChannelSuffix"
+    val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
+    channel.send(listOf(deviceAddressArg)) {
       if (it is List<*>) {
         if (it.size > 1) {
           callback(Result.failure(FlutterError(it[0] as String, it[1] as String, it[2] as String?)))

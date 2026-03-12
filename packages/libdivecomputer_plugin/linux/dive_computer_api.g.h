@@ -835,6 +835,29 @@ LibdivecomputerPluginDiveComputerHostApiCancelDownloadResponse* libdivecomputer_
  */
 LibdivecomputerPluginDiveComputerHostApiCancelDownloadResponse* libdivecomputer_plugin_dive_computer_host_api_cancel_download_response_new_error(const gchar* code, const gchar* message, FlValue* details);
 
+G_DECLARE_FINAL_TYPE(LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse, libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response, LIBDIVECOMPUTER_PLUGIN, DIVE_COMPUTER_HOST_API_SUBMIT_PIN_CODE_RESPONSE, GObject)
+
+/**
+ * libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_new:
+ *
+ * Creates a new response to DiveComputerHostApi.submitPinCode.
+ *
+ * Returns: a new #LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse
+ */
+LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_new();
+
+/**
+ * libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_new_error:
+ * @code: error code.
+ * @message: error message.
+ * @details: (allow-none): error details or %NULL.
+ *
+ * Creates a new error response to DiveComputerHostApi.submitPinCode.
+ *
+ * Returns: a new #LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse
+ */
+LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* libdivecomputer_plugin_dive_computer_host_api_submit_pin_code_response_new_error(const gchar* code, const gchar* message, FlValue* details);
+
 G_DECLARE_FINAL_TYPE(LibdivecomputerPluginDiveComputerHostApiGetLibdivecomputerVersionResponse, libdivecomputer_plugin_dive_computer_host_api_get_libdivecomputer_version_response, LIBDIVECOMPUTER_PLUGIN, DIVE_COMPUTER_HOST_API_GET_LIBDIVECOMPUTER_VERSION_RESPONSE, GObject)
 
 /**
@@ -869,6 +892,7 @@ typedef struct {
   LibdivecomputerPluginDiveComputerHostApiStopDiscoveryResponse* (*stop_discovery)(gpointer user_data);
   void (*start_download)(LibdivecomputerPluginDiscoveredDevice* device, LibdivecomputerPluginDiveComputerHostApiResponseHandle* response_handle, gpointer user_data);
   LibdivecomputerPluginDiveComputerHostApiCancelDownloadResponse* (*cancel_download)(gpointer user_data);
+  LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* (*submit_pin_code)(const gchar* pin_code, gpointer user_data);
   LibdivecomputerPluginDiveComputerHostApiGetLibdivecomputerVersionResponse* (*get_libdivecomputer_version)(gpointer user_data);
 } LibdivecomputerPluginDiveComputerHostApiVTable;
 
@@ -1205,6 +1229,48 @@ const gchar* libdivecomputer_plugin_dive_computer_flutter_api_on_error_response_
  */
 FlValue* libdivecomputer_plugin_dive_computer_flutter_api_on_error_response_get_error_details(LibdivecomputerPluginDiveComputerFlutterApiOnErrorResponse* response);
 
+G_DECLARE_FINAL_TYPE(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse, libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response, LIBDIVECOMPUTER_PLUGIN, DIVE_COMPUTER_FLUTTER_API_ON_PIN_CODE_REQUIRED_RESPONSE, GObject)
+
+/**
+ * libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_is_error:
+ * @response: a #LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse.
+ *
+ * Checks if a response to DiveComputerFlutterApi.onPinCodeRequired is an error.
+ *
+ * Returns: a %TRUE if this response is an error.
+ */
+gboolean libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_is_error(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* response);
+
+/**
+ * libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_code:
+ * @response: a #LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse.
+ *
+ * Get the error code for this response.
+ *
+ * Returns: an error code or %NULL if not an error.
+ */
+const gchar* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_code(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* response);
+
+/**
+ * libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_message:
+ * @response: a #LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse.
+ *
+ * Get the error message for this response.
+ *
+ * Returns: an error message.
+ */
+const gchar* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_message(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* response);
+
+/**
+ * libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_details:
+ * @response: a #LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse.
+ *
+ * Get the error details for this response.
+ *
+ * Returns: (allow-none): an error details or %NULL.
+ */
+FlValue* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_response_get_error_details(LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* response);
+
 /**
  * LibdivecomputerPluginDiveComputerFlutterApi:
  *
@@ -1361,6 +1427,29 @@ void libdivecomputer_plugin_dive_computer_flutter_api_on_error(LibdivecomputerPl
  * Returns: a #LibdivecomputerPluginDiveComputerFlutterApiOnErrorResponse or %NULL on error.
  */
 LibdivecomputerPluginDiveComputerFlutterApiOnErrorResponse* libdivecomputer_plugin_dive_computer_flutter_api_on_error_finish(LibdivecomputerPluginDiveComputerFlutterApi* api, GAsyncResult* result, GError** error);
+
+/**
+ * libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required:
+ * @api: a #LibdivecomputerPluginDiveComputerFlutterApi.
+ * @device_address: parameter for this method.
+ * @cancellable: (allow-none): a #GCancellable or %NULL.
+ * @callback: (scope async): (allow-none): a #GAsyncReadyCallback to call when the call is complete or %NULL to ignore the response.
+ * @user_data: (closure): user data to pass to @callback.
+ *
+ */
+void libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required(LibdivecomputerPluginDiveComputerFlutterApi* api, const gchar* device_address, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer user_data);
+
+/**
+ * libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_finish:
+ * @api: a #LibdivecomputerPluginDiveComputerFlutterApi.
+ * @result: a #GAsyncResult.
+ * @error: (allow-none): #GError location to store the error occurring, or %NULL to ignore.
+ *
+ * Completes a libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required() call.
+ *
+ * Returns: a #LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse or %NULL on error.
+ */
+LibdivecomputerPluginDiveComputerFlutterApiOnPinCodeRequiredResponse* libdivecomputer_plugin_dive_computer_flutter_api_on_pin_code_required_finish(LibdivecomputerPluginDiveComputerFlutterApi* api, GAsyncResult* result, GError** error);
 
 G_END_DECLS
 
