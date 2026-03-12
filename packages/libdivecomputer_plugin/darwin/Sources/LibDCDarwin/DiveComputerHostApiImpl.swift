@@ -148,6 +148,13 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
         }
     }
 
+    func submitPinCode(pinCode: String) throws {
+        guard let stream = activeBleStream else {
+            throw PigeonError(code: "no_stream", message: "No active BLE stream", details: nil)
+        }
+        stream.submitPinCode(pinCode)
+    }
+
     private func performDownload(device: DiscoveredDevice) {
         // Create download session.
         guard let session = libdc_download_session_new() else {
@@ -313,6 +320,11 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
                   peripheral.identifier.uuidString, peripheral.name ?? "unknown")
 
             let stream = BleIoStream(peripheral: peripheral, centralManager: centralMgr)
+            stream.setDeviceAddress(device.address)
+            stream.onPinCodeRequired = { [weak self] address in
+                self?.flutterApi.onPinCodeRequired(deviceAddress: address) { _ in }
+            }
+            self.activeBleStream = stream
             if stream.connectAndDiscover() {
                 connectedStream = stream
                 break
@@ -332,7 +344,6 @@ class DiveComputerHostApiImpl: DiveComputerHostApi {
             self.activeBleStream = nil
             return nil
         }
-        self.activeBleStream = bleStream
         return bleStream.makeCallbacks()
     }
 
