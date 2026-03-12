@@ -242,6 +242,18 @@ class DownloadNotifier extends StateNotifier<DownloadState> {
           defaultResolution: ConflictResolution.skip,
           diverId: _autoImportDiverId,
         );
+      } else {
+        // Zero new dives (incremental download found nothing new).
+        // Set an empty import result so the UI can show "up to date".
+        state = state.copyWith(
+          importResult: ImportResult.success(
+            imported: 0,
+            skipped: 0,
+            updated: 0,
+            importedDiveIds: [],
+            importedDives: [],
+          ),
+        );
       }
     } catch (e) {
       debugPrint('[DownloadNotifier] Device info persist/import failed: $e');
