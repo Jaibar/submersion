@@ -1312,7 +1312,9 @@ void DiveComputerHostApi::SetUp(
             return;
           }
           const auto& device_arg = std::any_cast<const DiscoveredDevice&>(std::get<CustomEncodableValue>(encodable_device_arg));
-          api->StartDownload(device_arg, [reply](std::optional<FlutterError>&& output) {
+          const auto& encodable_fingerprint_arg = args.at(1);
+          const auto* fingerprint_arg = std::get_if<std::string>(&encodable_fingerprint_arg);
+          api->StartDownload(device_arg, fingerprint_arg, [reply](std::optional<FlutterError>&& output) {
             if (output.has_value()) {
               reply(WrapError(output.value()));
               return;

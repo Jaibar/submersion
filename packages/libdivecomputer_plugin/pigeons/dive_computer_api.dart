@@ -183,7 +183,7 @@ abstract class DiveComputerHostApi {
   void stopDiscovery();
 
   @async
-  void startDownload(DiscoveredDevice device);
+  void startDownload(DiscoveredDevice device, String? fingerprint);
 
   void cancelDownload();
 

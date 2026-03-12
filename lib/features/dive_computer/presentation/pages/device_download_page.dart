@@ -411,6 +411,33 @@ class _DeviceDownloadPageState extends ConsumerState<DeviceDownloadPage> {
       padding: const EdgeInsets.all(24),
       child: Column(
         children: [
+          // Incremental download toggle (only when computer has a fingerprint)
+          if (_computer?.lastDiveFingerprint != null &&
+              !state.isDownloading &&
+              !state.isComplete &&
+              !state.hasError)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: SwitchListTile(
+                title: Text(
+                  context.l10n.diveComputer_download_newDivesOnlyTitle,
+                  style: theme.textTheme.bodyMedium,
+                ),
+                subtitle: Text(
+                  context.l10n.diveComputer_download_newDivesOnlySubtitle,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                value: state.newDivesOnly,
+                onChanged: (value) {
+                  ref
+                      .read(downloadNotifierProvider.notifier)
+                      .setNewDivesOnly(value);
+                },
+              ),
+            ),
+
           // Progress indicator
           _buildProgressIndicator(state, colorScheme),
           const SizedBox(height: 16),
@@ -524,7 +551,11 @@ class _DeviceDownloadPageState extends ConsumerState<DeviceDownloadPage> {
   /// Build a human-readable status string from the download state.
   String _statusText(BuildContext context, DownloadState state) {
     if (state.phase == DownloadPhase.processing) {
-      return 'Importing ${state.downloadedDives.length} dives...';
+      final count = state.downloadedDives.length;
+      if (state.newDivesOnly && count > 0) {
+        return context.l10n.diveComputer_download_importingCountNewDives(count);
+      }
+      return context.l10n.diveComputer_download_importingCountDives(count);
     }
     return state.progress?.status ??
         context.l10n.diveComputer_download_preparing;
@@ -695,9 +726,26 @@ class _DeviceDownloadPageState extends ConsumerState<DeviceDownloadPage> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
-    // Only show if there's something to report
+    // Show "up to date" message when incremental download finds nothing new
     if (result.imported == 0 && result.skipped == 0 && result.updated == 0) {
-      return const SizedBox.shrink();
+      return Card(
+        margin: const EdgeInsets.only(top: 16),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Icon(Icons.check_circle_outline, color: colorScheme.primary),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  context.l10n.diveComputer_download_upToDate,
+                  style: theme.textTheme.bodyMedium,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
     }
 
     return Card(

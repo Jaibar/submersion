@@ -10,6 +10,7 @@ import 'package:submersion/features/dive_computer/data/services/dive_import_serv
 import 'package:submersion/features/dive_computer/data/services/parsed_dive_mapper.dart';
 import 'package:submersion/features/dive_computer/domain/entities/device_model.dart';
 import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
+import 'package:submersion/features/dive_computer/data/services/fingerprint_utils.dart';
 import 'package:submersion/features/dive_computer/presentation/providers/discovery_providers.dart';
 
 /// Provider for the dive computer repository.
@@ -152,7 +153,14 @@ class DownloadNotifier extends StateNotifier<DownloadState> {
       _downloadSubscription?.cancel();
       _downloadSubscription = _service.downloadEvents.listen(_onDownloadEvent);
 
-      await _service.startDownload(device.toPigeon());
+      // Determine fingerprint for incremental download.
+      String? fingerprint;
+      if (state.newDivesOnly &&
+          _autoImportComputer?.lastDiveFingerprint != null) {
+        fingerprint = _autoImportComputer!.lastDiveFingerprint;
+      }
+
+      await _service.startDownload(device.toPigeon(), fingerprint: fingerprint);
     } catch (e) {
       state = state.copyWith(
         phase: DownloadPhase.error,
@@ -234,6 +242,18 @@ class DownloadNotifier extends StateNotifier<DownloadState> {
           defaultResolution: ConflictResolution.skip,
           diverId: _autoImportDiverId,
         );
+      } else {
+        // Zero new dives (incremental download found nothing new).
+        // Set an empty import result so the UI can show "up to date".
+        state = state.copyWith(
+          importResult: ImportResult.success(
+            imported: 0,
+            skipped: 0,
+            updated: 0,
+            importedDiveIds: [],
+            importedDives: [],
+          ),
+        );
       }
     } catch (e) {
       debugPrint('[DownloadNotifier] Device info persist/import failed: $e');
@@ -277,6 +297,12 @@ class DownloadNotifier extends StateNotifier<DownloadState> {
       // Update the computer's dive count and last download
       await _repository.incrementDiveCount(computer.id, by: result.imported);
       await _repository.updateLastDownload(computer.id);
+
+      // Persist the newest fingerprint for incremental downloads.
+      final newestFingerprint = selectNewestFingerprint(result.importedDives);
+      if (newestFingerprint != null) {
+        await _repository.updateLastFingerprint(computer.id, newestFingerprint);
+      }
 
       state = state.copyWith(
         phase: DownloadPhase.complete,

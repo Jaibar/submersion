@@ -15,6 +15,7 @@ class MockDiveComputerHostApi implements DiveComputerHostApi {
   bool cancelDownloadCalled = false;
   TransportType? lastDiscoveryTransport;
   DiscoveredDevice? lastDownloadDevice;
+  String? lastDownloadFingerprint;
 
   @override
   Future<List<DeviceDescriptor>> getDeviceDescriptors() async {
@@ -33,9 +34,10 @@ class MockDiveComputerHostApi implements DiveComputerHostApi {
   }
 
   @override
-  Future<void> startDownload(DiscoveredDevice device) async {
+  Future<void> startDownload(DiscoveredDevice device, String? fingerprint) async {
     startDownloadCalled = true;
     lastDownloadDevice = device;
+    lastDownloadFingerprint = fingerprint;
   }
 
   @override

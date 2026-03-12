@@ -473,7 +473,7 @@ interface DiveComputerHostApi {
   fun getDeviceDescriptors(callback: (Result<List<DeviceDescriptor>>) -> Unit)
   fun startDiscovery(transport: TransportType, callback: (Result<Unit>) -> Unit)
   fun stopDiscovery()
-  fun startDownload(device: DiscoveredDevice, callback: (Result<Unit>) -> Unit)
+  fun startDownload(device: DiscoveredDevice, fingerprint: String?, callback: (Result<Unit>) -> Unit)
   fun cancelDownload()
   fun submitPinCode(pinCode: String)
   fun getLibdivecomputerVersion(): String
@@ -546,7 +546,8 @@ interface DiveComputerHostApi {
           channel.setMessageHandler { message, reply ->
             val args = message as List<Any?>
             val deviceArg = args[0] as DiscoveredDevice
-            api.startDownload(deviceArg) { result: Result<Unit> ->
+            val fingerprintArg = args[1] as String?
+            api.startDownload(deviceArg, fingerprintArg) { result: Result<Unit> ->
               val error = result.exceptionOrNull()
               if (error != null) {
                 reply.reply(wrapError(error))

@@ -83,8 +83,8 @@ class DiveComputerService implements DiveComputerFlutterApi {
   }
 
   /// Start downloading dives from a discovered device.
-  Future<void> startDownload(DiscoveredDevice device) {
-    return _hostApi.startDownload(device);
+  Future<void> startDownload(DiscoveredDevice device, {String? fingerprint}) {
+    return _hostApi.startDownload(device, fingerprint);
   }
 
   /// Cancel an ongoing download.

@@ -1815,8 +1815,10 @@ static void libdivecomputer_plugin_dive_computer_host_api_start_download_cb(FlBa
 
   FlValue* value0 = fl_value_get_list_value(message_, 0);
   LibdivecomputerPluginDiscoveredDevice* device = LIBDIVECOMPUTER_PLUGIN_DISCOVERED_DEVICE(fl_value_get_custom_value_object(value0));
+  FlValue* value1 = fl_value_get_list_value(message_, 1);
+  const gchar* fingerprint = fl_value_get_string(value1);
   g_autoptr(LibdivecomputerPluginDiveComputerHostApiResponseHandle) handle = libdivecomputer_plugin_dive_computer_host_api_response_handle_new(channel, response_handle);
-  self->vtable->start_download(device, handle, self->user_data);
+  self->vtable->start_download(device, fingerprint, handle, self->user_data);
 }
 
 static void libdivecomputer_plugin_dive_computer_host_api_cancel_download_cb(FlBasicMessageChannel* channel, FlValue* message_, FlBasicMessageChannelResponseHandle* response_handle, gpointer user_data) {

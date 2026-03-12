@@ -534,7 +534,7 @@ protocol DiveComputerHostApi {
   func getDeviceDescriptors(completion: @escaping (Result<[DeviceDescriptor], Error>) -> Void)
   func startDiscovery(transport: TransportType, completion: @escaping (Result<Void, Error>) -> Void)
   func stopDiscovery() throws
-  func startDownload(device: DiscoveredDevice, completion: @escaping (Result<Void, Error>) -> Void)
+  func startDownload(device: DiscoveredDevice, fingerprint: String?, completion: @escaping (Result<Void, Error>) -> Void)
   func cancelDownload() throws
   func submitPinCode(pinCode: String) throws
   func getLibdivecomputerVersion() throws -> String
@@ -596,7 +596,8 @@ class DiveComputerHostApiSetup {
       startDownloadChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
         let deviceArg = args[0] as! DiscoveredDevice
-        api.startDownload(device: deviceArg) { result in
+        let fingerprintArg: String? = nilOrValue(args[1])
+        api.startDownload(device: deviceArg, fingerprint: fingerprintArg) { result in
           switch result {
           case .success:
             reply(wrapResult(nil))

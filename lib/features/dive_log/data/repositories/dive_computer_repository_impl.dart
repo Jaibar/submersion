@@ -320,6 +320,33 @@ class DiveComputerRepository {
     }
   }
 
+  /// Update the last dive fingerprint after a successful import.
+  ///
+  /// This fingerprint is passed to libdivecomputer on the next download
+  /// to enable incremental downloads (only new dives).
+  Future<void> updateLastFingerprint(String id, String fingerprint) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(
+        _db.diveComputers,
+      )..where((t) => t.id.equals(id))).write(
+        DiveComputersCompanion(
+          lastDiveFingerprint: Value(fingerprint),
+          updatedAt: Value(now),
+        ),
+      );
+      await _syncRepository.markRecordPending(
+        entityType: 'diveComputers',
+        recordId: id,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error('Failed to update last fingerprint for: $id', e, stackTrace);
+      rethrow;
+    }
+  }
+
   // ============================================================================
   // Multi-Profile Operations
   // ============================================================================
@@ -1179,6 +1206,7 @@ class DiveComputerRepository {
       firmwareVersion: row.firmwareVersion,
       connectionType: row.connectionType,
       bluetoothAddress: row.bluetoothAddress,
+      lastDiveFingerprint: row.lastDiveFingerprint,
       lastDownload: row.lastDownloadTimestamp != null
           ? DateTime.fromMillisecondsSinceEpoch(row.lastDownloadTimestamp!)
           : null,

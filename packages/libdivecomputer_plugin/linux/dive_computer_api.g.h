@@ -890,7 +890,7 @@ typedef struct {
   void (*get_device_descriptors)(LibdivecomputerPluginDiveComputerHostApiResponseHandle* response_handle, gpointer user_data);
   void (*start_discovery)(LibdivecomputerPluginTransportType transport, LibdivecomputerPluginDiveComputerHostApiResponseHandle* response_handle, gpointer user_data);
   LibdivecomputerPluginDiveComputerHostApiStopDiscoveryResponse* (*stop_discovery)(gpointer user_data);
-  void (*start_download)(LibdivecomputerPluginDiscoveredDevice* device, LibdivecomputerPluginDiveComputerHostApiResponseHandle* response_handle, gpointer user_data);
+  void (*start_download)(LibdivecomputerPluginDiscoveredDevice* device, const gchar* fingerprint, LibdivecomputerPluginDiveComputerHostApiResponseHandle* response_handle, gpointer user_data);
   LibdivecomputerPluginDiveComputerHostApiCancelDownloadResponse* (*cancel_download)(gpointer user_data);
   LibdivecomputerPluginDiveComputerHostApiSubmitPinCodeResponse* (*submit_pin_code)(const gchar* pin_code, gpointer user_data);
   LibdivecomputerPluginDiveComputerHostApiGetLibdivecomputerVersionResponse* (*get_libdivecomputer_version)(gpointer user_data);

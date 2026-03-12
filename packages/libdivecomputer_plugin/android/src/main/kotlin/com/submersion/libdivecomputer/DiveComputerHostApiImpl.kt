@@ -124,12 +124,13 @@ class DiveComputerHostApiImpl(
 
     override fun startDownload(
         device: DiscoveredDevice,
+        fingerprint: String?,
         callback: (Result<Unit>) -> Unit
     ) {
         callback(Result.success(Unit))
 
         executor.execute {
-            performDownload(device)
+            performDownload(device, fingerprint)
         }
     }
 
@@ -143,7 +144,7 @@ class DiveComputerHostApiImpl(
         activeBleStream?.submitPinCode(pinCode)
     }
 
-    private fun performDownload(device: DiscoveredDevice, isRetry: Boolean = false) {
+    private fun performDownload(device: DiscoveredDevice, fingerprint: String? = null, isRetry: Boolean = false) {
         // Create download session.
         val sessionPtr = LibdcWrapper.nativeDownloadSessionNew()
         if (sessionPtr == 0L) {
@@ -217,6 +218,11 @@ class DiveComputerHostApiImpl(
             }
         }
 
+        // Decode hex fingerprint to ByteArray for libdivecomputer.
+        val fingerprintBytes: ByteArray? = fingerprint?.takeIf { it.isNotEmpty() }?.let { hex ->
+            hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        }
+
         // Run the download.
         val errorBuf = ByteArray(256)
         android.util.Log.d("DiveComputerHost", "nativeDownloadRun: vendor=${device.vendor} product=${device.product} model=${device.model} name=${device.name}")
@@ -226,6 +232,7 @@ class DiveComputerHostApiImpl(
                 device.vendor, device.product,
                 device.model.toInt(), transportValue,
                 bleStream, device.name,
+                fingerprintBytes,
                 downloadCallback, errorBuf
             )
         } catch (e: Throwable) {
@@ -251,7 +258,7 @@ class DiveComputerHostApiImpl(
                 activeBleStream = null
                 LibdcWrapper.nativeDownloadSessionFree(sessionPtr)
                 downloadSessionPtr = 0
-                performDownload(device, isRetry = true)
+                performDownload(device, fingerprint, isRetry = true)
                 return
             }
 

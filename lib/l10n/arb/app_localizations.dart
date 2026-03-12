@@ -23816,11 +23816,35 @@ abstract class AppLocalizations {
   /// **'Imported Dives'**
   String get diveComputer_download_importedDives;
 
+  /// No description provided for @diveComputer_download_importingCountDives.
+  ///
+  /// In en, this message translates to:
+  /// **'Importing {count} dives...'**
+  String diveComputer_download_importingCountDives(int count);
+
+  /// No description provided for @diveComputer_download_importingCountNewDives.
+  ///
+  /// In en, this message translates to:
+  /// **'Importing {count} new dives...'**
+  String diveComputer_download_importingCountNewDives(int count);
+
   /// No description provided for @diveComputer_download_newDivesImported.
   ///
   /// In en, this message translates to:
   /// **'New dives imported'**
   String get diveComputer_download_newDivesImported;
+
+  /// No description provided for @diveComputer_download_newDivesOnlySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Only downloads dives added since your last sync'**
+  String get diveComputer_download_newDivesOnlySubtitle;
+
+  /// No description provided for @diveComputer_download_newDivesOnlyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Download new dives only'**
+  String get diveComputer_download_newDivesOnlyTitle;
 
   /// No description provided for @diveComputer_download_preparing.
   ///
@@ -23869,6 +23893,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Try Again'**
   String get diveComputer_download_tryAgain;
+
+  /// No description provided for @diveComputer_download_upToDate.
+  ///
+  /// In en, this message translates to:
+  /// **'No new dives found -- your log is up to date'**
+  String get diveComputer_download_upToDate;
 
   /// No description provided for @diveComputer_list_addComputer.
   ///

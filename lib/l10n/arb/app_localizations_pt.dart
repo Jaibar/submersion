@@ -14007,8 +14007,26 @@ class AppLocalizationsPt extends AppLocalizations {
   String get diveComputer_download_importedDives => 'Mergulhos Importados';
 
   @override
+  String diveComputer_download_importingCountDives(int count) {
+    return 'Importing $count dives...';
+  }
+
+  @override
+  String diveComputer_download_importingCountNewDives(int count) {
+    return 'Importing $count new dives...';
+  }
+
+  @override
   String get diveComputer_download_newDivesImported =>
       'Novos mergulhos importados';
+
+  @override
+  String get diveComputer_download_newDivesOnlySubtitle =>
+      'Only downloads dives added since your last sync';
+
+  @override
+  String get diveComputer_download_newDivesOnlyTitle =>
+      'Download new dives only';
 
   @override
   String get diveComputer_download_preparing => 'Preparando...';
@@ -14040,6 +14058,10 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get diveComputer_download_tryAgain => 'Tentar Novamente';
+
+  @override
+  String get diveComputer_download_upToDate =>
+      'No new dives found -- your log is up to date';
 
   @override
   String get diveComputer_list_addComputer => 'Adicionar Computador';

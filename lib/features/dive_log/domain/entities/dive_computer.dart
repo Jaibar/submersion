@@ -34,6 +34,10 @@ class DiveComputer extends Equatable {
   /// Timestamp of last successful download
   final DateTime? lastDownload;
 
+  /// Fingerprint of the newest dive from the last successful import.
+  /// Used for incremental downloads -- libdivecomputer stops at this dive.
+  final String? lastDiveFingerprint;
+
   /// Number of dives downloaded from this computer
   final int diveCount;
 
@@ -60,6 +64,7 @@ class DiveComputer extends Equatable {
     this.connectionType,
     this.bluetoothAddress,
     this.lastDownload,
+    this.lastDiveFingerprint,
     this.diveCount = 0,
     this.isFavorite = false,
     this.notes = '',
@@ -138,6 +143,7 @@ class DiveComputer extends Equatable {
     String? connectionType,
     String? bluetoothAddress,
     DateTime? lastDownload,
+    String? lastDiveFingerprint,
     int? diveCount,
     bool? isFavorite,
     String? notes,
@@ -155,6 +161,7 @@ class DiveComputer extends Equatable {
       connectionType: connectionType ?? this.connectionType,
       bluetoothAddress: bluetoothAddress ?? this.bluetoothAddress,
       lastDownload: lastDownload ?? this.lastDownload,
+      lastDiveFingerprint: lastDiveFingerprint ?? this.lastDiveFingerprint,
       diveCount: diveCount ?? this.diveCount,
       isFavorite: isFavorite ?? this.isFavorite,
       notes: notes ?? this.notes,
@@ -175,6 +182,7 @@ class DiveComputer extends Equatable {
     connectionType,
     bluetoothAddress,
     lastDownload,
+    lastDiveFingerprint,
     diveCount,
     isFavorite,
     notes,

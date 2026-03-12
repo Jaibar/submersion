@@ -588,7 +588,10 @@ class DiveComputerHostApi {
     }
   }
 
-  Future<void> startDownload(DiscoveredDevice device) async {
+  Future<void> startDownload(
+    DiscoveredDevice device,
+    String? fingerprint,
+  ) async {
     final String pigeonVar_channelName =
         'dev.flutter.pigeon.libdivecomputer_plugin.DiveComputerHostApi.startDownload$pigeonVar_messageChannelSuffix';
     final BasicMessageChannel<Object?> pigeonVar_channel =
@@ -598,7 +601,8 @@ class DiveComputerHostApi {
           binaryMessenger: pigeonVar_binaryMessenger,
         );
     final List<Object?>? pigeonVar_replyList =
-        await pigeonVar_channel.send(<Object?>[device]) as List<Object?>?;
+        await pigeonVar_channel.send(<Object?>[device, fingerprint])
+            as List<Object?>?;
     if (pigeonVar_replyList == null) {
       throw _createConnectionError(pigeonVar_channelName);
     } else if (pigeonVar_replyList.length > 1) {

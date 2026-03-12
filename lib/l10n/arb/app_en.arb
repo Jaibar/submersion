@@ -8454,7 +8454,25 @@
   "diveComputer_download_importFailed": "Import failed",
   "diveComputer_download_importResults": "Import Results",
   "diveComputer_download_importedDives": "Imported Dives",
+  "diveComputer_download_importingCountDives": "Importing {count} dives...",
+  "@diveComputer_download_importingCountDives": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "diveComputer_download_importingCountNewDives": "Importing {count} new dives...",
+  "@diveComputer_download_importingCountNewDives": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "diveComputer_download_newDivesImported": "New dives imported",
+  "diveComputer_download_newDivesOnlySubtitle": "Only downloads dives added since your last sync",
+  "diveComputer_download_newDivesOnlyTitle": "Download new dives only",
   "diveComputer_download_preparing": "Preparing...",
   "diveComputer_download_progressPercent": "{percent}%",
   "@diveComputer_download_progressPercent": {
@@ -8484,6 +8502,7 @@
   "diveComputer_download_searchingInstructions": "Make sure the device is nearby and in transfer mode",
   "diveComputer_download_title": "Download Dives",
   "diveComputer_download_tryAgain": "Try Again",
+  "diveComputer_download_upToDate": "No new dives found -- your log is up to date",
   "diveComputer_list_addComputer": "Add Computer",
   "diveComputer_list_cardSemanticLabel": "Dive computer: {name}",
   "@diveComputer_list_cardSemanticLabel": {

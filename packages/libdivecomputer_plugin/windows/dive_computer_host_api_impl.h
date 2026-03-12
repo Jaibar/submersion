@@ -5,6 +5,8 @@
 #include <flutter/plugin_registrar.h>
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <thread>
 
 #include "ble_io_stream.h"
@@ -37,6 +39,7 @@ class DiveComputerHostApiImpl : public DiveComputerHostApi,
 
   void StartDownload(
       const DiscoveredDevice& device,
+      const std::string* fingerprint,
       std::function<void(std::optional<FlutterError> reply)> result) override;
 
   std::optional<FlutterError> CancelDownload() override;
@@ -46,7 +49,8 @@ class DiveComputerHostApiImpl : public DiveComputerHostApi,
   ErrorOr<std::string> GetLibdivecomputerVersion() override;
 
  private:
-  void PerformDownload(const DiscoveredDevice& device);
+  void PerformDownload(const DiscoveredDevice& device,
+                       const std::optional<std::string>& fingerprint = std::nullopt);
 
   std::unique_ptr<DiveComputerFlutterApi> flutter_api_;
   std::unique_ptr<BleScanner> ble_scanner_;

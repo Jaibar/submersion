@@ -118,6 +118,7 @@ std::optional<FlutterError> DiveComputerHostApiImpl::StopDiscovery() {
 
 void DiveComputerHostApiImpl::StartDownload(
     const DiscoveredDevice& device,
+    const std::string* fingerprint,
     std::function<void(std::optional<FlutterError> reply)> result) {
     // Acknowledge start immediately.
     result(std::nullopt);
@@ -127,10 +128,14 @@ void DiveComputerHostApiImpl::StartDownload(
         download_thread_.join();
     }
 
-    // Copy device for the background thread.
+    // Copy device and fingerprint for the background thread (pointer would dangle).
     DiscoveredDevice device_copy = device;
+    std::optional<std::string> fp_copy =
+        fingerprint ? std::optional<std::string>(*fingerprint) : std::nullopt;
     download_thread_ = std::thread(
-        [this, dev = std::move(device_copy)]() { PerformDownload(dev); });
+        [this, dev = std::move(device_copy), fp = std::move(fp_copy)]() {
+            PerformDownload(dev, fp);
+        });
 }
 
 std::optional<FlutterError> DiveComputerHostApiImpl::CancelDownload() {
@@ -156,7 +161,8 @@ ErrorOr<std::string> DiveComputerHostApiImpl::GetLibdivecomputerVersion() {
 // -- Private download implementation --
 
 void DiveComputerHostApiImpl::PerformDownload(
-    const DiscoveredDevice& device) {
+    const DiscoveredDevice& device,
+    const std::optional<std::string>& fingerprint) {
     // Create download session.
     auto* session = libdc_download_session_new();
     if (!session) {
@@ -250,6 +256,16 @@ void DiveComputerHostApiImpl::PerformDownload(
             break;
     }
 
+    // Decode fingerprint from hex string.
+    std::vector<unsigned char> fp_bytes;
+    if (fingerprint.has_value() && !fingerprint->empty()) {
+        const auto& hex = *fingerprint;
+        for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+            fp_bytes.push_back(
+                static_cast<unsigned char>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+        }
+    }
+
     // Run the blocking download.
     unsigned int serial = 0;
     unsigned int firmware = 0;
@@ -260,7 +276,8 @@ void DiveComputerHostApiImpl::PerformDownload(
         static_cast<unsigned int>(device.model()),
         transport_value,
         &io_callbacks,
-        nullptr, 0,  // No fingerprint (download all dives).
+        fp_bytes.empty() ? nullptr : fp_bytes.data(),
+        static_cast<unsigned int>(fp_bytes.size()),
         &dl_callbacks,
         &serial, &firmware,
         error_buf, sizeof(error_buf));

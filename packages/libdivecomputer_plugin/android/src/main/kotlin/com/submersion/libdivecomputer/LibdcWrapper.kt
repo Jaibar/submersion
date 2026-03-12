@@ -34,6 +34,7 @@ object LibdcWrapper {
         transport: Int,
         ioHandler: BleIoHandler,
         devName: String?,
+        fingerprint: ByteArray?,
         downloadCallback: DownloadCallback,
         errorBuf: ByteArray
     ): Int

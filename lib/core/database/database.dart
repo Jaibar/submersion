@@ -869,6 +869,7 @@ class DiveComputers extends Table {
   TextColumn get connectionType =>
       text().nullable()(); // "bluetooth", "usb", "ble"
   TextColumn get bluetoothAddress => text().nullable()(); // MAC address
+  TextColumn get lastDiveFingerprint => text().nullable()();
   IntColumn get lastDownloadTimestamp =>
       integer().nullable()(); // Unix timestamp
   IntColumn get diveCount => integer().withDefault(const Constant(0))();
@@ -1163,7 +1164,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 46;
+  int get schemaVersion => 47;
 
   @override
   MigrationStrategy get migration {
@@ -2178,6 +2179,18 @@ class AppDatabase extends _$AppDatabase {
             WHERE trip_type = 'liveaboard'
               AND id NOT IN (SELECT trip_id FROM liveaboard_detail_records)
           ''');
+        }
+        if (from < 47) {
+          // Add lastDiveFingerprint column for incremental dive download
+          final dcInfo = await customSelect(
+            'PRAGMA table_info(dive_computers)',
+          ).get();
+          final dcCols = dcInfo.map((r) => r.read<String>('name')).toSet();
+          if (!dcCols.contains('last_dive_fingerprint')) {
+            await customStatement(
+              'ALTER TABLE dive_computers ADD COLUMN last_dive_fingerprint TEXT',
+            );
+          }
         }
       },
       beforeOpen: (details) async {

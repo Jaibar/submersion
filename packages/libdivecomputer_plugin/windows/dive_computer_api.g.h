@@ -589,6 +589,7 @@ class DiveComputerHostApi {
   virtual std::optional<FlutterError> StopDiscovery() = 0;
   virtual void StartDownload(
     const DiscoveredDevice& device,
+    const std::string* fingerprint,
     std::function<void(std::optional<FlutterError> reply)> result) = 0;
   virtual std::optional<FlutterError> CancelDownload() = 0;
   virtual std::optional<FlutterError> SubmitPinCode(const std::string& pin_code) = 0;

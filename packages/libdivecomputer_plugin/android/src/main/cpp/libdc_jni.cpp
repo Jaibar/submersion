@@ -432,6 +432,7 @@ Java_com_submersion_libdivecomputer_LibdcWrapper_nativeDownloadRun(
     jstring vendor, jstring product, jint model, jint transport,
     jobject ioHandler,
     jstring devName,
+    jbyteArray fingerprint,
     jobject downloadCallback,
     jbyteArray errorBuf) {
 
@@ -479,6 +480,18 @@ Java_com_submersion_libdivecomputer_LibdcWrapper_nativeDownloadRun(
     dl_callbacks.on_dive = jni_on_dive;
     dl_callbacks.userdata = &dlCtx;
 
+    // Decode fingerprint from Java byte array.
+    unsigned char *fp_data = nullptr;
+    unsigned int fp_size = 0;
+    if (fingerprint != nullptr) {
+        fp_size = static_cast<unsigned int>(env->GetArrayLength(fingerprint));
+        if (fp_size > 0) {
+            fp_data = new unsigned char[fp_size];
+            env->GetByteArrayRegion(fingerprint, 0, fp_size,
+                reinterpret_cast<jbyte *>(fp_data));
+        }
+    }
+
     // Run the download.
     char error_buf[256] = {0};
     int result = libdc_download_run(
@@ -487,10 +500,13 @@ Java_com_submersion_libdivecomputer_LibdcWrapper_nativeDownloadRun(
         static_cast<unsigned int>(model),
         static_cast<unsigned int>(transport),
         &io_callbacks,
-        nullptr, 0,  // No fingerprint
+        fp_data, fp_size,
         &dl_callbacks,
-        nullptr, nullptr,  // serial_out, firmware_out (not yet wired on Android)
+        nullptr, nullptr,
         error_buf, sizeof(error_buf));
+
+    // Cleanup fingerprint.
+    delete[] fp_data;
 
     // Copy error message to output buffer.
     if (errorBuf && error_buf[0]) {
