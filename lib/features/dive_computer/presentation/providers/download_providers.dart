@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
 import 'package:submersion/core/providers/provider.dart';
 
@@ -81,7 +81,8 @@ class DownloadState {
   bool get isDownloading =>
       phase == DownloadPhase.connecting ||
       phase == DownloadPhase.downloading ||
-      phase == DownloadPhase.enumerating;
+      phase == DownloadPhase.enumerating ||
+      phase == DownloadPhase.pinRequired;
 
   /// Whether download completed successfully.
   bool get isComplete => phase == DownloadPhase.complete;
@@ -120,14 +121,6 @@ class DownloadNotifier extends StateNotifier<DownloadState> {
        _importService = importService,
        _repository = repository,
        super(const DownloadState());
-
-  /// Set the context to use for showing dialogs during download.
-  ///
-  /// Currently a no-op. PIN entry will be handled natively by
-  /// libdivecomputer when needed.
-  void setDialogContext(BuildContext context) {
-    // PIN entry handled natively by libdivecomputer.
-  }
 
   /// Set whether to download new dives only.
   void setNewDivesOnly(bool value) {
@@ -178,6 +171,8 @@ class DownloadNotifier extends StateNotifier<DownloadState> {
             progress.total,
           ),
         );
+      case pigeon.PinCodeRequestEvent():
+        state = state.copyWith(phase: DownloadPhase.pinRequired);
       case pigeon.DiveDownloadedEvent(:final dive):
         final downloaded = parsedDiveToDownloaded(dive);
         state = state.copyWith(
@@ -243,6 +238,14 @@ class DownloadNotifier extends StateNotifier<DownloadState> {
     } catch (e) {
       debugPrint('[DownloadNotifier] Device info persist/import failed: $e');
     }
+  }
+
+  /// Submit a PIN code for BLE authentication.
+  ///
+  /// Transitions back to connecting phase while the PIN is verified.
+  Future<void> submitPinCode(String pin) async {
+    state = state.copyWith(phase: DownloadPhase.connecting);
+    await _service.submitPinCode(pin);
   }
 
   /// Cancel the current download.

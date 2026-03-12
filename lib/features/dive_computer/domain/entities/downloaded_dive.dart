@@ -2,6 +2,7 @@
 enum DownloadPhase {
   initializing,
   connecting,
+  pinRequired,
   enumerating,
   downloading,
   processing,
