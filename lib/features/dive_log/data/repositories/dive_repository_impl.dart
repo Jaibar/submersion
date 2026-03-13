@@ -523,6 +523,19 @@ class DiveRepository {
               waterType: Value(dive.waterType?.name),
               altitude: Value(dive.altitude),
               surfacePressure: Value(dive.surfacePressure),
+              // Weather conditions
+              windSpeed: Value(dive.windSpeed),
+              windDirection: Value(dive.windDirection?.name),
+              cloudCover: Value(dive.cloudCover?.name),
+              precipitation: Value(dive.precipitation?.name),
+              humidity: Value(dive.humidity),
+              weatherDescription: Value(dive.weatherDescription),
+              weatherSource: Value(dive.weatherSource?.name),
+              weatherFetchedAt: Value(
+                dive.weatherFetchedAt != null
+                    ? dive.weatherFetchedAt!.millisecondsSinceEpoch ~/ 1000
+                    : null,
+              ),
               // Surface interval and deco settings
               surfaceIntervalSeconds: Value(dive.surfaceInterval?.inSeconds),
               gradientFactorLow: Value(dive.gradientFactorLow),
@@ -722,6 +735,19 @@ class DiveRepository {
           waterType: Value(dive.waterType?.name),
           altitude: Value(dive.altitude),
           surfacePressure: Value(dive.surfacePressure),
+          // Weather conditions
+          windSpeed: Value(dive.windSpeed),
+          windDirection: Value(dive.windDirection?.name),
+          cloudCover: Value(dive.cloudCover?.name),
+          precipitation: Value(dive.precipitation?.name),
+          humidity: Value(dive.humidity),
+          weatherDescription: Value(dive.weatherDescription),
+          weatherSource: Value(dive.weatherSource?.name),
+          weatherFetchedAt: Value(
+            dive.weatherFetchedAt != null
+                ? dive.weatherFetchedAt!.millisecondsSinceEpoch ~/ 1000
+                : null,
+          ),
           // Surface interval and deco settings
           surfaceIntervalSeconds: Value(dive.surfaceInterval?.inSeconds),
           gradientFactorLow: Value(dive.gradientFactorLow),
@@ -1899,6 +1925,37 @@ class DiveRepository {
               orElse: () => WeightType.belt,
             )
           : null,
+      // Weather conditions
+      windSpeed: row.windSpeed,
+      windDirection: row.windDirection != null
+          ? CurrentDirection.values.firstWhere(
+              (c) => c.name == row.windDirection,
+              orElse: () => CurrentDirection.none,
+            )
+          : null,
+      cloudCover: row.cloudCover != null
+          ? CloudCover.values.firstWhere(
+              (c) => c.name == row.cloudCover,
+              orElse: () => CloudCover.clear,
+            )
+          : null,
+      precipitation: row.precipitation != null
+          ? Precipitation.values.firstWhere(
+              (p) => p.name == row.precipitation,
+              orElse: () => Precipitation.none,
+            )
+          : null,
+      humidity: row.humidity,
+      weatherDescription: row.weatherDescription,
+      weatherSource: row.weatherSource != null
+          ? WeatherSource.values.firstWhere(
+              (w) => w.name == row.weatherSource,
+              orElse: () => WeatherSource.manual,
+            )
+          : null,
+      weatherFetchedAt: row.weatherFetchedAt != null
+          ? DateTime.fromMillisecondsSinceEpoch(row.weatherFetchedAt! * 1000)
+          : null,
       tanks: tanks
           .map(
             (t) => domain.DiveTank(
@@ -2206,6 +2263,37 @@ class DiveRepository {
               (w) => w.name == row.weightType,
               orElse: () => WeightType.belt,
             )
+          : null,
+      // Weather conditions
+      windSpeed: row.windSpeed,
+      windDirection: row.windDirection != null
+          ? CurrentDirection.values.firstWhere(
+              (c) => c.name == row.windDirection,
+              orElse: () => CurrentDirection.none,
+            )
+          : null,
+      cloudCover: row.cloudCover != null
+          ? CloudCover.values.firstWhere(
+              (c) => c.name == row.cloudCover,
+              orElse: () => CloudCover.clear,
+            )
+          : null,
+      precipitation: row.precipitation != null
+          ? Precipitation.values.firstWhere(
+              (p) => p.name == row.precipitation,
+              orElse: () => Precipitation.none,
+            )
+          : null,
+      humidity: row.humidity,
+      weatherDescription: row.weatherDescription,
+      weatherSource: row.weatherSource != null
+          ? WeatherSource.values.firstWhere(
+              (w) => w.name == row.weatherSource,
+              orElse: () => WeatherSource.manual,
+            )
+          : null,
+      weatherFetchedAt: row.weatherFetchedAt != null
+          ? DateTime.fromMillisecondsSinceEpoch(row.weatherFetchedAt! * 1000)
           : null,
       tanks: tankRows.map((t) {
         // Derive start/end pressure from profile data when available.
