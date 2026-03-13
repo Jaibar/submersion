@@ -137,6 +137,16 @@ class FieldMappingEngine {
       return 'tankVolume';
     }
     if (header.contains('o2') || header.contains('oxygen')) return 'o2Percent';
+    if (header.contains('wind') && header.contains('speed')) return 'windSpeed';
+    if (header.contains('wind') && header.contains('dir')) {
+      return 'windDirection';
+    }
+    if (header.contains('cloud')) return 'cloudCover';
+    if (header.contains('precip')) return 'precipitation';
+    if (header.contains('humid')) return 'humidity';
+    if (header.contains('weather') && header.contains('desc')) {
+      return 'weatherDescription';
+    }
     return null;
   }
 
@@ -405,6 +415,21 @@ class FieldMappingEngine {
         sourceColumn: 'Visibility',
         targetField: 'visibility',
         transform: ValueTransform.visibilityScale,
+      ),
+      ColumnMapping(sourceColumn: 'Wind Speed (m/s)', targetField: 'windSpeed'),
+      ColumnMapping(
+        sourceColumn: 'Wind Direction',
+        targetField: 'windDirection',
+      ),
+      ColumnMapping(sourceColumn: 'Cloud Cover', targetField: 'cloudCover'),
+      ColumnMapping(
+        sourceColumn: 'Precipitation',
+        targetField: 'precipitation',
+      ),
+      ColumnMapping(sourceColumn: 'Humidity (%)', targetField: 'humidity'),
+      ColumnMapping(
+        sourceColumn: 'Weather Description',
+        targetField: 'weatherDescription',
       ),
     ],
   );

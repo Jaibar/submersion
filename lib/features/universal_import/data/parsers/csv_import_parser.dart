@@ -265,7 +265,9 @@ class CsvImportParser implements ImportParser {
       'bottomTemp' ||
       'tankVolume' ||
       'o2Percent' ||
-      'weightUsed' => double.tryParse(
+      'weightUsed' ||
+      'windSpeed' ||
+      'humidity' => double.tryParse(
         rawValue.replaceAll(RegExp(r'[^\d.-]'), ''),
       ),
       'duration' || 'runtime' => _parseDuration(rawValue),
