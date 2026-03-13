@@ -48,9 +48,12 @@ class _DeviceDownloadPageState extends ConsumerState<DeviceDownloadPage> {
   }
 
   Future<void> _startScanAndConnect() async {
-    final computer = ref
-        .read(diveComputerByIdProvider(widget.computerId))
-        .value;
+    // Invalidate to force a fresh DB fetch — picks up any fingerprint
+    // stored after a previous download in this session.
+    ref.invalidate(diveComputerByIdProvider(widget.computerId));
+    final computer = await ref.read(
+      diveComputerByIdProvider(widget.computerId).future,
+    );
     if (computer == null) {
       setState(() {
         _scanError = context.l10n.diveComputer_download_computerNotFound;

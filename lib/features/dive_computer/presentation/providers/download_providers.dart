@@ -302,6 +302,9 @@ class DownloadNotifier extends StateNotifier<DownloadState> {
       final newestFingerprint = selectNewestFingerprint(result.importedDives);
       if (newestFingerprint != null) {
         await _repository.updateLastFingerprint(computer.id, newestFingerprint);
+        _autoImportComputer = _autoImportComputer?.copyWith(
+          lastDiveFingerprint: newestFingerprint,
+        );
       }
 
       state = state.copyWith(
