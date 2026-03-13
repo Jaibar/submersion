@@ -3,8 +3,8 @@
 ## Comprehensive Development Plan
 
 > **Last Updated:** 2026-02-24
-> **Current Version:** 1.1.0 (v1.1 Complete)
-> **Status:** v1.0 ✅ COMPLETE | v1.1 ✅ COMPLETE | v1.5 🚧 In Progress
+> **Current Version:** 1.2.25 (v1.5 Complete)
+> **Status:** v1.0 ✅ COMPLETE | v1.1 ✅ COMPLETE | v1.5 ✅ COMPLETE
 >
 > **v1.5 Progress:** Dive Profile & Telemetry (Category 2) ✅ Complete | Profile Visualization (Category 2.1) ✅ Complete | Dive Computer Connectivity (Category 3) ✅ Complete | Cloud Sync (Category 12) ✅ Complete | Statistics (Category 10) ✅ Complete | CCR/SCR Rebreather Support ✅ Complete | Dive Planner (Category 4.5) ✅ Complete | Search & Filtering (Category 10.1) ✅ Complete | Tools & Calculators (Category 11) ✅ Complete | Digital Signatures (Category 7.2) ✅ Complete | Training Dives (Category 8.3) ✅ Complete | Underwater Photography (Category 9.3) ✅ Complete | Maps & Visualization (Category 5.3) ✅ Complete | Certification Cards (Category 8.1) ✅ Complete | Push Notifications (Category 6.3) ✅ Complete | PDF Templates (Category 10.3) ✅ Complete | Wearable Integration v1 (Category 15.5) ✅ Complete | Marine Life Tracking (Category 9.2) ✅ Complete | Universal Import (Category 13.2/13.3) ✅ Complete | Accessibility & Keyboard Navigation (Category 15.3) ✅ Complete | Internationalization & Localization (Category 15.3) ✅ Complete | Custom Fields (Category 1.4) ✅ Complete | Bulk Media Selection (Category 9.3) ✅ Complete | Backup Redesign (Category 12.3) ✅ Complete | Gradient Factors & Dive Events (Category 3/4.4) ✅ Complete | Metric Data Source Switching (Category 2.1/4.4) ✅ Complete | Profile Editing (Category 2.3) ✅ Complete | Card Color Customization (Category 15.1) ✅ Complete
 
@@ -17,8 +17,8 @@
 | **MVP** | Complete | Core dive logging workflow | ✅ Done |
 | **v1.0** | Complete | Production-ready with essential features | ✅ Done |
 | **v1.1** | Complete | UX improvements, GPS, maps, testing | ✅ Done |
-| **v1.5** | 4-6 months | Technical diving & dive computer integration | 📋 Planned |
-| **v2.0** | 8-12 months | Advanced features & social | 📋 Planned |
+| **v1.5** | 4-6 months | Technical diving & dive computer integration | ✅ Done |
+| **v2.0** | 8-12 months | Advanced features & social | 🚧 In Progress |
 | **v3.0** | 12-18 months | Community platform & AI features | 🔮 Future |
 
 ### Status Legend

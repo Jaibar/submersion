@@ -36,7 +36,7 @@ Submersion includes professional-grade features for all levels of divers.
 
 ## Version History
 
-### v1.5 (Current)
+### v1.5 (v1.2.25 - Current)
 
 Technical diving features:
 

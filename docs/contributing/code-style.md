@@ -88,7 +88,7 @@ final diveListNotifierProvider =
 
 ### Domain Entities
 
-All domain entities should have `copyWith`:
+Prefer immutable patterns throughout the codebase. Use `final` fields on all domain entities and avoid mutating objects or collections directly. Instead, create new instances via `copyWith` or spread operators. All domain entities should have `copyWith`:
 
 ```dart
 class Dive {

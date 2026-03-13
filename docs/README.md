@@ -147,37 +147,37 @@ flutter run -d linux
 
 [Full installation guide &rarr;](guide/installation.md)
 
-## Create global tide grid
+<details>
+<summary><strong>Create global tide grid (development use only)</strong></summary>
 
-To Add Real Data
 The Python script at scripts/tide/extract_fes_constituents.py extracts constituents from the FES2014 ocean tide model:
 
+```bash
 # 1. Install PyFES via conda (NOT available on pip)
-
 conda create -n tide python=3.11
 conda activate tide
 conda install -c conda-forge pyfes
 pip install numpy
 
 # 2. Get FES2014 data from AVISO (requires registration)
-
-# <https://www.aviso.altimetry.fr/en/data/products/auxiliary-products/global-tide-fes.html>
-
+# https://www.aviso.altimetry.fr/en/data/products/auxiliary-products/global-tide-fes.html
 scripts/tide/generate_fes_config.py assets/data/fes2022b/ocean_tide_extrapolated
 
 # 3. Extract for your dive sites
-
 python scripts/tide/extract_fes_constituents.py \
     --sites assets/data/dive_sites.json \
     --output assets/data/tide/
 
 # 4. Optionally generate global grid for any-location support
-
 python scripts/tide/extract_fes_constituents.py \
     --grid --resolution 0.25 \
     --config assets/data/fes2022b/ocean_tide_extrapolated/ocean_tide.yaml \
     --output assets/data/tide/constituents_grid.json
+```
+
 The current sample data is placeholder/development data - for production use, you'd want to extract real FES2014 constituents for your bundled dive sites.
+
+</details>
 
 ---
 
@@ -201,8 +201,8 @@ The current sample data is placeholder/development data - for production use, yo
 |---------|--------|------------|
 | **v1.0** | Complete | Core logging, sites, gear, statistics |
 | **v1.1** | Complete | GPS, maps, tags, profile zoom/pan |
-| **v1.5** | Complete | Dive computers, deco algorithms, O2 tracking |
-| **v2.0** | Planned | Cloud sync UI, photos, multi-language |
+| **v1.5** | **Complete** | Dive computers, deco algorithms, O2 tracking, localization, accessibility |
+| **v2.0** | In Progress | Cloud sync UI, photos, social, community |
 
 [View full roadmap &rarr;](contributing/roadmap.md)
 

@@ -18,7 +18,7 @@ The router is provided via Riverpod:
 ```dart
 final appRouterProvider = Provider<GoRouter>((ref) {
   return GoRouter(
-    initialLocation: '/dives',
+    initialLocation: '/dashboard',
     redirect: (context, state) async {
       final hasDivers = await ref.read(hasAnyDiversProvider.future);
       final isOnWelcome = state.matchedLocation == '/welcome';
@@ -28,9 +28,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         return '/welcome';
       }
 
-      // After onboarding: redirect to dives
+      // After onboarding: redirect to dashboard
       if (hasDivers && isOnWelcome) {
-        return '/dives';
+        return '/dashboard';
       }
 
       return null; // No redirect
@@ -67,11 +67,15 @@ The `MainScaffold` widget provides:
 
 | Route | Screen | Description |
 |-------|--------|-------------|
+| `/dashboard` | DashboardPage | Home dashboard |
 | `/dives` | DiveListPage | Dive log list |
 | `/sites` | SiteListPage | Dive sites |
 | `/equipment` | EquipmentListPage | Gear inventory |
 | `/buddies` | BuddyListPage | Dive buddies |
+| `/planning` | PlanningPage | Planning hub |
 | `/statistics` | StatisticsPage | Analytics |
+| `/records` | RecordsPage | Personal records |
+| `/transfer` | TransferPage | Import/Export hub |
 | `/settings` | SettingsPage | Configuration |
 
 ### Nested Routes
@@ -122,14 +126,23 @@ GoRoute(
 ```text
 ## All Routes Reference
 
+### Dashboard
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/dashboard` | dashboard | DashboardPage |
+
 ### Dives
 
 | Path | Name | Screen |
 |------|------|--------|
 | `/dives` | dives | DiveListPage |
+| `/dives/activity` | diveActivity | DiveActivityMapPage |
 | `/dives/new` | newDive | DiveEditPage |
+| `/dives/search` | diveSearch | DiveSearchPage |
 | `/dives/:diveId` | diveDetail | DiveDetailPage |
 | `/dives/:diveId/edit` | editDive | DiveEditPage |
+| `/dives/:diveId/edit-profile` | editProfile | ProfileEditorPage |
 
 ### Sites
 
@@ -151,7 +164,9 @@ GoRoute(
 | `/equipment/sets` | equipmentSets | EquipmentSetListPage |
 | `/equipment/sets/new` | newEquipmentSet | EquipmentSetEditPage |
 | `/equipment/sets/:setId` | equipmentSetDetail | EquipmentSetDetailPage |
+| `/equipment/sets/:setId/edit` | editEquipmentSet | EquipmentSetEditPage |
 | `/equipment/:equipmentId` | equipmentDetail | EquipmentDetailPage |
+| `/equipment/:equipmentId/edit` | editEquipment | EquipmentEditPage |
 
 ### Buddies
 
@@ -176,16 +191,30 @@ GoRoute(
 | Path | Name | Screen |
 |------|------|--------|
 | `/certifications` | certifications | CertificationListPage |
+| `/certifications/wallet` | certificationWallet | CertificationWalletPage |
 | `/certifications/new` | newCertification | CertificationEditPage |
 | `/certifications/:certificationId` | certificationDetail | CertificationDetailPage |
+| `/certifications/:certificationId/edit` | editCertification | CertificationEditPage |
+
+### Courses
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/courses` | courses | CourseListPage |
+| `/courses/new` | newCourse | CourseEditPage |
+| `/courses/:courseId` | courseDetail | CourseDetailPage |
+| `/courses/:courseId/edit` | editCourse | CourseEditPage |
 
 ### Dive Centers
 
 | Path | Name | Screen |
 |------|------|--------|
 | `/dive-centers` | diveCenters | DiveCenterListPage |
+| `/dive-centers/map` | diveCentersMap | DiveCenterMapPage |
+| `/dive-centers/import` | importDiveCenter | DiveCenterImportPage |
 | `/dive-centers/new` | newDiveCenter | DiveCenterEditPage |
 | `/dive-centers/:centerId` | diveCenterDetail | DiveCenterDetailPage |
+| `/dive-centers/:centerId/edit` | editDiveCenter | DiveCenterEditPage |
 
 ### Trips
 
@@ -195,6 +224,19 @@ GoRoute(
 | `/trips/new` | newTrip | TripEditPage |
 | `/trips/:tripId` | tripDetail | TripDetailPage |
 | `/trips/:tripId/edit` | editTrip | TripEditPage |
+| `/trips/:tripId/gallery` | tripGallery | TripGalleryPage |
+
+### Planning
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/planning` | planning | PlanningPage |
+| `/planning/dive-planner` | divePlanner | DivePlannerPage |
+| `/planning/dive-planner/:planId` | editPlan | DivePlannerPage |
+| `/planning/deco-calculator` | decoCalculator | DecoCalculatorPage |
+| `/planning/gas-calculators` | gasCalculators | GasCalculatorsPage |
+| `/planning/weight-calculator` | weightCalculator | WeightCalculatorPage |
+| `/planning/surface-interval` | surfaceInterval | SurfaceIntervalToolPage |
 
 ### Statistics
 
@@ -211,13 +253,71 @@ GoRoute(
 | `/statistics/equipment` | statisticsEquipment | StatisticsEquipmentPage |
 | `/statistics/profile` | statisticsProfile | StatisticsProfilePage |
 
+### Records
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/records` | records | RecordsPage |
+
+### Transfer
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/transfer` | transfer | TransferPage |
+| `/transfer/fit-import` | fitImport | FitImportPage |
+| `/transfer/uddf-import` | uddfImport | UddfImportPage |
+| `/transfer/import-wizard` | universalImport | UniversalImportPage |
+
 ### Settings
 
 | Path | Name | Screen |
 |------|------|--------|
 | `/settings` | settings | SettingsPage |
-| `/settings/api-keys` | apiKeys | ApiKeysPage |
 | `/settings/cloud-sync` | cloudSync | CloudSyncPage |
+| `/settings/storage` | storageSettings | StorageSettingsPage |
+| `/settings/appearance` | appearance | AppearancePage |
+| `/settings/default-metrics` | defaultMetrics | DefaultVisibleMetricsPage |
+| `/settings/themes` | themes | ThemeGalleryPage |
+| `/settings/language` | language | LanguageSettingsPage |
+| `/settings/offline-maps` | offlineMaps | OfflineMapsPage |
+| `/settings/wearable-import` | wearableImport | HealthKitImportPage |
+| `/settings/backup` | backupSettings | BackupSettingsPage |
+| `/settings/diver-profile` | diverProfile | DiverProfileHubPage |
+| `/settings/diver-profile/new` | newDiverProfile | PersonalInfoEditPage |
+| `/settings/diver-profile/personal` | editPersonalInfo | PersonalInfoEditPage |
+| `/settings/diver-profile/emergency` | editEmergencyContacts | EmergencyContactsEditPage |
+| `/settings/diver-profile/medical` | editMedicalInfo | MedicalInfoEditPage |
+| `/settings/diver-profile/insurance` | editInsurance | InsuranceEditPage |
+| `/settings/diver-profile/notes` | editNotes | NotesEditPage |
+
+### Dive Types
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/dive-types` | diveTypes | DiveTypesPage |
+
+### Tank Presets
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/tank-presets` | tankPresets | TankPresetsPage |
+| `/tank-presets/new` | newTankPreset | TankPresetEditPage |
+| `/tank-presets/:presetId/edit` | editTankPreset | TankPresetEditPage |
+
+### Species
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/species` | speciesManage | SpeciesManagePage |
+| `/species/new` | newSpecies | SpeciesEditPage |
+| `/species/:speciesId` | speciesDetail | SpeciesDetailPage |
+| `/species/:speciesId/edit` | editSpecies | SpeciesEditPage |
+
+### Tags
+
+| Path | Name | Screen |
+|------|------|--------|
+| `/tags` | tagManage | TagManagePage |
 
 ### Dive Computers
 
@@ -227,12 +327,6 @@ GoRoute(
 | `/dive-computers/discover` | discoverDevice | DeviceDiscoveryPage |
 | `/dive-computers/:computerId` | computerDetail | DeviceDetailPage |
 | `/dive-computers/:computerId/download` | computerDownload | DeviceDownloadPage |
-
-### Tools
-
-| Path | Name | Screen |
-|------|------|--------|
-| `/tools/weight-calculator` | weightCalculator | WeightCalculatorPage |
 
 ### Onboarding
 

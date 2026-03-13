@@ -82,6 +82,48 @@ In the main Stats section, view:
 - **Solo Dives** - Percentage solo
 - **Training Dives** - With instructors
 
+## Digital Signatures
+
+Buddies and instructors can add digital signatures to verify dives. Signatures are hand-drawn on the device screen and stored as PNG images alongside the dive record.
+
+### Signature Types
+
+| Type | Purpose |
+|------|---------|
+| **Instructor** | Instructor signs off on a training dive or course dive |
+| **Buddy** | Dive buddy signs to verify participation |
+
+### Requesting a Buddy Signature
+
+From the dive detail page, the **Signatures** section lists all buddies assigned to the dive along with their signing status:
+
+1. Tap **Request** next to an unsigned buddy
+2. A handoff screen prompts you to pass the device to your buddy
+3. The buddy taps **Ready to Sign** and draws their signature on the canvas
+4. Tap **Done** to save, or **Clear** to redraw
+
+A counter badge (e.g., "2/3") shows how many buddies have signed out of the total.
+
+### Adding an Instructor Signature
+
+For training dives, an instructor signature can be captured separately:
+
+1. Open the dive detail page
+2. In the signature section, tap **Add Instructor Signature**
+3. Enter the instructor's name
+4. The instructor draws their signature on the canvas
+5. Tap **Save Signature** to store it
+
+### Viewing Signatures
+
+- Tap a signed buddy's card to view the full signature in a dialog
+- Signed entries show a small signature preview thumbnail and the date signed
+- A green **Signed** badge appears on dives that have signatures
+
+### Storage
+
+Signature image data is stored directly in the database as PNG bytes within the media table. Each signature record tracks the signer's name, an optional link to their buddy record, the signature type, and a timestamp.
+
 ## Certification Tracking
 
 ### Your Certifications

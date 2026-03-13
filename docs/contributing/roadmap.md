@@ -18,8 +18,8 @@ This roadmap outlines planned features and development phases for Submersion.
 | **MVP** | Complete | Core dive logging | :white_check_mark: Done |
 | **v1.0** | Complete | Production-ready | :white_check_mark: Done |
 | **v1.1** | Complete | UX, GPS, maps, testing | :white_check_mark: Done |
-| **v1.5** | 4-6 months | Technical diving & computers | :construction: In Progress |
-| **v2.0** | 8-12 months | Cloud sync & social | :clipboard: Planned |
+| **v1.5** | 4-6 months | Technical diving & computers | :white_check_mark: Done |
+| **v2.0** | 8-12 months | Cloud sync & social | :construction: In Progress |
 | **v3.0** | 12-18 months | Community platform | :crystal_ball: Future |
 
 ---
@@ -113,7 +113,7 @@ Usability improvements and better GPS integration.
 
 ---
 
-## v1.5 - Technical Diving (In Progress)
+## v1.5 - Technical Diving (Complete)
 
 Dive computer integration and decompression support.
 
@@ -188,17 +188,17 @@ Multi-device sync and social features.
 - :clipboard: Automatic backup
 - :clipboard: Conflict resolution
 
-### Multi-User Support
+### Multi-User Support (Shipped in v1.5)
 
 - :white_check_mark: Multiple divers per database
 - :white_check_mark: Account switching
 - :clipboard: Family subscriptions
 
-### Localization
+### Localization (Shipped in v1.5)
 
-- :clipboard: Multi-language support (7+ languages)
-- :clipboard: RTL language support
-- :clipboard: Localized formats
+- :white_check_mark: Multi-language support (10 languages)
+- :white_check_mark: RTL language support
+- :white_check_mark: Localized formats
 
 ### Photography
 

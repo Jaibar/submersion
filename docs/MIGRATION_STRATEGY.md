@@ -28,15 +28,15 @@ Where N is an integer starting from 1 and incrementing with each migration.
 
 ```dart
 @override
-int get schemaVersion => 1;  // Initial release
+int get schemaVersion => 47;  // Current release
 ```text
 ### Version History
 
 | Version | Date | Description |
 |---------|------|-------------|
 | 1 | Initial | Initial schema with core tables |
-| 2 | TBD | (Future) Add species catalog |
-| 3 | TBD | (Future) Add certification tracking |
+| 2-46 | ... | Incremental migrations (columns, tables, indexes) |
+| 47 | Current | Current schema version |
 
 ## Migration Implementation
 
@@ -84,7 +84,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 2;  // Current version
+  int get schemaVersion => 47;  // Current version
 
   @override
   MigrationStrategy get migration {

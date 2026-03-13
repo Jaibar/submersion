@@ -37,6 +37,65 @@ Diving mode/configuration.
 | `ccr` | Closed Circuit Rebreather | CCR diving |
 | `scr` | Semi-Closed Rebreather | SCR diving |
 
+### ScrType
+
+Semi-Closed Rebreather type.
+
+| Value | Display Name | Short Name | Description |
+|-------|--------------|------------|-------------|
+| `cmf` | Constant Mass Flow | CMF | Fixed flow rate of O2 into the loop |
+| `pascr` | Passive Addition | PASCR | O2 added proportional to gas consumed |
+| `escr` | Electronically Controlled | ESCR | Electronically controlled O2 injection |
+
+**Methods:**
+
+```dart
+// Short code for database storage
+ScrType.cmf.code // "cmf"
+
+// Parse from database value
+ScrType.fromCode('pascr') // ScrType.pascr
+```
+
+---
+
+### TripType
+
+Trip type classification.
+
+| Value | Display Name |
+|-------|--------------|
+| `shore` | Shore |
+| `liveaboard` | Liveaboard |
+| `resort` | Resort |
+| `dayTrip` | Day Trip |
+
+**Methods:**
+
+```dart
+TripType.fromName('liveaboard') // TripType.liveaboard
+```
+
+### DayType
+
+Itinerary day type for liveaboard trips.
+
+| Value | Display Name |
+|-------|--------------|
+| `diveDay` | Dive Day |
+| `seaDay` | Sea Day |
+| `portDay` | Port Day |
+| `embark` | Embark |
+| `disembark` | Disembark |
+
+**Methods:**
+
+```dart
+DayType.fromName('portDay') // DayType.portDay
+```
+
+---
+
 ### Visibility
 
 Water visibility conditions.
@@ -120,6 +179,8 @@ Purpose of tank during dive.
 | `sidemountLeft` | Sidemount Left | Left sidemount |
 | `sidemountRight` | Sidemount Right | Right sidemount |
 | `pony` | Pony Bottle | Emergency bottle |
+| `diluent` | Diluent | CCR diluent tank |
+| `oxygenSupply` | O2 Supply | CCR oxygen supply cylinder |
 
 ### TankMaterial
 
@@ -274,8 +335,6 @@ Types of events on dive profile.
 
 | Value | Display Name | Severity |
 |-------|--------------|----------|
-| `descentStart` | Descent Start | info |
-| `descentEnd` | Descent End | info |
 | `ascentStart` | Ascent Start | info |
 | `safetyStopStart` | Safety Stop Start | info |
 | `safetyStopEnd` | Safety Stop End | info |

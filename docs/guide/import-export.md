@@ -8,6 +8,9 @@ Move your dive data in and out of Submersion using industry-standard formats.
 |--------|--------|--------|-------------|
 | **UDDF** | Yes | Yes | Universal Dive Data Format |
 | **CSV** | Yes | Yes | Spreadsheet format |
+| **Garmin FIT** | Yes | No | Garmin dive activity files |
+| **Subsurface XML** | Yes | No | Subsurface native format |
+| **HealthKit** | Yes | No | Apple Watch dive workouts (iOS only) |
 | **PDF** | No | Yes | Printable logbook |
 | **SQLite** | Yes | Yes | Full database backup |
 
@@ -238,6 +241,54 @@ To share individual dives:
 1. Open dive detail
 2. Tap share icon
 3. Choose format (PDF for non-divers, UDDF for divers)
+
+## HealthKit / Apple Watch Import
+
+On iOS, Submersion can import dive data recorded by Apple Watch directly from HealthKit. The app fetches underwater diving workouts along with associated heart rate data.
+
+### Importing from HealthKit
+
+1. Go to **Transfer** > **Apple Watch**
+2. Grant HealthKit read permissions when prompted
+3. Select a date range to search for dives
+4. Review the list of discovered dive workouts
+5. Choose which dives to import
+6. Handle any duplicates (skip or import)
+7. Confirm import
+
+Imported data includes start/end times, heart rate samples, and GPS coordinates when available. Depth and temperature depend on the watch model and sensor capabilities.
+
+## Garmin FIT File Import
+
+Garmin dive computers (Descent series) store dive activities in the FIT binary format. Submersion can parse these files to extract dive profiles, depth, temperature, heart rate, and GPS data.
+
+### Importing FIT Files
+
+1. Go to **Transfer** > **Garmin FIT Import**
+2. Tap **Select FIT Files** and choose one or more `.fit` files
+3. The parser filters for dive activities and skips non-dive files automatically
+4. Review parsed dives and handle duplicates
+5. Confirm import
+
+Each imported dive receives a unique source ID based on the device serial number and start time, which prevents duplicate imports.
+
+## Universal Import
+
+The universal import wizard provides a single entry point for importing from many formats and applications. It auto-detects the file format and source application, then guides you through a six-step process.
+
+### Supported Formats
+
+The universal import wizard currently supports CSV, UDDF, Subsurface XML, and Garmin FIT files. Additional formats (Suunto SML/DM5, Shearwater Cloud, DAN DL7, and others) are planned.
+
+### Using Universal Import
+
+1. Go to **Transfer** > **Import from File**
+2. Select a file -- the format and source application are detected automatically
+3. Confirm or override the detected source
+4. For CSV files, map your columns to Submersion fields
+5. Review and select which entities (dives, sites, buddies, etc.) to import
+6. Wait for import to complete
+7. Review the summary of imported items
 
 ## Troubleshooting
 

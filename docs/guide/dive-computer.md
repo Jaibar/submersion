@@ -80,9 +80,11 @@ Consult your computer's manual for specific instructions.
 
 ## Download Options
 
-### Incremental Download
+### Incremental Download with Fingerprint Tracking
 
-By default, Submersion only downloads **new dives** (since last download).
+By default, Submersion only downloads **new dives** since the last successful import. This works via fingerprint tracking: after each successful download, the app stores a `lastDiveFingerprint` for that dive computer. On the next download, libdivecomputer receives this fingerprint and stops reading as soon as it encounters the matching dive, skipping all previously imported data.
+
+The fingerprint is selected from the newest successfully imported dive (by start time). If no dives have fingerprints -- for example on the very first download -- a full download is performed automatically. You can also force a full download at any time (see below).
 
 ### Force Full Download
 
@@ -157,6 +159,10 @@ If you dive with multiple computers simultaneously:
 <div class="tip">
 <strong>Tip:</strong> The primary profile is used for statistics. Usually choose your most accurate computer.
 </div>
+
+### Linked Dive Computers
+
+When a dive is downloaded from a computer, the dive record is automatically linked to that computer. On the dive detail page, tapping the computer name navigates to that computer's detail page. This link is also preserved in UDDF imports where equipment references identify the source computer.
 
 ## Computer Statistics
 

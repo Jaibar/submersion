@@ -1,8 +1,8 @@
 # Submersion - Remaining Tasks
 
-> **Generated:** 2026-02-03
+> **Generated:** 2026-03-13
 > **Source:** FEATURE_ROADMAP.md
-> **Current Version:** 1.1.0 (v1.5 Nearly Complete - only performance testing remains)
+> **Current Version:** 1.2.25 (v1.5 Complete)
 
 This document contains only the features and tasks that are **not yet completed**.
 
@@ -12,33 +12,15 @@ This document contains only the features and tasks that are **not yet completed*
 
 | Phase | Status | Remaining Focus |
 |-------|--------|-----------------|
-| **v1.5** | Nearly Complete | Performance testing, quick actions |
-| **v2.0** | Planned | Advanced features, social, backend |
+| **v1.5** | Complete | All v1.5 tasks shipped |
+| **v2.0** | In Progress | Advanced features, social, backend |
 | **v3.0** | Future | Community platform, AI features |
 
 ---
 
 ## v1.5 Remaining Tasks
 
-### Category 5: GPS Integration
-
-- [ ] EXIF parsing from photo attachments
-- [ ] If photo has GPS and dive doesn't, suggest using photo GPS
-
-### Category 8: Digital Cards (eCards)
-
-- [ ] Export cert card as image (shareable)
-
-### Category 11: Convenience Tools
-
-- [ ] Surface Interval Tool: Input previous dive (depth, time, gas) + desired next dive -> Output min surface interval
-- [ ] Display tissue loading chart showing saturation decreasing over time
-
-### Release Criteria
-
-- [ ] Performance with 5000+ dives
-- [ ] App store submissions (iOS, Android)
-- [ ] Documentation (user guide, FAQ)
+All v1.5 tasks complete.
 
 ---
 

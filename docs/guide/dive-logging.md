@@ -97,7 +97,7 @@ For technical divers, additional fields are available:
 |-------|-------------|
 | **Buddy** | Select from buddy database |
 | **Dive Master** | Name of DM/guide |
-| **Buddy Role** | Buddy, Guide, Instructor, Student |
+| **Buddy Role** | Buddy, Dive Guide, Instructor, Student, Divemaster, Solo |
 
 ### Organization
 
@@ -200,6 +200,18 @@ Log species sightings:
 4. Enter count and optional notes
 
 [Learn more about marine life tracking &rarr;](features/marine-life.md)
+
+## Rebreather Fields (CCR/SCR)
+
+When **Dive Mode** is set to CCR or SCR, additional fields become available for technical divers: setpoint values (low, high, deco), loop volume, diluent gas mix, scrubber information (type, time used, capacity), and loop O2 measurements. SCR dives also expose a sub-type selector (Constant Mass Flow, Passive Addition, or Electronically Controlled).
+
+## Custom Fields
+
+You can attach arbitrary key-value pairs to any dive using the **Custom Fields** section of the dive entry form. This is useful for recording data that does not fit into the built-in fields, such as research codes, equipment serial numbers used on a particular dive, or instructor sign-off notes.
+
+## Wearable Data
+
+Dives imported from wearable devices (Apple Watch, Garmin) retain a `wearableSource` marker indicating where the data originated. Heart rate and other biometric data captured by the wearable are stored alongside the dive profile and can be viewed on the profile chart overlays.
 
 ## Tips for Good Dive Logs
 

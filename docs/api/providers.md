@@ -444,3 +444,208 @@ testWidgets('shows dives', (tester) async {
   );
 });
 ```
+
+---
+
+## Additional Provider Categories
+
+The following feature areas have their own provider files. Each follows the same Riverpod patterns documented above.
+
+### Course Providers
+
+**Location:** `lib/features/courses/presentation/providers/course_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `courseRepositoryProvider` | Provider | Course repository singleton |
+| `coursesProvider` | FutureProvider | All courses for current diver |
+| `courseProvider` | FutureProvider.family | Single course by ID |
+
+### Buddy Providers
+
+**Location:** `lib/features/buddies/presentation/providers/buddy_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `buddyRepositoryProvider` | Provider | Buddy repository singleton |
+| `buddiesProvider` | FutureProvider | All buddies for current diver |
+| `buddyProvider` | FutureProvider.family | Single buddy by ID |
+
+### Certification Providers
+
+**Location:** `lib/features/certifications/presentation/providers/certification_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `certificationRepositoryProvider` | Provider | Certification repository singleton |
+| `certificationsProvider` | FutureProvider | All certifications for current diver |
+
+### Dive Center Providers
+
+**Location:** `lib/features/dive_centers/presentation/providers/dive_center_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `diveCenterRepositoryProvider` | Provider | Dive center repository singleton |
+| `diveCentersProvider` | FutureProvider | All dive centers |
+
+### Marine Life Providers
+
+**Location:** `lib/features/marine_life/presentation/providers/species_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `speciesRepositoryProvider` | Provider | Species repository singleton |
+| `speciesListProvider` | FutureProvider | All species |
+
+### Tag Providers
+
+**Location:** `lib/features/tags/presentation/providers/tag_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `tagRepositoryProvider` | Provider | Tag repository singleton |
+| `tagsProvider` | FutureProvider | All tags for current diver |
+
+### Dive Type Providers
+
+**Location:** `lib/features/dive_types/presentation/providers/dive_type_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `diveTypeRepositoryProvider` | Provider | Dive type repository singleton |
+| `diveTypesProvider` | FutureProvider | All dive types |
+
+### Tank Preset Providers
+
+**Location:** `lib/features/tank_presets/presentation/providers/tank_preset_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `tankPresetRepositoryProvider` | Provider | Tank preset repository singleton |
+| `tankPresetsProvider` | FutureProvider | All tank presets for current diver |
+
+### Media Providers
+
+**Location:** `lib/features/media/presentation/providers/media_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `mediaRepositoryProvider` | Provider | Media repository singleton |
+| `diveMediaProvider` | FutureProvider.family | Media for a specific dive |
+
+### Dive Computer Providers
+
+**Location:** `lib/features/dive_log/presentation/providers/dive_computer_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `diveComputerRepositoryProvider` | Provider | Dive computer repository singleton |
+| `diveComputersProvider` | FutureProvider | All dive computers |
+
+### Dive Import Providers
+
+**Location:** `lib/features/dive_import/presentation/providers/dive_import_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `fitImportProvider` | StateNotifierProvider | FIT file import state |
+
+### Universal Import Providers
+
+**Location:** `lib/features/universal_import/presentation/providers/universal_import_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `universalImportProvider` | StateNotifierProvider | Universal import wizard state |
+
+### Tide Providers
+
+**Location:** `lib/features/tides/presentation/providers/tide_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `tideRepositoryProvider` | Provider | Tide repository singleton |
+| `diveTideProvider` | FutureProvider.family | Tide record for a dive |
+
+### Offline Maps Providers
+
+**Location:** `lib/features/maps/presentation/providers/offline_map_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `offlineMapRepositoryProvider` | Provider | Offline map repository singleton |
+| `cachedRegionsProvider` | FutureProvider | All cached map regions |
+
+### Sync Providers
+
+**Location:** `lib/features/settings/presentation/providers/sync_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `syncServiceProvider` | Provider | Sync service singleton |
+| `syncStatusProvider` | FutureProvider | Current sync status |
+
+### Notification Providers
+
+**Location:** `lib/features/notifications/presentation/providers/notification_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `notificationServiceProvider` | Provider | Notification service singleton |
+
+### Dashboard Providers
+
+**Location:** `lib/features/dashboard/presentation/providers/dashboard_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `dashboardDataProvider` | FutureProvider | Aggregated dashboard data |
+
+### Dive Planner Providers
+
+**Location:** `lib/features/dive_planner/presentation/providers/dive_planner_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `divePlannerProvider` | StateNotifierProvider | Dive planner state |
+
+### Backup Providers
+
+**Location:** `lib/features/backup/presentation/providers/backup_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `backupServiceProvider` | Provider | Backup service singleton |
+
+### Signature Providers
+
+**Location:** `lib/features/signatures/presentation/providers/signature_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `signatureProvider` | FutureProvider.family | Signatures for a dive |
+
+### Liveaboard Providers
+
+**Location:** `lib/features/trips/presentation/providers/liveaboard_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `liveaboardDetailsProvider` | FutureProvider.family | Liveaboard details for a trip |
+
+### Gas Calculator Providers
+
+**Location:** `lib/features/gas_calculators/presentation/providers/gas_calculators_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `gasCalculatorsProvider` | StateNotifierProvider | Gas calculator state |
+
+### Deco Calculator Providers
+
+**Location:** `lib/features/deco_calculator/presentation/providers/deco_calculator_providers.dart`
+
+| Provider | Type | Description |
+|----------|------|-------------|
+| `decoCalculatorProvider` | StateNotifierProvider | Deco calculator state |

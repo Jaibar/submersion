@@ -13,13 +13,18 @@ The **Gear** tab shows all your equipment with status indicators.
 
 ### Status Indicators
 
+The following statuses are defined in the `EquipmentStatus` enum:
+
 | Status | Color | Meaning |
 |--------|-------|---------|
 | **Active** | Green | Good to use |
 | **Needs Service** | Yellow | Service due soon |
-| **Overdue** | Red | Service overdue |
 | **In Service** | Blue | Currently being serviced |
 | **Retired** | Gray | No longer in use |
+| **Loaned Out** | -- | Equipment lent to someone else |
+| **Lost** | -- | Equipment lost |
+
+**Note:** "Overdue" is not a discrete status. It is a computed property (`isServiceDue`) derived from the last service date and service interval. When service is overdue, the item's badge turns red, but the underlying status remains unchanged.
 
 ## Adding Equipment
 
@@ -47,7 +52,7 @@ The **Gear** tab shows all your equipment with status indicators.
 
 ### Equipment Types
 
-Submersion supports 17 equipment types:
+Submersion supports 18 equipment types:
 
 | Type | Examples |
 |------|----------|
@@ -154,13 +159,13 @@ Common tank configurations are available as presets:
 | **AL40** | 5.7L | 207 bar |
 | **AL63** | 9L | 207 bar |
 | **AL80** | 11.1L | 207 bar |
-| **HP80** | 10.2L | 237 bar |
-| **HP100** | 12.9L | 237 bar |
-| **HP120** | 15.3L | 237 bar |
-| **LP85** | 12L | 207 bar |
-| **Steel 10L** | 10L | 232 bar |
-| **Steel 12L** | 12L | 232 bar |
-| **Steel 15L** | 15L | 232 bar |
+| **HP80** | 10.2L | 234 bar |
+| **HP100** | 12.9L | 234 bar |
+| **HP120** | 15.1L | 234 bar |
+| **LP85** | 12L | 193 bar |
+| **Steel 10L** | 10L | 200 bar |
+| **Steel 12L** | 12L | 200 bar |
+| **Steel 15L** | 15L | 200 bar |
 
 <div class="tip">
 <strong>Tip:</strong> You can also create custom tank presets in Settings.
@@ -202,6 +207,6 @@ When equipment is no longer usable:
 
 Track borrowed/loaned gear:
 
-1. Set status to **Loaned**
+1. Set status to **Loaned Out**
 2. Add note with who has it
 3. Update when returned

@@ -32,7 +32,7 @@ lib/
 ├── app.dart               # Root widget
 ├── core/                  # Shared infrastructure
 │   ├── constants/         # Enums, constants
-│   ├── database/          # Drift schema (30 tables)
+│   ├── database/          # Drift schema (43 tables)
 │   ├── deco/              # Decompression algorithms
 │   ├── router/            # Navigation
 │   ├── services/          # Business services
