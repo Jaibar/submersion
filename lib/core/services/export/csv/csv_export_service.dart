@@ -138,6 +138,12 @@ class CsvExportService {
       'Serial Number',
       'Firmware Version',
       'Notes',
+      'Wind Speed (m/s)',
+      'Wind Direction',
+      'Cloud Cover',
+      'Precipitation',
+      'Humidity (%)',
+      'Weather Description',
       ...sortedCustomKeys.map((key) => sanitizeCsvField('custom:$key')),
     ];
 
@@ -170,6 +176,12 @@ class CsvExportService {
         dive.diveComputerSerial ?? '',
         dive.diveComputerFirmware ?? '',
         dive.notes.replaceAll('\n', ' '),
+        dive.windSpeed?.toStringAsFixed(1) ?? '',
+        dive.windDirection?.displayName ?? '',
+        dive.cloudCover?.displayName ?? '',
+        dive.precipitation?.displayName ?? '',
+        dive.humidity?.toStringAsFixed(0) ?? '',
+        dive.weatherDescription ?? '',
         ...sortedCustomKeys.map((key) {
           final field = dive.customFields
               .where((f) => f.key == key)
