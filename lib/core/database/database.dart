@@ -221,6 +221,17 @@ class Dives extends Table {
   TextColumn get wearableId =>
       text().nullable()(); // Source-specific ID (e.g., HealthKit UUID)
 
+  // Weather conditions
+  RealColumn get windSpeed => real().nullable()(); // m/s
+  TextColumn get windDirection => text().nullable()(); // enum: CurrentDirection.name
+  TextColumn get cloudCover => text().nullable()();
+  TextColumn get precipitation => text().nullable()();
+  RealColumn get humidity => real().nullable()(); // 0-100
+  TextColumn get weatherDescription => text().nullable()();
+  TextColumn get weatherSource => text().nullable()(); // enum: WeatherSource.name
+  IntColumn get weatherFetchedAt =>
+      integer().nullable()(); // unix timestamp
+
   IntColumn get createdAt => integer()();
   IntColumn get updatedAt => integer()();
 
@@ -1164,7 +1175,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.e);
 
   @override
-  int get schemaVersion => 47;
+  int get schemaVersion => 48;
 
   @override
   MigrationStrategy get migration {
@@ -2191,6 +2202,32 @@ class AppDatabase extends _$AppDatabase {
               'ALTER TABLE dive_computers ADD COLUMN last_dive_fingerprint TEXT',
             );
           }
+        }
+        if (from < 48) {
+          await customStatement(
+            'ALTER TABLE dives ADD COLUMN wind_speed REAL',
+          );
+          await customStatement(
+            'ALTER TABLE dives ADD COLUMN wind_direction TEXT',
+          );
+          await customStatement(
+            'ALTER TABLE dives ADD COLUMN cloud_cover TEXT',
+          );
+          await customStatement(
+            'ALTER TABLE dives ADD COLUMN precipitation TEXT',
+          );
+          await customStatement(
+            'ALTER TABLE dives ADD COLUMN humidity REAL',
+          );
+          await customStatement(
+            'ALTER TABLE dives ADD COLUMN weather_description TEXT',
+          );
+          await customStatement(
+            'ALTER TABLE dives ADD COLUMN weather_source TEXT',
+          );
+          await customStatement(
+            'ALTER TABLE dives ADD COLUMN weather_fetched_at INTEGER',
+          );
         }
       },
       beforeOpen: (details) async {
