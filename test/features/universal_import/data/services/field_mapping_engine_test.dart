@@ -299,9 +299,9 @@ void main() {
       expect(preset.columns.length, 15);
     });
 
-    test('Submersion preset has 15 columns', () {
+    test('Submersion preset has 21 columns', () {
       final preset = engine.presetFor(SourceApp.submersion)!;
-      expect(preset.columns.length, 15);
+      expect(preset.columns.length, 21);
     });
 
     test('Garmin Connect preset has 6 columns', () {
