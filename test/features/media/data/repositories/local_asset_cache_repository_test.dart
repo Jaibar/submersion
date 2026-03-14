@@ -95,6 +95,112 @@ void main() {
       expect(expired, isFalse);
     });
 
+    test('isExpired uses 3-day backoff at attempt count 1', () async {
+      // 2 days ago (within 3-day window at attempt 1)
+      final twoDaysAgo = DateTime.now()
+          .subtract(const Duration(days: 2))
+          .millisecondsSinceEpoch;
+
+      await db
+          .into(db.localAssetCache)
+          .insert(
+            LocalAssetCacheCompanion.insert(
+              mediaId: 'media-attempt1',
+              resolvedAt: twoDaysAgo,
+              resolutionMethod: 'unresolved',
+              attemptCount: const Value(1),
+            ),
+          );
+
+      final expired = await repository.isExpired('media-attempt1');
+      expect(expired, isFalse);
+    });
+
+    test('isExpired expires after 3 days at attempt count 1', () async {
+      final fourDaysAgo = DateTime.now()
+          .subtract(const Duration(days: 4))
+          .millisecondsSinceEpoch;
+
+      await db
+          .into(db.localAssetCache)
+          .insert(
+            LocalAssetCacheCompanion.insert(
+              mediaId: 'media-attempt1-expired',
+              resolvedAt: fourDaysAgo,
+              resolutionMethod: 'unresolved',
+              attemptCount: const Value(1),
+            ),
+          );
+
+      final expired = await repository.isExpired('media-attempt1-expired');
+      expect(expired, isTrue);
+    });
+
+    test('isExpired uses 7-day backoff at attempt count 2+', () async {
+      // 5 days ago (within 7-day window at attempt 2)
+      final fiveDaysAgo = DateTime.now()
+          .subtract(const Duration(days: 5))
+          .millisecondsSinceEpoch;
+
+      await db
+          .into(db.localAssetCache)
+          .insert(
+            LocalAssetCacheCompanion.insert(
+              mediaId: 'media-attempt2',
+              resolvedAt: fiveDaysAgo,
+              resolutionMethod: 'unresolved',
+              attemptCount: const Value(2),
+            ),
+          );
+
+      final expired = await repository.isExpired('media-attempt2');
+      expect(expired, isFalse);
+    });
+
+    test('isExpired expires after 7 days at attempt count 2+', () async {
+      final eightDaysAgo = DateTime.now()
+          .subtract(const Duration(days: 8))
+          .millisecondsSinceEpoch;
+
+      await db
+          .into(db.localAssetCache)
+          .insert(
+            LocalAssetCacheCompanion.insert(
+              mediaId: 'media-attempt2-expired',
+              resolvedAt: eightDaysAgo,
+              resolutionMethod: 'unresolved',
+              attemptCount: const Value(2),
+            ),
+          );
+
+      final expired = await repository.isExpired('media-attempt2-expired');
+      expect(expired, isTrue);
+    });
+
+    test(
+      'isExpired clamps backoff at 7 days for high attempt counts',
+      () async {
+        // Even at attempt count 10, backoff should clamp to 7 days (index 2)
+        final sixDaysAgo = DateTime.now()
+            .subtract(const Duration(days: 6))
+            .millisecondsSinceEpoch;
+
+        await db
+            .into(db.localAssetCache)
+            .insert(
+              LocalAssetCacheCompanion.insert(
+                mediaId: 'media-attempt10',
+                resolvedAt: sixDaysAgo,
+                resolutionMethod: 'unresolved',
+                attemptCount: const Value(10),
+              ),
+            );
+
+        final expired = await repository.isExpired('media-attempt10');
+        expect(expired, isFalse);
+      },
+    );
+
     test('incrementAttempt increases attempt_count', () async {
       await repository.cacheResolution(
         mediaId: 'media-1',
