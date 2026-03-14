@@ -8830,7 +8830,8 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String get media_unavailablePlaceholder_notOnDevice => 'Not on this device';
+  String get media_unavailablePlaceholder_notOnDevice =>
+      'غير متوفر على هذا الجهاز';
 
   @override
   String get media_writeMetadata_cancelButton => 'إلغاء';

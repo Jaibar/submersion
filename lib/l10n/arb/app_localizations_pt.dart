@@ -9013,7 +9013,8 @@ class AppLocalizationsPt extends AppLocalizations {
   }
 
   @override
-  String get media_unavailablePlaceholder_notOnDevice => 'Not on this device';
+  String get media_unavailablePlaceholder_notOnDevice =>
+      'Indisponível neste dispositivo';
 
   @override
   String get media_writeMetadata_cancelButton => 'Cancelar';

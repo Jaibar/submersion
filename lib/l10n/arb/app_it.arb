@@ -2843,6 +2843,7 @@
   "media_scanResults_okButton": "OK",
   "media_scanResults_unknownSite": "Sito sconosciuto",
   "media_scanResults_unmatchedWarning": "{count} foto non corrispondono a nessuna immersione (scattate al di fuori dei tempi di immersione)",
+  "media_unavailablePlaceholder_notOnDevice": "Non su questo dispositivo",
   "media_writeMetadata_cancelButton": "Annulla",
   "media_writeMetadata_depthLabel": "Profondità",
   "media_writeMetadata_descriptionPhoto": "I seguenti metadati verranno scritti nella foto:",

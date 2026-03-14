@@ -9037,7 +9037,8 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
-  String get media_unavailablePlaceholder_notOnDevice => 'Not on this device';
+  String get media_unavailablePlaceholder_notOnDevice =>
+      'Non disponible sur cet appareil';
 
   @override
   String get media_writeMetadata_cancelButton => 'Annuler';

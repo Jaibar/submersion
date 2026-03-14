@@ -2843,6 +2843,7 @@
   "media_scanResults_okButton": "OK",
   "media_scanResults_unknownSite": "Unbekannter Tauchplatz",
   "media_scanResults_unmatchedWarning": "{count} Fotos konnten keinem Tauchgang zugeordnet werden (ausserhalb der Tauchzeiten aufgenommen)",
+  "media_unavailablePlaceholder_notOnDevice": "Nicht auf diesem Gerät",
   "media_writeMetadata_cancelButton": "Abbrechen",
   "media_writeMetadata_depthLabel": "Tiefe",
   "media_writeMetadata_descriptionPhoto": "Die folgenden Metadaten werden in das Foto geschrieben:",
