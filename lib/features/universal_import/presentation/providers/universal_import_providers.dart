@@ -622,6 +622,7 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     _ref.invalidate(sitesWithCountsProvider);
     _ref.invalidate(siteListNotifierProvider);
     _ref.invalidate(allBuddiesProvider);
+    _ref.invalidate(buddyListNotifierProvider);
     _ref.invalidate(allEquipmentProvider);
     _ref.invalidate(activeEquipmentProvider);
     _ref.invalidate(retiredEquipmentProvider);

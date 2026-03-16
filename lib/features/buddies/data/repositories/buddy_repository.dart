@@ -208,6 +208,7 @@ class BuddyRepository {
         _db.buddies,
       )..where((t) => t.id.equals(buddy.id))).write(
         BuddiesCompanion(
+          diverId: Value(buddy.diverId),
           name: Value(buddy.name),
           email: Value(buddy.email),
           phone: Value(buddy.phone),

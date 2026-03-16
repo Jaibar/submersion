@@ -250,19 +250,22 @@ class SubsurfaceXmlParser implements ImportParser {
           : WaterType.fresh;
     }
 
-    // Buddy (strip leading/trailing commas and whitespace)
+    // Buddy -> proper Buddy entities via unmatchedBuddyNames
     final buddyEl = dive.findElements('buddy').firstOrNull;
     if (buddyEl != null) {
-      final raw = buddyEl.innerText.trim();
-      final cleaned = raw.replaceAll(RegExp(r'^[,\s]+|[,\s]+$'), '').trim();
-      if (cleaned.isNotEmpty) result['buddy'] = cleaned;
+      final buddyNames = _splitNames(buddyEl.innerText);
+      if (buddyNames.isNotEmpty) {
+        result['unmatchedBuddyNames'] = buddyNames;
+      }
     }
 
-    // Divemaster
+    // Divemaster -> proper Buddy entities with diveGuide role
     final divemasterEl = dive.findElements('divemaster').firstOrNull;
     if (divemasterEl != null) {
-      final raw = divemasterEl.innerText.trim();
-      if (raw.isNotEmpty) result['diveMaster'] = raw;
+      final dmNames = _splitNames(divemasterEl.innerText);
+      if (dmNames.isNotEmpty) {
+        result['unmatchedDiveGuideNames'] = dmNames;
+      }
     }
 
     // Composite notes: <notes> + "Suit: <suit>" + "SAC: <sac attr>"
@@ -537,6 +540,18 @@ class SubsurfaceXmlParser implements ImportParser {
     4 || 5 => CurrentStrength.strong,
     _ => null,
   };
+
+  /// Splits a comma-separated name string, trimming leading/trailing commas
+  /// and whitespace from each name.
+  ///
+  /// Handles Subsurface quirks like ', Kiyan Griffin' (leading comma).
+  static List<String> _splitNames(String text) {
+    return text
+        .split(',')
+        .map((n) => n.trim())
+        .where((n) => n.isNotEmpty)
+        .toList();
+  }
 
   /// Parses a double value from a string that may have a unit suffix.
   ///

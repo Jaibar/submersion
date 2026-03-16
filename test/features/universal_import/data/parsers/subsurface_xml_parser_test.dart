@@ -81,13 +81,13 @@ void main() {
   });
 
   group('dive metadata', () {
-    test('parses buddy with leading comma cleanup', () async {
+    test('parses buddies and divemasters as unmatched name lists', () async {
       final result = await parser.parse(
         xmlBytes('''
 <divelog program='subsurface' version='3'>
 <dives>
 <dive number='1' date='2025-01-15' time='10:00:00' duration='30:00 min'>
-  <buddy>, John Doe</buddy>
+  <buddy>, John Doe, Alice</buddy>
   <divemaster>Jane Smith</divemaster>
   <divecomputer model='Test'>
   <depth max='20.0 m' mean='15.0 m' />
@@ -98,8 +98,10 @@ void main() {
 '''),
       );
       final dive = result.entitiesOf(ImportEntityType.dives).first;
-      expect(dive['buddy'], 'John Doe');
-      expect(dive['diveMaster'], 'Jane Smith');
+      expect(dive['unmatchedBuddyNames'], ['John Doe', 'Alice']);
+      expect(dive['unmatchedDiveGuideNames'], ['Jane Smith']);
+      expect(dive.containsKey('buddy'), isFalse);
+      expect(dive.containsKey('diveMaster'), isFalse);
     });
 
     test('parses notes and appends suit and SAC', () async {
@@ -579,8 +581,8 @@ void main() {
       // Verify a specific dive has expected data
       final dive1 = dives.firstWhere((d) => d['diveNumber'] == 1);
       expect(dive1['dateTime'], DateTime(2025, 9, 20, 7, 44, 37));
-      expect(dive1['buddy'], contains('Kiyan Griffin'));
-      expect(dive1['diveMaster'], 'Sharon Patterson');
+      expect(dive1['unmatchedBuddyNames'], contains('Kiyan Griffin'));
+      expect(dive1['unmatchedDiveGuideNames'], ['Sharon Patterson']);
       expect(dive1['visibility'], Visibility.poor);
       expect(dive1['currentStrength'], CurrentStrength.strong);
       expect(dive1['waterType'], WaterType.salt);

@@ -1115,6 +1115,7 @@ class UddfEntityImporter {
       inlineBuddies += await _linkBuddiesToDive(
         diveData,
         diveId,
+        diverId,
         buddyIdMapping,
         repos.buddyRepository,
       );
@@ -1283,6 +1284,7 @@ class UddfEntityImporter {
   Future<int> _linkBuddiesToDive(
     Map<String, dynamic> diveData,
     String diveId,
+    String diverId,
     Map<String, String> buddyIdMapping,
     BuddyRepository repository,
   ) async {
@@ -1306,7 +1308,24 @@ class UddfEntityImporter {
         : <String>[];
     for (final buddyName in unmatchedNames) {
       final buddy = await repository.findOrCreateByName(buddyName);
+      if (buddy.diverId == null) {
+        await repository.updateBuddy(buddy.copyWith(diverId: diverId));
+      }
       await repository.addBuddyToDive(diveId, buddy.id, BuddyRole.buddy);
+      inlineCount++;
+    }
+
+    // Handle inline dive guide / divemaster names
+    final unmatchedGuideValue = diveData['unmatchedDiveGuideNames'];
+    final unmatchedGuides = unmatchedGuideValue is List
+        ? unmatchedGuideValue.whereType<String>().toList()
+        : <String>[];
+    for (final guideName in unmatchedGuides) {
+      final guide = await repository.findOrCreateByName(guideName);
+      if (guide.diverId == null) {
+        await repository.updateBuddy(guide.copyWith(diverId: diverId));
+      }
+      await repository.addBuddyToDive(diveId, guide.id, BuddyRole.diveGuide);
       inlineCount++;
     }
 
