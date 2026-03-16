@@ -17,7 +17,6 @@ import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.d
 import 'package:submersion/features/backup/presentation/providers/backup_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/storage_providers.dart';
-import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
 import 'package:submersion/features/settings/presentation/pages/diver_profile_hub_page.dart';
 import 'package:submersion/features/settings/presentation/pages/language_settings_page.dart';
 import 'package:submersion/core/theme/app_theme_registry.dart';
@@ -1702,7 +1701,6 @@ class _DataSectionContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final storageState = ref.watch(storageConfigNotifierProvider);
-    final syncState = ref.watch(syncStateProvider);
     final isCustomFolder =
         storageState.config.mode == StorageLocationMode.customFolder;
 
@@ -1725,37 +1723,6 @@ class _DataSectionContent extends ConsumerWidget {
                   subtitle: _buildBackupSubtitle(context, ref),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => context.push('/settings/backup'),
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.cloud_sync),
-                  title: Text(context.l10n.settings_data_cloudSync),
-                  subtitle: Text(_getSyncSubtitle(context, syncState)),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (syncState.conflicts > 0)
-                        Badge(
-                          label: Text('${syncState.conflicts}'),
-                          child: const Icon(
-                            Icons.warning,
-                            color: Colors.orange,
-                            size: 20,
-                          ),
-                        ),
-                      if (syncState.pendingChanges > 0 &&
-                          syncState.conflicts == 0)
-                        Badge(
-                          label: Text('${syncState.pendingChanges}'),
-                          backgroundColor: Theme.of(
-                            context,
-                          ).colorScheme.primary,
-                        ),
-                      const SizedBox(width: 8),
-                      const Icon(Icons.chevron_right),
-                    ],
-                  ),
-                  onTap: () => context.push('/settings/cloud-sync'),
                 ),
               ],
             ),
@@ -1796,17 +1763,6 @@ class _DataSectionContent extends ConsumerWidget {
         ],
       ),
     );
-  }
-
-  String _getSyncSubtitle(BuildContext context, SyncState syncState) {
-    if (syncState.status == SyncStatus.syncing) {
-      return context.l10n.settings_data_sync_syncing;
-    } else if (syncState.lastSync != null) {
-      return context.l10n.settings_data_sync_lastSynced(
-        _formatSyncTime(context, syncState.lastSync!),
-      );
-    }
-    return context.l10n.settings_data_sync_notConfigured;
   }
 
   Widget? _buildBackupSubtitle(BuildContext context, WidgetRef ref) {
@@ -2313,23 +2269,6 @@ IconData _getThemeModeIcon(ThemeMode mode) {
       return Icons.light_mode;
     case ThemeMode.dark:
       return Icons.dark_mode;
-  }
-}
-
-String _formatSyncTime(BuildContext context, DateTime dateTime) {
-  final now = DateTime.now();
-  final difference = now.difference(dateTime);
-
-  if (difference.inMinutes < 1) {
-    return context.l10n.settings_data_syncTime_justNow;
-  } else if (difference.inHours < 1) {
-    return context.l10n.settings_data_syncTime_minutesAgo(difference.inMinutes);
-  } else if (difference.inDays < 1) {
-    return context.l10n.settings_data_syncTime_hoursAgo(difference.inHours);
-  } else if (difference.inDays < 7) {
-    return context.l10n.settings_data_syncTime_daysAgo(difference.inDays);
-  } else {
-    return '${dateTime.day}/${dateTime.month}/${dateTime.year}';
   }
 }
 

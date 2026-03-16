@@ -65,7 +65,6 @@ import 'package:submersion/features/settings/presentation/pages/appearance_page.
 import 'package:submersion/features/settings/presentation/pages/default_visible_metrics_page.dart';
 import 'package:submersion/features/settings/presentation/pages/language_settings_page.dart';
 import 'package:submersion/features/settings/presentation/pages/theme_gallery_page.dart';
-import 'package:submersion/features/settings/presentation/pages/cloud_sync_page.dart';
 import 'package:submersion/features/settings/presentation/pages/storage_settings_page.dart';
 import 'package:submersion/features/settings/presentation/pages/diver_profile_hub_page.dart';
 import 'package:submersion/features/settings/presentation/pages/personal_info_edit_page.dart';
@@ -703,11 +702,6 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               child: const SettingsPage(),
             ),
             routes: [
-              GoRoute(
-                path: 'cloud-sync',
-                name: 'cloudSync',
-                builder: (context, state) => const CloudSyncPage(),
-              ),
               GoRoute(
                 path: 'storage',
                 name: 'storageSettings',
