@@ -3,6 +3,14 @@
 All notable changes to Submersion are documented in this file.
 
 
+## 1.3.2 (2026-03-16)
+
+### Chores
+
+- bump version to 1.3.2+77
+- disable cloud sync UI options until bugs are addressed
+
+
 ## 1.3.2 (2026-03-15)
 
 ### Features
