@@ -259,6 +259,7 @@ UDDF XML datetime strings may or may not include timezone designators. When they
 | `lib/features/dive_log/presentation/pages/dive_edit_page.dart` | `DateTime(...)` to `DateTime.utc(...)` |
 | `lib/features/dive_log/data/repositories/dive_repository_impl.dart` | Add `isUtc: true` to all DateTime reconstructions |
 | `lib/features/dive_log/presentation/providers/profile_analysis_provider.dart` | Use UTC bounds for date range queries |
+| `lib/features/dive_import/presentation/providers/dive_import_providers.dart` | Convert `getDivesInRange` bounds and `getDiveNumberForDate` arg to UTC |
 | `lib/core/database/database.dart` | Add `importVersion` column, migration step |
 | New: `lib/features/settings/presentation/pages/fix_dive_times_page.dart` | Bulk-fix tool UI |
 | New: `lib/features/settings/data/services/dive_time_migration_service.dart` | Migration and bulk-fix logic |
