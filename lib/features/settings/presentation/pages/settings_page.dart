@@ -1760,6 +1760,22 @@ class _DataSectionContent extends ConsumerWidget {
               ],
             ),
           ),
+          const SizedBox(height: 16),
+          _buildSectionHeader(context, 'Data Tools'),
+          const SizedBox(height: 8),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.access_time),
+                  title: const Text('Fix Dive Times'),
+                  subtitle: const Text('Adjust times for imported dives'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push('/settings/fix-dive-times'),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
