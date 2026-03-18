@@ -1,10 +1,10 @@
 #include "dive_converter.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 const char* map_event_type(unsigned int type) {
     switch (type) {
@@ -47,16 +47,18 @@ LibdivecomputerPluginParsedDive* convert_parsed_dive(
         snprintf(hex + i * 2, 3, "%02x", dive->fingerprint[i]);
     }
 
-    // Convert datetime to epoch seconds (UTC).
-    struct tm t = {0};
-    t.tm_year = dive->year - 1900;
-    t.tm_mon = dive->month - 1;
-    t.tm_mday = dive->day;
-    t.tm_hour = dive->hour;
-    t.tm_min = dive->minute;
-    t.tm_sec = dive->second;
-    t.tm_isdst = 0;
-    int64_t epoch = (int64_t)timegm(&t);
+    // Pass raw datetime components (wall-clock-as-UTC).
+    int64_t dt_year = (int64_t)dive->year;
+    int64_t dt_month = (int64_t)dive->month;
+    int64_t dt_day = (int64_t)dive->day;
+    int64_t dt_hour = (int64_t)dive->hour;
+    int64_t dt_minute = (int64_t)dive->minute;
+    int64_t dt_second = (int64_t)dive->second;
+
+    // INT32_MIN means "timezone not reported" per libdivecomputer convention.
+    int64_t tz_val = (int64_t)dive->timezone;
+    int64_t* tz_offset =
+        (dive->timezone == INT32_MIN) ? NULL : &tz_val;
 
     // Convert samples (all 14 fields, sentinels -> NULL).
     FlValue* samples = fl_value_new_list();
@@ -232,7 +234,8 @@ LibdivecomputerPluginParsedDive* convert_parsed_dive(
 
     LibdivecomputerPluginParsedDive* result =
         libdivecomputer_plugin_parsed_dive_new(
-            hex, epoch, dive->max_depth, dive->avg_depth,
+            hex, dt_year, dt_month, dt_day, dt_hour, dt_minute, dt_second,
+            tz_offset, dive->max_depth, dive->avg_depth,
             (int64_t)dive->duration, min_temp, max_temp, samples, tanks,
             gas_mixes, events, dive_mode, deco_algorithm, gf_low, gf_high,
             conservatism);

@@ -1,11 +1,10 @@
 #include "dive_converter.h"
 
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
-#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -50,16 +49,19 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
         snprintf(hex + i * 2, 3, "%02x", dive.fingerprint[i]);
     }
 
-    // Convert datetime to epoch seconds (UTC).
-    struct tm t = {};
-    t.tm_year = dive.year - 1900;
-    t.tm_mon = dive.month - 1;
-    t.tm_mday = dive.day;
-    t.tm_hour = dive.hour;
-    t.tm_min = dive.minute;
-    t.tm_sec = dive.second;
-    t.tm_isdst = 0;
-    int64_t epoch = static_cast<int64_t>(_mkgmtime(&t));
+    // Pass raw datetime components (wall-clock-as-UTC).
+    int64_t dt_year = static_cast<int64_t>(dive.year);
+    int64_t dt_month = static_cast<int64_t>(dive.month);
+    int64_t dt_day = static_cast<int64_t>(dive.day);
+    int64_t dt_hour = static_cast<int64_t>(dive.hour);
+    int64_t dt_minute = static_cast<int64_t>(dive.minute);
+    int64_t dt_second = static_cast<int64_t>(dive.second);
+
+    // INT32_MIN means "timezone not reported" per libdivecomputer convention.
+    std::optional<int64_t> tz_offset =
+        (dive.timezone == INT32_MIN)
+            ? std::nullopt
+            : std::optional<int64_t>(static_cast<int64_t>(dive.timezone));
 
     // Convert samples (all 14 fields, sentinels -> nullptr).
     flutter::EncodableList samples;
@@ -238,7 +240,13 @@ ParsedDive ConvertParsedDive(const libdc_parsed_dive_t& dive) {
 
     return ParsedDive(
         std::string(hex),
-        epoch,
+        dt_year,
+        dt_month,
+        dt_day,
+        dt_hour,
+        dt_minute,
+        dt_second,
+        tz_offset ? &*tz_offset : nullptr,
         dive.max_depth,
         dive.avg_depth,
         static_cast<int64_t>(dive.duration),
