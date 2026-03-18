@@ -37,6 +37,9 @@ class SettingsKeys {
   static const String defaultDiveType = 'default_dive_type';
   static const String defaultTankVolume = 'default_tank_volume';
   static const String defaultStartPressure = 'default_start_pressure';
+  static const String defaultTankPreset = 'default_tank_preset';
+  static const String applyDefaultTankToImports =
+      'apply_default_tank_to_imports';
 
   // Decompression & Safety settings
   static const String gfLow = 'gf_low';
@@ -70,6 +73,8 @@ class AppSettings {
   final String defaultDiveType;
   final double defaultTankVolume;
   final int defaultStartPressure;
+  final String? defaultTankPreset;
+  final bool applyDefaultTankToImports;
 
   // Decompression & Safety settings
   /// Gradient Factor Low (0-100, typically 30)
@@ -235,6 +240,8 @@ class AppSettings {
     this.defaultDiveType = 'recreational',
     this.defaultTankVolume = 12.0,
     this.defaultStartPressure = 200,
+    this.defaultTankPreset = 'al80',
+    this.applyDefaultTankToImports = false,
     // Decompression defaults
     this.gfLow = 50,
     this.gfHigh = 85,
@@ -339,6 +346,9 @@ class AppSettings {
     String? defaultDiveType,
     double? defaultTankVolume,
     int? defaultStartPressure,
+    String? defaultTankPreset,
+    bool clearDefaultTankPreset = false,
+    bool? applyDefaultTankToImports,
     int? gfLow,
     int? gfHigh,
     double? ppO2MaxWorking,
@@ -406,6 +416,11 @@ class AppSettings {
       defaultDiveType: defaultDiveType ?? this.defaultDiveType,
       defaultTankVolume: defaultTankVolume ?? this.defaultTankVolume,
       defaultStartPressure: defaultStartPressure ?? this.defaultStartPressure,
+      defaultTankPreset: clearDefaultTankPreset
+          ? null
+          : (defaultTankPreset ?? this.defaultTankPreset),
+      applyDefaultTankToImports:
+          applyDefaultTankToImports ?? this.applyDefaultTankToImports,
       gfLow: gfLow ?? this.gfLow,
       gfHigh: gfHigh ?? this.gfHigh,
       ppO2MaxWorking: ppO2MaxWorking ?? this.ppO2MaxWorking,
@@ -657,6 +672,19 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
 
   Future<void> setDefaultStartPressure(int pressure) async {
     state = state.copyWith(defaultStartPressure: pressure);
+    await _saveSettings();
+  }
+
+  Future<void> setDefaultTankPreset(String? presetName) async {
+    state = state.copyWith(
+      defaultTankPreset: presetName,
+      clearDefaultTankPreset: presetName == null,
+    );
+    await _saveSettings();
+  }
+
+  Future<void> setApplyDefaultTankToImports(bool value) async {
+    state = state.copyWith(applyDefaultTankToImports: value);
     await _saveSettings();
   }
 
