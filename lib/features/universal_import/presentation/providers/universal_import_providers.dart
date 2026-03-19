@@ -650,6 +650,9 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     _ref.invalidate(tagsProvider);
     _ref.invalidate(diveListNotifierProvider);
     _ref.invalidate(paginatedDiveListProvider);
+    _ref.invalidate(diveStatisticsProvider);
+    _ref.invalidate(diveRecordsProvider);
+    _ref.invalidate(allBuddiesWithDiveCountProvider);
   }
 
   /// Reset to initial state.

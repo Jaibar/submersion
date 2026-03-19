@@ -110,6 +110,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       {}; // Track original IDs to detect deletions
   List<EquipmentItem> _selectedEquipment = [];
   List<BuddyWithRole> _selectedBuddies = [];
+  Set<String> _originalBuddyIds = {};
 
   // Conditions fields
   CurrentDirection? _currentDirection;
@@ -467,7 +468,10 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     final repository = ref.read(buddyRepositoryProvider);
     final buddies = await repository.getBuddiesForDive(widget.diveId!);
     if (mounted) {
-      setState(() => _selectedBuddies = buddies);
+      setState(() {
+        _selectedBuddies = buddies;
+        _originalBuddyIds = buddies.map((b) => b.buddy.id).toSet();
+      });
     }
   }
 
@@ -3572,6 +3576,15 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
         await buddyRepository.setBuddiesForDive(savedDiveId, _selectedBuddies);
         // Invalidate the buddies provider so the detail page shows updated data
         ref.invalidate(buddiesForDiveProvider(savedDiveId));
+        // Invalidate providers for all affected buddies (added + removed)
+        final newBuddyIds = _selectedBuddies.map((b) => b.buddy.id).toSet();
+        final affectedBuddyIds = _originalBuddyIds.union(newBuddyIds);
+        for (final buddyId in affectedBuddyIds) {
+          ref.invalidate(buddyStatsProvider(buddyId));
+          ref.invalidate(diveIdsForBuddyProvider(buddyId));
+          ref.invalidate(divesForBuddyProvider(buddyId));
+        }
+        ref.invalidate(allBuddiesWithDiveCountProvider);
       }
 
       // Invalidate course providers if course association changed

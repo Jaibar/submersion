@@ -39,6 +39,7 @@ All v1.5 tasks complete.
 
 - [ ] Side-by-side profile comparison view
 - [ ] Default tank type for new and imported dives
+- [ ] Provide an option to not deduplicate dives downloaded from a computer.
 
 ---
 

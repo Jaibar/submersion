@@ -246,6 +246,8 @@ class BuddyListNotifier extends StateNotifier<AsyncValue<List<Buddy>>> {
 
   Future<void> deleteBuddy(String id) async {
     await _repository.deleteBuddy(id);
+    _ref.invalidate(buddyByIdProvider(id));
+    _ref.invalidate(allBuddiesWithDiveCountProvider);
     await refresh();
   }
 }
