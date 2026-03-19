@@ -3,6 +3,53 @@
 All notable changes to Submersion are documented in this file.
 
 
+## 1.3.4 (2026-03-19)
+
+### Features
+
+- add dive number field to dive edit form
+- add dive number field translations
+- auto-assign dive numbers during dive computer import
+- add diveNumber parameter to importProfile()
+- add translations for default tank preset keys in all locales
+- add default preset indicator and import toggle to Tank Presets page
+- add localization keys for default tank preset feature
+- apply default tank preset fallback in entity importer and providers
+- apply default tank preset in DiveEditPage
+- add import tank defaults utility for per-field fallback
+- add DefaultTankPresetResolver utility
+- persist defaultTankPreset and applyDefaultTankToImports in repository and sync
+- add defaultTankPreset and applyDefaultTankToImports to AppSettings
+- add defaultTankPreset and applyDefaultTankToImports columns to DiverSettings
+
+### Bug Fixes
+
+- pre-populate dive number field with next sequential number
+- use wall-clock-as-UTC convention for Subsurface XML import times
+- Fix dive list sorting.
+- invalidate stale caches for import stats, buddy unlink, and buddy delete.
+- prevent unnecessary recalculation and fix right axis "None" selection
+- clarify default tank UI with description text and better toggle label
+- move setDefaultTankPreset inside context.mounted guard
+- preserve existing startPressure in backfill, set _tanksDirty on load
+- add missing endPressure: 50 in _addTank()
+- create backup directory before copying in DatabaseService.backup()
+
+### Documentation
+
+- add implementation plan for dive number auto-assign and edit
+- address spec review feedback for dive number design
+- add design spec for dive number auto-assignment and manual editing
+- add implementation plan for default tank preset feature
+- add design spec for default tank preset feature
+
+### Chores
+
+- bump version to 1.3.4+79
+- regenerate l10n files after description key addition
+- update pubspec.lock after dependency resolution on new environment
+
+
 ## 1.3.3 (2026-03-18)
 
 ### Features
