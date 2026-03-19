@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart' hide Visibility;
+import 'package:flutter/services.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
@@ -90,6 +91,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
   late TimeOfDay _entryTime;
   DateTime? _exitDate;
   TimeOfDay? _exitTime;
+  final _diveNumberController = TextEditingController();
   final _durationController = TextEditingController();
   final _runtimeController = TextEditingController();
   final _maxDepthController = TextEditingController();
@@ -279,6 +281,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
 
         setState(() {
           _existingDive = dive;
+          _diveNumberController.text = dive.diveNumber?.toString() ?? '';
           // Use entryTime if available, otherwise fall back to dateTime
           final entryDateTime = dive.entryTime ?? dive.dateTime;
           _entryDate = entryDateTime;
@@ -477,6 +480,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
 
   @override
   void dispose() {
+    _diveNumberController.dispose();
     _durationController.dispose();
     _runtimeController.dispose();
     _maxDepthController.dispose();
@@ -519,6 +523,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          _buildDiveNumberField(),
           _buildDateTimeSection(),
           const SizedBox(height: 16),
           _buildSiteSection(),
@@ -751,6 +756,24 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
               label: Text(context.l10n.diveLog_edit_addCustomField),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDiveNumberField() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: SizedBox(
+        width: 160,
+        child: TextFormField(
+          controller: _diveNumberController,
+          decoration: InputDecoration(
+            labelText: context.l10n.diveLog_edit_label_diveNumber,
+            hintText: context.l10n.diveLog_edit_hint_diveNumber,
+          ),
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         ),
       ),
     );
@@ -3417,7 +3440,9 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       final dive = Dive(
         id: widget.diveId ?? '',
         diverId: _existingDive?.diverId, // Preserve diver assignment
-        diveNumber: _existingDive?.diveNumber,
+        diveNumber: _diveNumberController.text.isNotEmpty
+            ? int.parse(_diveNumberController.text)
+            : null,
         dateTime: entryDateTime, // Keep for backward compatibility
         entryTime: entryDateTime,
         exitTime: exitDateTime,
