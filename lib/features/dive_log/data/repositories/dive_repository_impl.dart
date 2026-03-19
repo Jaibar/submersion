@@ -14,6 +14,8 @@ import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_weight.dart'
     as domain;
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/core/constants/sort_options.dart';
+import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart'
     as domain;
@@ -1014,7 +1016,9 @@ class DiveRepository {
     String? diverId,
     DiveFilterState filter = const DiveFilterState(),
     DiveSummaryCursor? cursor,
+    int? offset,
     int limit = 50,
+    SortState<DiveSortField>? sort,
   }) async {
     try {
       return await PerfTimer.measure('getDiveSummaries', () async {
@@ -1026,16 +1030,19 @@ class DiveRepository {
           args.add(Variable(diverId));
         }
 
-        // Cursor condition: rows that come after the cursor in descending order.
-        // Expands tuple comparison (ts, num, id) < (?, ?, ?) for SQLite.
-        if (cursor != null) {
+        // Cursor-based pagination only works with default date sort.
+        // For other sorts, use offset-based pagination instead.
+        final isDateSort = sort == null || sort.field == DiveSortField.date;
+        if (cursor != null && isDateSort) {
+          final cmp = sort?.direction == SortDirection.ascending ? '>' : '<';
+          final cmpNum = sort?.direction == SortDirection.ascending ? '>' : '<';
           whereClauses.add(
             '('
-            'COALESCE(d.entry_time, d.dive_date_time) < ? '
+            'COALESCE(d.entry_time, d.dive_date_time) $cmp ? '
             'OR (COALESCE(d.entry_time, d.dive_date_time) = ? '
-            'AND COALESCE(d.dive_number, 0) < ?) '
+            'AND COALESCE(d.dive_number, 0) $cmpNum ?) '
             'OR (COALESCE(d.entry_time, d.dive_date_time) = ? '
-            'AND COALESCE(d.dive_number, 0) = ? AND d.id < ?)'
+            'AND COALESCE(d.dive_number, 0) = ? AND d.id $cmp ?)'
             ')',
           );
           args.add(Variable(cursor.sortTimestamp));
@@ -1052,6 +1059,12 @@ class DiveRepository {
             ? 'WHERE ${whereClauses.join(' AND ')}'
             : '';
 
+        final orderByClause = _buildSortOrderBy(sort);
+
+        final offsetClause = (!isDateSort && offset != null && offset > 0)
+            ? 'OFFSET $offset'
+            : '';
+
         final sql =
             'SELECT '
             'd.id, d.dive_number, d.dive_date_time, d.entry_time, '
@@ -1064,9 +1077,8 @@ class DiveRepository {
             'FROM dives d '
             'LEFT JOIN dive_sites s ON d.site_id = s.id '
             '$whereClause '
-            'ORDER BY sort_timestamp DESC, '
-            'COALESCE(d.dive_number, 0) DESC, d.id DESC '
-            'LIMIT ?';
+            'ORDER BY $orderByClause '
+            'LIMIT ? $offsetClause';
         args.add(Variable(limit));
 
         final rows = await _db
@@ -1162,6 +1174,36 @@ class DiveRepository {
 
   /// Build SQL WHERE clauses from a [DiveFilterState].
   ///
+  /// Builds the SQL ORDER BY clause from the sort state.
+  ///
+  /// Each sort field maps to a SQL expression with a tiebreaker on
+  /// sort_timestamp DESC and id DESC to ensure stable ordering.
+  String _buildSortOrderBy(SortState<DiveSortField>? sort) {
+    final dir =
+        (sort?.direction ?? SortDirection.descending) == SortDirection.ascending
+        ? 'ASC'
+        : 'DESC';
+    final field = sort?.field ?? DiveSortField.date;
+    // Tiebreaker ensures stable ordering across pages.
+    const tiebreaker = 'sort_timestamp DESC, d.id DESC';
+
+    switch (field) {
+      case DiveSortField.date:
+        return 'sort_timestamp $dir, '
+            'COALESCE(d.dive_number, 0) $dir, d.id $dir';
+      case DiveSortField.site:
+        return 'COALESCE(s.name, \'\') $dir, $tiebreaker';
+      case DiveSortField.depth:
+        return 'COALESCE(d.max_depth, 0) $dir, $tiebreaker';
+      case DiveSortField.duration:
+        return 'COALESCE(d.duration, 0) $dir, $tiebreaker';
+      case DiveSortField.rating:
+        return 'COALESCE(d.rating, 0) $dir, $tiebreaker';
+      case DiveSortField.diveNumber:
+        return 'COALESCE(d.dive_number, 0) $dir, $tiebreaker';
+    }
+  }
+
   /// Translates each active filter field into parameterized SQL.
   /// Junction-table filters (tags, equipment, buddies) use EXISTS subqueries.
   void _buildFilterWhereClauses(

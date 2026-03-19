@@ -391,6 +391,7 @@ class PaginatedDiveListNotifier
   final DiveRepository _repository;
   final Ref _ref;
   String? _currentDiverId;
+  int _currentOffset = 0;
   static const _pageSize = 50;
 
   PaginatedDiveListNotifier(this._repository, this._ref)
@@ -407,29 +408,43 @@ class PaginatedDiveListNotifier
         loadFirstPage();
       }
     });
+    _ref.listen<SortState<DiveSortField>>(diveSortProvider, (previous, next) {
+      if (previous != next) {
+        loadFirstPage();
+      }
+    });
     loadFirstPage();
+  }
+
+  bool get _isDateSort {
+    final sort = _ref.read(diveSortProvider);
+    return sort.field == DiveSortField.date;
   }
 
   Future<void> loadFirstPage() async {
     state = const AsyncValue.loading();
+    _currentOffset = 0;
     try {
       final filter = _ref.read(diveFilterProvider);
+      final sort = _ref.read(diveSortProvider);
       final results = await Future.wait([
         _repository.getDiveSummaries(
           diverId: _currentDiverId,
           filter: filter,
+          sort: sort,
           limit: _pageSize,
         ),
         _repository.getDiveCount(diverId: _currentDiverId, filter: filter),
       ]);
       final dives = results[0] as List<DiveSummary>;
       final totalCount = results[1] as int;
+      _currentOffset = dives.length;
 
       state = AsyncValue.data(
         PaginatedDiveListState(
           dives: dives,
           hasMore: dives.length >= _pageSize,
-          nextCursor: _cursorFromLastDive(dives),
+          nextCursor: _isDateSort ? _cursorFromLastDive(dives) : null,
           totalCount: totalCount,
         ),
       );
@@ -447,19 +462,23 @@ class PaginatedDiveListNotifier
     state = AsyncValue.data(current.copyWith(isLoadingMore: true));
     try {
       final filter = _ref.read(diveFilterProvider);
+      final sort = _ref.read(diveSortProvider);
       final newDives = await _repository.getDiveSummaries(
         diverId: _currentDiverId,
         filter: filter,
-        cursor: current.nextCursor,
+        sort: sort,
+        cursor: _isDateSort ? current.nextCursor : null,
+        offset: _isDateSort ? null : _currentOffset,
         limit: _pageSize,
       );
+      _currentOffset += newDives.length;
 
       state = AsyncValue.data(
         current.copyWith(
           dives: [...current.dives, ...newDives],
           isLoadingMore: false,
           hasMore: newDives.length >= _pageSize,
-          nextCursor: _cursorFromLastDive(newDives),
+          nextCursor: _isDateSort ? _cursorFromLastDive(newDives) : null,
         ),
       );
       // Pre-load downsampled profiles for the new page

@@ -6,7 +6,9 @@
 import 'dart:async' as _i6;
 
 import 'package:mockito/mockito.dart' as _i1;
-import 'package:mockito/src/dummies.dart' as _i10;
+import 'package:mockito/src/dummies.dart' as _i12;
+import 'package:submersion/core/constants/sort_options.dart' as _i11;
+import 'package:submersion/core/models/sort_state.dart' as _i10;
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart'
     as _i3;
 import 'package:submersion/features/dive_log/domain/entities/dive.dart' as _i2;
@@ -225,14 +227,18 @@ class MockDiveRepository extends _i1.Mock implements _i3.DiveRepository {
     String? diverId,
     _i9.DiveFilterState? filter = const _i9.DiveFilterState(),
     _i8.DiveSummaryCursor? cursor,
+    int? offset,
     int? limit = 50,
+    _i10.SortState<_i11.DiveSortField>? sort,
   }) =>
       (super.noSuchMethod(
             Invocation.method(#getDiveSummaries, [], {
               #diverId: diverId,
               #filter: filter,
               #cursor: cursor,
+              #offset: offset,
               #limit: limit,
+              #sort: sort,
             }),
             returnValue: _i6.Future<List<_i8.DiveSummary>>.value(
               <_i8.DiveSummary>[],
@@ -408,7 +414,7 @@ class MockDiveRepository extends _i1.Mock implements _i3.DiveRepository {
               {#actualDateTime: actualDateTime},
             ),
             returnValue: _i6.Future<String>.value(
-              _i10.dummyValue<String>(
+              _i12.dummyValue<String>(
                 this,
                 Invocation.method(
                   #convertPlanToActualDive,

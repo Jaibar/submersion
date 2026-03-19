@@ -6,11 +6,13 @@
 import 'dart:async' as _i5;
 
 import 'package:mockito/mockito.dart' as _i1;
-import 'package:mockito/src/dummies.dart' as _i8;
+import 'package:mockito/src/dummies.dart' as _i10;
+import 'package:submersion/core/constants/sort_options.dart' as _i9;
+import 'package:submersion/core/models/sort_state.dart' as _i8;
 import 'package:submersion/features/dive_import/domain/entities/imported_dive.dart'
-    as _i10;
+    as _i12;
 import 'package:submersion/features/dive_import/domain/services/health_import_service.dart'
-    as _i9;
+    as _i11;
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart'
     as _i3;
 import 'package:submersion/features/dive_log/domain/entities/dive.dart' as _i2;
@@ -198,14 +200,18 @@ class MockDiveRepository extends _i1.Mock implements _i3.DiveRepository {
     String? diverId,
     _i7.DiveFilterState? filter = const _i7.DiveFilterState(),
     _i6.DiveSummaryCursor? cursor,
+    int? offset,
     int? limit = 50,
+    _i8.SortState<_i9.DiveSortField>? sort,
   }) =>
       (super.noSuchMethod(
             Invocation.method(#getDiveSummaries, [], {
               #diverId: diverId,
               #filter: filter,
               #cursor: cursor,
+              #offset: offset,
               #limit: limit,
+              #sort: sort,
             }),
             returnValue: _i5.Future<List<_i6.DiveSummary>>.value(
               <_i6.DiveSummary>[],
@@ -381,7 +387,7 @@ class MockDiveRepository extends _i1.Mock implements _i3.DiveRepository {
               {#actualDateTime: actualDateTime},
             ),
             returnValue: _i5.Future<String>.value(
-              _i8.dummyValue<String>(
+              _i10.dummyValue<String>(
                 this,
                 Invocation.method(
                   #convertPlanToActualDive,
@@ -538,18 +544,18 @@ class MockDiveRepository extends _i1.Mock implements _i3.DiveRepository {
 ///
 /// See the documentation for Mockito's code generation for more information.
 class MockHealthImportService extends _i1.Mock
-    implements _i9.HealthImportService {
+    implements _i11.HealthImportService {
   MockHealthImportService() {
     _i1.throwOnMissingStub(this);
   }
 
   @override
-  _i10.ImportSource get source =>
+  _i12.ImportSource get source =>
       (super.noSuchMethod(
             Invocation.getter(#source),
-            returnValue: _i10.ImportSource.appleWatch,
+            returnValue: _i12.ImportSource.appleWatch,
           )
-          as _i10.ImportSource);
+          as _i12.ImportSource);
 
   @override
   _i5.Future<bool> isAvailable() =>
@@ -576,7 +582,7 @@ class MockHealthImportService extends _i1.Mock
           as _i5.Future<bool>);
 
   @override
-  _i5.Future<List<_i10.ImportedDive>> fetchDives({
+  _i5.Future<List<_i12.ImportedDive>> fetchDives({
     required DateTime? startDate,
     required DateTime? endDate,
   }) =>
@@ -585,21 +591,21 @@ class MockHealthImportService extends _i1.Mock
               #startDate: startDate,
               #endDate: endDate,
             }),
-            returnValue: _i5.Future<List<_i10.ImportedDive>>.value(
-              <_i10.ImportedDive>[],
+            returnValue: _i5.Future<List<_i12.ImportedDive>>.value(
+              <_i12.ImportedDive>[],
             ),
           )
-          as _i5.Future<List<_i10.ImportedDive>>);
+          as _i5.Future<List<_i12.ImportedDive>>);
 
   @override
-  _i5.Future<List<_i10.ImportedProfileSample>> fetchDiveProfile(
+  _i5.Future<List<_i12.ImportedProfileSample>> fetchDiveProfile(
     String? sourceId,
   ) =>
       (super.noSuchMethod(
             Invocation.method(#fetchDiveProfile, [sourceId]),
-            returnValue: _i5.Future<List<_i10.ImportedProfileSample>>.value(
-              <_i10.ImportedProfileSample>[],
+            returnValue: _i5.Future<List<_i12.ImportedProfileSample>>.value(
+              <_i12.ImportedProfileSample>[],
             ),
           )
-          as _i5.Future<List<_i10.ImportedProfileSample>>);
+          as _i5.Future<List<_i12.ImportedProfileSample>>);
 }

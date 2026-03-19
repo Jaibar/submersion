@@ -6,8 +6,10 @@
 import 'dart:async' as _i17;
 
 import 'package:mockito/mockito.dart' as _i1;
-import 'package:mockito/src/dummies.dart' as _i29;
+import 'package:mockito/src/dummies.dart' as _i31;
 import 'package:submersion/core/constants/enums.dart' as _i20;
+import 'package:submersion/core/constants/sort_options.dart' as _i30;
+import 'package:submersion/core/models/sort_state.dart' as _i29;
 import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart'
     as _i6;
 import 'package:submersion/features/buddies/domain/entities/buddy.dart' as _i5;
@@ -16,7 +18,7 @@ import 'package:submersion/features/certifications/data/repositories/certificati
 import 'package:submersion/features/certifications/domain/entities/certification.dart'
     as _i8;
 import 'package:submersion/features/courses/data/repositories/course_repository.dart'
-    as _i31;
+    as _i33;
 import 'package:submersion/features/courses/domain/entities/course.dart'
     as _i15;
 import 'package:submersion/features/dive_centers/data/repositories/dive_center_repository.dart'
@@ -26,7 +28,7 @@ import 'package:submersion/features/dive_centers/domain/entities/dive_center.dar
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart'
     as _i13;
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart'
-    as _i30;
+    as _i32;
 import 'package:submersion/features/dive_log/domain/entities/dive.dart' as _i12;
 import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart'
     as _i27;
@@ -1545,14 +1547,18 @@ class MockDiveRepository extends _i1.Mock implements _i13.DiveRepository {
     String? diverId,
     _i28.DiveFilterState? filter = const _i28.DiveFilterState(),
     _i27.DiveSummaryCursor? cursor,
+    int? offset,
     int? limit = 50,
+    _i29.SortState<_i30.DiveSortField>? sort,
   }) =>
       (super.noSuchMethod(
             Invocation.method(#getDiveSummaries, [], {
               #diverId: diverId,
               #filter: filter,
               #cursor: cursor,
+              #offset: offset,
               #limit: limit,
+              #sort: sort,
             }),
             returnValue: _i17.Future<List<_i27.DiveSummary>>.value(
               <_i27.DiveSummary>[],
@@ -1728,7 +1734,7 @@ class MockDiveRepository extends _i1.Mock implements _i13.DiveRepository {
               {#actualDateTime: actualDateTime},
             ),
             returnValue: _i17.Future<String>.value(
-              _i29.dummyValue<String>(
+              _i31.dummyValue<String>(
                 this,
                 Invocation.method(
                   #convertPlanToActualDive,
@@ -1885,7 +1891,7 @@ class MockDiveRepository extends _i1.Mock implements _i13.DiveRepository {
 ///
 /// See the documentation for Mockito's code generation for more information.
 class MockTankPressureRepository extends _i1.Mock
-    implements _i30.TankPressureRepository {
+    implements _i32.TankPressureRepository {
   MockTankPressureRepository() {
     _i1.throwOnMissingStub(this);
   }
@@ -1960,7 +1966,7 @@ class MockTankPressureRepository extends _i1.Mock
 /// A class which mocks [CourseRepository].
 ///
 /// See the documentation for Mockito's code generation for more information.
-class MockCourseRepository extends _i1.Mock implements _i31.CourseRepository {
+class MockCourseRepository extends _i1.Mock implements _i33.CourseRepository {
   MockCourseRepository() {
     _i1.throwOnMissingStub(this);
   }
