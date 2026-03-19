@@ -24,10 +24,10 @@ A junction table storing per-computer metadata snapshots for each dive. Only pop
 |--------|------|-------------|
 | `id` | text (PK) | UUID |
 | `diveId` | text (FK -> dives) | Cascade delete |
-| `computerId` | text (nullable) | References dive computer identifier |
+| `computerId` | text (nullable, FK -> dive_computers) | References `DiveComputers.id`. Nullable for imports where no paired device exists in the app. |
 | `isPrimary` | boolean | Which computer's data populates the `dives` record |
-| `computerModel` | text (nullable) | e.g., "Shearwater Perdix" |
-| `computerSerial` | text (nullable) | Serial number |
+| `computerModel` | text (nullable) | e.g., "Shearwater Perdix". Denormalized snapshot -- preserved even if the `DiveComputers` record is later deleted or modified. Also serves imports where no `DiveComputers` record exists. |
+| `computerSerial` | text (nullable) | Serial number. Denormalized snapshot, same rationale as `computerModel`. |
 | `sourceFormat` | text (nullable) | Import format (UDDF, FIT, CSV, etc.) |
 | `maxDepth` | real (nullable) | This computer's max depth reading |
 | `avgDepth` | real (nullable) | Average depth |
@@ -97,15 +97,16 @@ When a match is detected with `likely` or `exact` confidence, the "Consolidate a
 A "Merge with another dive" action available from the dive detail screen overflow menu:
 
 1. User taps the action on a dive
-2. App shows a filtered list of candidate dives (sorted by date proximity, excluding already-merged computers)
+2. App shows a filtered list of candidate dives within the same calendar day, sorted by time proximity, excluding already-merged computers
 3. User selects the dive to merge
 4. Confirmation screen shows both dives side-by-side: "Keep [Dive A] as primary, add [Dive B]'s computer data?"
 5. On confirm:
    - Dive B's profile data gets re-parented to Dive A (update `diveId` on its `dive_profiles` rows, set `isPrimary = false`)
    - A `dive_computer_data` row is created from Dive B's metadata
    - Back-fill primary computer's `dive_computer_data` row if needed
-   - Dive B is deleted (its tanks, equipment links, etc. are discarded since they're redundant)
-6. The merge is reversible via an "Unlink computer" action
+   - The confirmation screen warns the user what data from Dive B will be discarded (tanks, equipment links, notes, buddy, rating, etc.). The user must acknowledge before proceeding.
+   - Dive B is deleted after acknowledgment
+6. The merge is reversible via an "Unlink computer" action (though user-entered contextual data from the deleted Dive B is not recoverable)
 
 ## Profile Visualization
 
@@ -123,7 +124,7 @@ The two controls compose: if Ceiling is toggled on and both computers are checke
 
 - **Primary computer**: Solid line, full opacity
 - **Secondary computer(s)**: Dashed line
-- **Color palette**: Cyan (primary), orange, green, magenta (supports up to 4 computers)
+- **Color palette**: Cyan (primary), orange, green, magenta (supports up to 4 computers). If a fifth+ computer is added, colors cycle from the beginning with reduced opacity to differentiate.
 - **Max depth markers**: Shown per visible computer in its assigned color
 - **Timestamp cursor**: Shows readings from all visible computers simultaneously
 
@@ -202,7 +203,7 @@ When a user unlinks a secondary computer from a consolidated dive:
 2. The detached computer's `dive_profiles` rows get their `diveId` updated to the new dive
 3. The `dive_computer_data` row is moved to the new dive and marked `isPrimary = true`
 4. If the unlinked computer was the primary, the next computer in the list is auto-promoted to primary on the original dive, and its metadata repopulates the `dives` record
-5. If only one computer remains on the original dive after unlinking, the `dive_computer_data` row is kept for consistency
+5. If only one computer remains on the original dive after unlinking, the remaining `dive_computer_data` row is cleaned up (deleted), restoring the dive to standard single-computer behavior where the `dives` table is the sole source of metadata
 
 ### Edge Cases
 
