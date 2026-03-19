@@ -212,6 +212,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     } else {
       // For new dives, capture GPS in the background to suggest nearby sites
       _captureLocationForNearby();
+      _suggestNextDiveNumber();
     }
   }
 
@@ -258,6 +259,20 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
           }
         });
       }
+    }
+  }
+
+  Future<void> _suggestNextDiveNumber() async {
+    try {
+      final repository = ref.read(diveRepositoryProvider);
+      final nextNumber = await repository.getNextDiveNumber();
+      if (mounted && _diveNumberController.text.isEmpty) {
+        setState(() {
+          _diveNumberController.text = nextNumber.toString();
+        });
+      }
+    } catch (_) {
+      // Non-critical — field remains blank, auto-assigned on save
     }
   }
 
