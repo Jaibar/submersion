@@ -133,6 +133,133 @@ class AppearancePage extends ConsumerWidget {
                   .setShowMapBackgroundOnDiveCards(value);
             },
           ),
+          const Divider(),
+          _buildSectionHeader(context, 'Dive Sites'),
+          ListTile(
+            leading: const Icon(Icons.view_list),
+            title: const Text('Site List View'),
+            subtitle: const Text('Default layout for the site list'),
+            trailing: DropdownButton<ListViewMode>(
+              value: settings.siteListViewMode,
+              underline: const SizedBox(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(settingsProvider.notifier)
+                      .setSiteListViewMode(value);
+                  ref.read(siteListViewModeProvider.notifier).state = value;
+                }
+              },
+              items: ListViewMode.values.map((mode) {
+                return DropdownMenuItem(
+                  value: mode,
+                  child: Text(_getViewModeDisplayName(mode)),
+                );
+              }).toList(),
+            ),
+          ),
+          const Divider(),
+          _buildSectionHeader(context, 'Trips'),
+          ListTile(
+            leading: const Icon(Icons.view_list),
+            title: const Text('Trip List View'),
+            subtitle: const Text('Default layout for the trip list'),
+            trailing: DropdownButton<ListViewMode>(
+              value: settings.tripListViewMode,
+              underline: const SizedBox(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(settingsProvider.notifier)
+                      .setTripListViewMode(value);
+                  ref.read(tripListViewModeProvider.notifier).state = value;
+                }
+              },
+              items: ListViewMode.values.map((mode) {
+                return DropdownMenuItem(
+                  value: mode,
+                  child: Text(_getViewModeDisplayName(mode)),
+                );
+              }).toList(),
+            ),
+          ),
+          const Divider(),
+          _buildSectionHeader(context, 'Equipment'),
+          ListTile(
+            leading: const Icon(Icons.view_list),
+            title: const Text('Equipment List View'),
+            subtitle: const Text('Default layout for the equipment list'),
+            trailing: DropdownButton<ListViewMode>(
+              value: settings.equipmentListViewMode,
+              underline: const SizedBox(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(settingsProvider.notifier)
+                      .setEquipmentListViewMode(value);
+                  ref.read(equipmentListViewModeProvider.notifier).state =
+                      value;
+                }
+              },
+              items: [ListViewMode.detailed, ListViewMode.dense].map((mode) {
+                return DropdownMenuItem(
+                  value: mode,
+                  child: Text(_getViewModeDisplayName(mode)),
+                );
+              }).toList(),
+            ),
+          ),
+          const Divider(),
+          _buildSectionHeader(context, 'Buddies'),
+          ListTile(
+            leading: const Icon(Icons.view_list),
+            title: const Text('Buddy List View'),
+            subtitle: const Text('Default layout for the buddy list'),
+            trailing: DropdownButton<ListViewMode>(
+              value: settings.buddyListViewMode,
+              underline: const SizedBox(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(settingsProvider.notifier)
+                      .setBuddyListViewMode(value);
+                  ref.read(buddyListViewModeProvider.notifier).state = value;
+                }
+              },
+              items: [ListViewMode.detailed, ListViewMode.dense].map((mode) {
+                return DropdownMenuItem(
+                  value: mode,
+                  child: Text(_getViewModeDisplayName(mode)),
+                );
+              }).toList(),
+            ),
+          ),
+          const Divider(),
+          _buildSectionHeader(context, 'Dive Centers'),
+          ListTile(
+            leading: const Icon(Icons.view_list),
+            title: const Text('Dive Center List View'),
+            subtitle: const Text('Default layout for the dive center list'),
+            trailing: DropdownButton<ListViewMode>(
+              value: settings.diveCenterListViewMode,
+              underline: const SizedBox(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(settingsProvider.notifier)
+                      .setDiveCenterListViewMode(value);
+                  ref.read(diveCenterListViewModeProvider.notifier).state =
+                      value;
+                }
+              },
+              items: ListViewMode.values.map((mode) {
+                return DropdownMenuItem(
+                  value: mode,
+                  child: Text(_getViewModeDisplayName(mode)),
+                );
+              }).toList(),
+            ),
+          ),
           const SizedBox(height: 8),
           _buildSectionHeader(
             context,
