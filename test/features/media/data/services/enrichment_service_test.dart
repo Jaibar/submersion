@@ -298,6 +298,63 @@ void main() {
       });
     });
 
+    group('calculateEnrichment with wall-clock-as-UTC dive times', () {
+      // In production, diveStartTime is wall-clock-as-UTC (isUtc: true)
+      // while photoTime from EXIF/gallery is local (isUtc: false).
+      // The service must handle this mismatch correctly.
+
+      test(
+        'calculates correct elapsed seconds with UTC start and local photo',
+        () {
+          final utcStart = DateTime.utc(2024, 1, 15, 10, 0, 0);
+          final profile = [
+            const DiveProfilePoint(timestamp: 0, depth: 0.0),
+            const DiveProfilePoint(
+              timestamp: 300,
+              depth: 20.0,
+              temperature: 18.0,
+            ),
+          ];
+
+          // Photo 2 minutes into dive, but as local DateTime
+          final localPhoto = DateTime(2024, 1, 15, 10, 2, 0);
+          final result = service.calculateEnrichment(
+            profile: profile,
+            diveStartTime: utcStart,
+            photoTime: localPhoto,
+          );
+
+          // Should be 120 seconds regardless of timezone offset
+          expect(result.elapsedSeconds, 120);
+        },
+      );
+
+      test('finds exact match with UTC start and local photo', () {
+        final utcStart = DateTime.utc(2024, 1, 15, 10, 0, 0);
+        final profile = [
+          const DiveProfilePoint(timestamp: 0, depth: 0.0),
+          const DiveProfilePoint(timestamp: 60, depth: 10.0, temperature: 22.0),
+          const DiveProfilePoint(
+            timestamp: 120,
+            depth: 18.0,
+            temperature: 20.0,
+          ),
+        ];
+
+        // Photo at ~60 seconds into dive (local time)
+        final localPhoto = DateTime(2024, 1, 15, 10, 1, 5);
+        final result = service.calculateEnrichment(
+          profile: profile,
+          diveStartTime: utcStart,
+          photoTime: localPhoto,
+        );
+
+        expect(result.matchConfidence, MatchConfidence.exact);
+        expect(result.depthMeters, 10.0);
+        expect(result.elapsedSeconds, 65);
+      });
+    });
+
     group('EnrichmentResult', () {
       test('creates result with all fields', () {
         const result = EnrichmentResult(

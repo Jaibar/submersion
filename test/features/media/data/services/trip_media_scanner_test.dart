@@ -194,6 +194,98 @@ void main() {
       });
     });
 
+    group('matchPhotoToDive with wall-clock-as-UTC dive times', () {
+      // In production, dive times are stored as wall-clock-as-UTC:
+      // a dive at 10:00 AM local is DateTime.utc(2024, 1, 15, 10, 0).
+      // Photo times from photo_manager are local DateTime objects:
+      // a photo at 10:30 AM local is DateTime(2024, 1, 15, 10, 30).
+      // The matching must compare wall-clock components, not raw epochs.
+
+      test(
+        'matches local photo time to UTC dive time with same wall-clock',
+        () {
+          final dive = Dive(
+            id: 'dive-1',
+            dateTime: DateTime.utc(2024, 1, 15, 10, 0),
+            entryTime: DateTime.utc(2024, 1, 15, 10, 0),
+            exitTime: DateTime.utc(2024, 1, 15, 11, 0),
+            duration: const Duration(minutes: 60),
+          );
+
+          // Photo taken at 10:30 AM local (same wall-clock window as dive)
+          final photoTime = DateTime(2024, 1, 15, 10, 30);
+          final result = TripMediaScanner.matchPhotoToDive(photoTime, [dive]);
+
+          expect(result, equals(dive));
+        },
+      );
+
+      test('matches local photo in buffer zone before UTC dive entry', () {
+        final dive = Dive(
+          id: 'dive-1',
+          dateTime: DateTime.utc(2024, 1, 15, 10, 0),
+          entryTime: DateTime.utc(2024, 1, 15, 10, 0),
+          exitTime: DateTime.utc(2024, 1, 15, 11, 0),
+          duration: const Duration(minutes: 60),
+        );
+
+        // 20 minutes before entry in local time
+        final photoTime = DateTime(2024, 1, 15, 9, 40);
+        final result = TripMediaScanner.matchPhotoToDive(photoTime, [
+          dive,
+        ], bufferMinutes: 30);
+
+        expect(result, equals(dive));
+      });
+
+      test('matches local photo in buffer zone after UTC dive exit', () {
+        final dive = Dive(
+          id: 'dive-1',
+          dateTime: DateTime.utc(2024, 1, 15, 10, 0),
+          entryTime: DateTime.utc(2024, 1, 15, 10, 0),
+          exitTime: DateTime.utc(2024, 1, 15, 11, 0),
+          duration: const Duration(minutes: 60),
+        );
+
+        // 15 minutes after exit in local time
+        final photoTime = DateTime(2024, 1, 15, 11, 15);
+        final result = TripMediaScanner.matchPhotoToDive(photoTime, [
+          dive,
+        ], bufferMinutes: 30);
+
+        expect(result, equals(dive));
+      });
+
+      test('rejects local photo outside buffer of UTC dive', () {
+        final dive = Dive(
+          id: 'dive-1',
+          dateTime: DateTime.utc(2024, 1, 15, 10, 0),
+          entryTime: DateTime.utc(2024, 1, 15, 10, 0),
+          exitTime: DateTime.utc(2024, 1, 15, 11, 0),
+          duration: const Duration(minutes: 60),
+        );
+
+        // 4 hours later in local time
+        final photoTime = DateTime(2024, 1, 15, 15, 0);
+        final result = TripMediaScanner.matchPhotoToDive(photoTime, [dive]);
+
+        expect(result, isNull);
+      });
+
+      test('uses dateTime + duration fallback with mixed UTC/local', () {
+        final dive = Dive(
+          id: 'dive-1',
+          dateTime: DateTime.utc(2024, 1, 15, 10, 0),
+          duration: const Duration(minutes: 60),
+        );
+
+        final photoTime = DateTime(2024, 1, 15, 10, 30);
+        final result = TripMediaScanner.matchPhotoToDive(photoTime, [dive]);
+
+        expect(result, equals(dive));
+      });
+    });
+
     group('ScanResult', () {
       test('totalMatchedPhotos returns sum of all matched photos', () {
         final dive1 = Dive(

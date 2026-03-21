@@ -1,6 +1,7 @@
 import 'package:equatable/equatable.dart';
 
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
 
 /// Result of enriching a media item with dive profile data.
@@ -71,7 +72,13 @@ class EnrichmentService {
     required DateTime diveStartTime,
     required DateTime photoTime,
   }) {
-    final elapsedSeconds = photoTime.difference(diveStartTime).inSeconds;
+    // Normalise both times to wall-clock-as-UTC so the difference calculation
+    // uses matching epoch values regardless of the isUtc flags on inputs.
+    final normalizedPhoto = TripMediaScanner.toWallClockUtc(photoTime);
+    final normalizedStart = TripMediaScanner.toWallClockUtc(diveStartTime);
+    final elapsedSeconds = normalizedPhoto
+        .difference(normalizedStart)
+        .inSeconds;
 
     // Handle empty profile
     if (profile.isEmpty) {

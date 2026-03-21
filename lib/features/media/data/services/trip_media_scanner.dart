@@ -43,6 +43,12 @@ class ScanResult {
 /// - Fetching photos within a trip date range
 /// - Matching photos to dives based on timestamps
 /// - Filtering out already linked photos
+///
+/// Time convention: Dive times use wall-clock-as-UTC (e.g. a 10:00 AM local
+/// dive is stored as DateTime.utc(_, _, _, 10, 0)). Photo times from the
+/// device gallery are local DateTimes. All comparisons normalise both sides
+/// to wall-clock-as-UTC so that only the displayed hour/minute matter, not
+/// the underlying epoch.
 class TripMediaScanner {
   /// Default buffer time in minutes before/after dive boundaries.
   static const int defaultBufferMinutes = 30;
@@ -68,22 +74,29 @@ class TripMediaScanner {
       return null;
     }
 
+    // Normalise photo time to wall-clock-as-UTC so epoch comparisons
+    // work correctly against dive times (which are wall-clock-as-UTC).
+    final normalizedPhotoTime = toWallClockUtc(photoTime);
+
     final bufferDuration = Duration(minutes: bufferMinutes);
     Dive? bestMatch;
     Duration? bestDistance;
     bool bestIsExact = false;
 
     for (final dive in dives) {
-      final (entryTime, exitTime) = _getDiveBounds(dive);
+      final (rawEntry, rawExit) = _getDiveBounds(dive);
+      final entryTime = toWallClockUtc(rawEntry);
+      final exitTime = toWallClockUtc(rawExit);
 
       // Check if photo is during the dive (exact match)
       final isDuring =
-          !photoTime.isBefore(entryTime) && !photoTime.isAfter(exitTime);
+          !normalizedPhotoTime.isBefore(entryTime) &&
+          !normalizedPhotoTime.isAfter(exitTime);
 
       if (isDuring) {
         // Calculate distance to nearest boundary for ranking
-        final distanceToEntry = photoTime.difference(entryTime).abs();
-        final distanceToExit = exitTime.difference(photoTime).abs();
+        final distanceToEntry = normalizedPhotoTime.difference(entryTime).abs();
+        final distanceToExit = exitTime.difference(normalizedPhotoTime).abs();
         final distance = distanceToEntry < distanceToExit
             ? distanceToEntry
             : distanceToExit;
@@ -104,10 +117,11 @@ class TripMediaScanner {
       // Check if photo is within buffer zone before entry
       final bufferedEntry = entryTime.subtract(bufferDuration);
       final isBeforeBuffer =
-          !photoTime.isBefore(bufferedEntry) && photoTime.isBefore(entryTime);
+          !normalizedPhotoTime.isBefore(bufferedEntry) &&
+          normalizedPhotoTime.isBefore(entryTime);
 
       if (isBeforeBuffer) {
-        final distance = entryTime.difference(photoTime);
+        final distance = entryTime.difference(normalizedPhotoTime);
         if (bestMatch == null || distance < bestDistance!) {
           bestMatch = dive;
           bestDistance = distance;
@@ -118,10 +132,11 @@ class TripMediaScanner {
       // Check if photo is within buffer zone after exit
       final bufferedExit = exitTime.add(bufferDuration);
       final isAfterBuffer =
-          photoTime.isAfter(exitTime) && !photoTime.isAfter(bufferedExit);
+          normalizedPhotoTime.isAfter(exitTime) &&
+          !normalizedPhotoTime.isAfter(bufferedExit);
 
       if (isAfterBuffer) {
-        final distance = photoTime.difference(exitTime);
+        final distance = normalizedPhotoTime.difference(exitTime);
         if (bestMatch == null || distance < bestDistance!) {
           bestMatch = dive;
           bestDistance = distance;
@@ -158,10 +173,11 @@ class TripMediaScanner {
       return null;
     }
 
-    // Fetch photos within trip date range
+    // Convert trip dates from wall-clock-as-UTC to local for photo_manager,
+    // which filters by local device time.
     final assets = await photoPickerService.getAssetsInDateRange(
-      tripStartDate,
-      tripEndDate,
+      wallClockUtcToLocal(tripStartDate),
+      wallClockUtcToLocal(tripEndDate),
     );
 
     // Initialize result structures
@@ -221,9 +237,11 @@ class TripMediaScanner {
     final rangeStart = entryTime.subtract(bufferDuration);
     final rangeEnd = exitTime.add(bufferDuration);
 
+    // Convert from wall-clock-as-UTC to local for photo_manager,
+    // which filters by local device time.
     final assets = await photoPickerService.getAssetsInDateRange(
-      rangeStart,
-      rangeEnd,
+      wallClockUtcToLocal(rangeStart),
+      wallClockUtcToLocal(rangeEnd),
     );
 
     return assets
@@ -242,5 +260,43 @@ class TripMediaScanner {
             ? dive.dateTime.add(dive.duration!)
             : dive.dateTime.add(const Duration(minutes: 60)));
     return (entryTime, exitTime);
+  }
+
+  /// Convert a local [DateTime] to wall-clock-as-UTC by preserving the
+  /// year/month/day/hour/minute/second components and setting isUtc = true.
+  ///
+  /// If the value is already UTC it is returned unchanged.
+  /// This is used to normalise photo timestamps (local) so they can be
+  /// compared against dive times (wall-clock-as-UTC).
+  static DateTime toWallClockUtc(DateTime dt) {
+    if (dt.isUtc) return dt;
+    return DateTime.utc(
+      dt.year,
+      dt.month,
+      dt.day,
+      dt.hour,
+      dt.minute,
+      dt.second,
+      dt.millisecond,
+    );
+  }
+
+  /// Convert a wall-clock-as-UTC [DateTime] to a local [DateTime] by
+  /// preserving the year/month/day/hour/minute/second components.
+  ///
+  /// If the value is already local it is returned unchanged.
+  /// This is used when passing dive time bounds to the photo gallery API,
+  /// which expects local DateTimes.
+  static DateTime wallClockUtcToLocal(DateTime dt) {
+    if (!dt.isUtc) return dt;
+    return DateTime(
+      dt.year,
+      dt.month,
+      dt.day,
+      dt.hour,
+      dt.minute,
+      dt.second,
+      dt.millisecond,
+    );
   }
 }
