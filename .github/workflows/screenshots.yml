@@ -21,6 +21,9 @@ name: Capture & Upload Screenshots
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: screenshots
   cancel-in-progress: true

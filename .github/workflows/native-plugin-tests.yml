@@ -15,6 +15,9 @@ on:
       - 'packages/libdivecomputer_plugin/**'
       - '.github/workflows/native-plugin-tests.yml'
 
+permissions:
+  contents: read
+
 concurrency:
   group: native-plugin-${{ github.ref }}
   cancel-in-progress: true
