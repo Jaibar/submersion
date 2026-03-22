@@ -461,6 +461,9 @@ class PlanResult extends Equatable {
 
 /// State of a dive plan being edited.
 class DivePlanState extends Equatable {
+  /// Default reserve pressure in bar.
+  static const double kDefaultReservePressureBar = 50;
+
   /// Unique ID for this plan.
   final String id;
 
@@ -494,6 +497,9 @@ class DivePlanState extends Equatable {
   /// Altitude above sea level in meters (for altitude diving).
   final double? altitude;
 
+  /// Reserve pressure in bar.
+  final double reservePressure;
+
   /// Notes for the plan.
   final String notes;
 
@@ -518,6 +524,7 @@ class DivePlanState extends Equatable {
     this.initialTissueState,
     this.siteId,
     this.altitude,
+    this.reservePressure = kDefaultReservePressureBar,
     this.notes = '',
     this.isDirty = false,
     required this.createdAt,
@@ -564,6 +571,7 @@ class DivePlanState extends Equatable {
     List<TissueCompartment>? initialTissueState,
     String? siteId,
     double? altitude,
+    double? reservePressure,
     String? notes,
     bool? isDirty,
     DateTime? createdAt,
@@ -589,6 +597,7 @@ class DivePlanState extends Equatable {
           : (initialTissueState ?? this.initialTissueState),
       siteId: clearSiteId ? null : (siteId ?? this.siteId),
       altitude: clearAltitude ? null : (altitude ?? this.altitude),
+      reservePressure: reservePressure ?? this.reservePressure,
       notes: notes ?? this.notes,
       isDirty: isDirty ?? this.isDirty,
       createdAt: createdAt ?? this.createdAt,
@@ -609,6 +618,7 @@ class DivePlanState extends Equatable {
     initialTissueState,
     siteId,
     altitude,
+    reservePressure,
     notes,
     isDirty,
     createdAt,

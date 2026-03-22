@@ -1,6 +1,7 @@
 import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -38,16 +39,24 @@ final planCalculatorServiceProvider = Provider<PlanCalculatorService>((ref) {
 /// StateNotifier for managing dive plan editing state.
 class DivePlanNotifier extends StateNotifier<DivePlanState> {
   final PlanCalculatorService _calculator;
+  final double _defaultReservePressure;
 
-  DivePlanNotifier(this._calculator) : super(_createInitialState());
+  DivePlanNotifier(
+    this._calculator, {
+    double reservePressure = DivePlanState.kDefaultReservePressureBar,
+  }) : _defaultReservePressure = reservePressure,
+       super(_createInitialState(reservePressure: reservePressure));
 
-  static DivePlanState _createInitialState() {
+  static DivePlanState _createInitialState({
+    double reservePressure = DivePlanState.kDefaultReservePressureBar,
+  }) {
     final now = DateTime.now();
     return DivePlanState(
       id: _uuid.v4(),
       name: 'New Dive Plan',
       segments: [],
       tanks: [_createDefaultTank()],
+      reservePressure: reservePressure,
       createdAt: now,
       updatedAt: now,
     );
@@ -72,7 +81,7 @@ class DivePlanNotifier extends StateNotifier<DivePlanState> {
 
   /// Reset to a new empty plan.
   void newPlan() {
-    state = _createInitialState();
+    state = _createInitialState(reservePressure: _defaultReservePressure);
   }
 
   /// Load an existing plan for editing.
@@ -282,6 +291,15 @@ class DivePlanNotifier extends StateNotifier<DivePlanState> {
     );
   }
 
+  /// Update reserve pressure in bar.
+  void updateReservePressure(double reservePressure) {
+    state = state.copyWith(
+      reservePressure: reservePressure,
+      isDirty: true,
+      updatedAt: DateTime.now(),
+    );
+  }
+
   // --------------------------------------------------------------------------
   // Repetitive Dive Support
   // --------------------------------------------------------------------------
@@ -365,7 +383,12 @@ class DivePlanNotifier extends StateNotifier<DivePlanState> {
 final divePlanNotifierProvider =
     StateNotifierProvider<DivePlanNotifier, DivePlanState>((ref) {
       final calculator = ref.watch(planCalculatorServiceProvider);
-      return DivePlanNotifier(calculator);
+      final pressureUnit = ref.read(pressureUnitProvider);
+      // Default reserve: 50 bar for metric, 500 psi (~34.47 bar) for imperial
+      final reservePressure = pressureUnit == PressureUnit.psi
+          ? PressureUnit.psi.convert(500, PressureUnit.bar)
+          : DivePlanState.kDefaultReservePressureBar;
+      return DivePlanNotifier(calculator, reservePressure: reservePressure);
     });
 
 // ============================================================================
@@ -387,6 +410,7 @@ final planResultsProvider = Provider<PlanResult>((ref) {
     segments: state.segments,
     tanks: state.tanks,
     sacRate: state.sacRate,
+    reservePressure: state.reservePressure,
     initialTissueState: state.initialTissueState,
   );
 });

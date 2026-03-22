@@ -64,8 +64,13 @@ class GasResultsPanel extends ConsumerWidget {
               )
             else
               ...results.gasConsumptions.map(
-                (consumption) =>
-                    _GasConsumptionCard(consumption: consumption, units: units),
+                (consumption) => _GasConsumptionCard(
+                  consumption: consumption,
+                  reservePressure: ref
+                      .watch(divePlanNotifierProvider)
+                      .reservePressure,
+                  units: units,
+                ),
               ),
           ],
         ),
@@ -76,9 +81,14 @@ class GasResultsPanel extends ConsumerWidget {
 
 class _GasConsumptionCard extends StatelessWidget {
   final GasConsumption consumption;
+  final double reservePressure;
   final UnitFormatter units;
 
-  const _GasConsumptionCard({required this.consumption, required this.units});
+  const _GasConsumptionCard({
+    required this.consumption,
+    required this.reservePressure,
+    required this.units,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -239,9 +249,7 @@ class _GasConsumptionCard extends StatelessWidget {
                   const SizedBox(width: 4),
                   Text(
                     context.l10n.divePlanner_warning_belowMinReserve(
-                      units.formatPressure(
-                        consumption.minGasReserve?.toDouble(),
-                      ),
+                      units.formatPressure(reservePressure),
                     ),
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.error,

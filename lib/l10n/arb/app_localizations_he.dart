@@ -4602,6 +4602,17 @@ class AppLocalizationsHe extends AppLocalizations {
       'לא ניתן להמיר: לתכנית יש אזהרות קריטיות';
 
   @override
+  String get divePlanner_error_reserveExceedsTank => 'חורג מלחץ המיכל';
+
+  @override
+  String get divePlanner_error_reserveMustBePositive => 'חייב להיות גדול מ-0';
+
+  @override
+  String divePlanner_info_reserveDefault(Object unit, Object value) {
+    return 'לא הוזן — מניח $value $unit';
+  }
+
+  @override
   String get divePlanner_field_hePercent => 'He %';
 
   @override
@@ -4681,6 +4692,9 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get divePlanner_label_remaining => 'נותר';
+
+  @override
+  String get divePlanner_label_reserve => 'עתודה:';
 
   @override
   String get divePlanner_label_runtime => 'זמן ריצה';

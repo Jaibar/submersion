@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/core/deco/altitude_calculator.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/dive_planner/domain/entities/plan_result.dart';
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
@@ -106,15 +109,41 @@ class PlanSettingsPanel extends ConsumerWidget {
             ),
             const SizedBox(height: 16),
 
-            // Altitude for altitude diving
-            _AltitudeInput(
-              altitude: planState.altitude,
-              units: units,
-              onChanged: (value) {
-                ref
-                    .read(divePlanNotifierProvider.notifier)
-                    .updateAltitude(value);
-              },
+            // Altitude and reserve pressure row
+            Row(
+              children: [
+                Expanded(
+                  child: _AltitudeInput(
+                    altitude: planState.altitude,
+                    units: units,
+                    onChanged: (value) {
+                      ref
+                          .read(divePlanNotifierProvider.notifier)
+                          .updateAltitude(value);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _ReservePressureInput(
+                    reservePressure: planState.reservePressure,
+                    defaultPressureBar:
+                        settings.pressureUnit == PressureUnit.psi
+                        ? PressureUnit.psi.convert(500, PressureUnit.bar)
+                        : DivePlanState.kDefaultReservePressureBar,
+                    maxPressureBar: planState.tanks
+                        .map((t) => t.startPressure ?? 0)
+                        .fold(0, (a, b) => a > b ? a : b)
+                        .toDouble(),
+                    units: units,
+                    onChanged: (value) {
+                      ref
+                          .read(divePlanNotifierProvider.notifier)
+                          .updateReservePressure(value);
+                    },
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -269,6 +298,164 @@ class _AltitudeInputState extends State<_AltitudeInput> {
       case AltitudeWarningLevel.severe:
         return Colors.red;
     }
+  }
+}
+
+/// Reserve pressure input field with validation.
+class _ReservePressureInput extends StatefulWidget {
+  final double reservePressure;
+  final double defaultPressureBar;
+  final double maxPressureBar;
+  final UnitFormatter units;
+  final ValueChanged<double> onChanged;
+
+  const _ReservePressureInput({
+    required this.reservePressure,
+    required this.defaultPressureBar,
+    required this.maxPressureBar,
+    required this.units,
+    required this.onChanged,
+  });
+
+  @override
+  State<_ReservePressureInput> createState() => _ReservePressureInputState();
+}
+
+class _ReservePressureInputState extends State<_ReservePressureInput> {
+  late TextEditingController _controller;
+  String? _messageText;
+  bool _isError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(
+      text: widget.units
+          .convertPressure(widget.reservePressure)
+          .toStringAsFixed(0),
+    );
+  }
+
+  @override
+  void didUpdateWidget(_ReservePressureInput oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.reservePressure != widget.reservePressure) {
+      final newText = widget.units
+          .convertPressure(widget.reservePressure)
+          .toStringAsFixed(0);
+      if (_controller.text != newText) {
+        _controller.text = newText;
+      }
+    }
+    // Re-validate against new max if tanks changed
+    if (oldWidget.maxPressureBar != widget.maxPressureBar) {
+      final error = _getError(_controller.text);
+      setState(() {
+        _messageText = error;
+        _isError = error != null;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  String? _getError(String value) {
+    final parsed = double.tryParse(value);
+    if (parsed == null) return null;
+    final bar = widget.units.pressureToBar(parsed);
+    if (bar <= 0) return context.l10n.divePlanner_error_reserveMustBePositive;
+    if (widget.maxPressureBar > 0 &&
+        parsed >
+            widget.units
+                .convertPressure(widget.maxPressureBar)
+                .roundToDouble()) {
+      return context.l10n.divePlanner_error_reserveExceedsTank;
+    }
+    return null;
+  }
+
+  void _validate(String value) {
+    if (value.isEmpty) {
+      final defaultDisplay = widget.units
+          .convertPressure(widget.defaultPressureBar)
+          .toStringAsFixed(0);
+      setState(() {
+        _messageText = context.l10n.divePlanner_info_reserveDefault(
+          widget.units.pressureSymbol,
+          defaultDisplay,
+        );
+        _isError = false;
+      });
+      widget.onChanged(widget.defaultPressureBar);
+      return;
+    }
+    final error = _getError(value);
+    setState(() {
+      _messageText = error;
+      _isError = error != null;
+    });
+    if (error == null) {
+      final parsed = double.tryParse(value);
+      if (parsed != null) {
+        widget.onChanged(widget.units.pressureToBar(parsed));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(context.l10n.divePlanner_label_reserve),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 80,
+              child: Semantics(
+                label: 'Reserve pressure in ${widget.units.pressureSymbol}',
+                child: TextField(
+                  controller: _controller,
+                  decoration: InputDecoration(
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
+                    suffixText: widget.units.pressureSymbol,
+                    // Error text rendered separately below
+                    errorText: _isError ? '' : null,
+                    errorStyle: const TextStyle(height: 0, fontSize: 0),
+                  ),
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  onChanged: _validate,
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (_messageText != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              _messageText!,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: _isError
+                    ? Theme.of(context).colorScheme.error
+                    : Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+      ],
+    );
   }
 }
 

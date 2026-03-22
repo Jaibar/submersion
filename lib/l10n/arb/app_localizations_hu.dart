@@ -4717,6 +4717,19 @@ class AppLocalizationsHu extends AppLocalizations {
       'Nem lehet átalakítani: a tervnek kritikus figyelmeztetései vannak';
 
   @override
+  String get divePlanner_error_reserveExceedsTank =>
+      'Meghaladja a palack nyomását';
+
+  @override
+  String get divePlanner_error_reserveMustBePositive =>
+      'Nullánál nagyobbnak kell lennie';
+
+  @override
+  String divePlanner_info_reserveDefault(Object unit, Object value) {
+    return 'Nincs megadva — alapértelmezett $value $unit';
+  }
+
+  @override
   String get divePlanner_field_hePercent => 'He %';
 
   @override
@@ -4796,6 +4809,9 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get divePlanner_label_remaining => 'Maradt';
+
+  @override
+  String get divePlanner_label_reserve => 'Tartalék:';
 
   @override
   String get divePlanner_label_runtime => 'Futási idő';

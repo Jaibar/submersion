@@ -4695,6 +4695,18 @@ class AppLocalizationsNl extends AppLocalizations {
       'Kan niet omzetten: plan heeft kritieke waarschuwingen';
 
   @override
+  String get divePlanner_error_reserveExceedsTank => 'Overschrijdt tankdruk';
+
+  @override
+  String get divePlanner_error_reserveMustBePositive =>
+      'Moet groter zijn dan 0';
+
+  @override
+  String divePlanner_info_reserveDefault(Object unit, Object value) {
+    return 'Niet ingevoerd — standaard $value $unit';
+  }
+
+  @override
   String get divePlanner_field_hePercent => 'He %';
 
   @override
@@ -4774,6 +4786,9 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get divePlanner_label_remaining => 'Resterend';
+
+  @override
+  String get divePlanner_label_reserve => 'Reserve:';
 
   @override
   String get divePlanner_label_runtime => 'Looptijd';

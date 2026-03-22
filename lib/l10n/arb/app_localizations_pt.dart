@@ -4732,6 +4732,18 @@ class AppLocalizationsPt extends AppLocalizations {
       'Não é possível converter: o plano tem avisos críticos';
 
   @override
+  String get divePlanner_error_reserveExceedsTank =>
+      'Excede a pressão do cilindro';
+
+  @override
+  String get divePlanner_error_reserveMustBePositive => 'Deve ser maior que 0';
+
+  @override
+  String divePlanner_info_reserveDefault(Object unit, Object value) {
+    return 'Não inserido — assumindo $value $unit';
+  }
+
+  @override
   String get divePlanner_field_hePercent => 'He %';
 
   @override
@@ -4811,6 +4823,9 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get divePlanner_label_remaining => 'Restante';
+
+  @override
+  String get divePlanner_label_reserve => 'Reserva:';
 
   @override
   String get divePlanner_label_runtime => 'Tempo Total';

@@ -4621,6 +4621,17 @@ class AppLocalizationsAr extends AppLocalizations {
       'لا يمكن التحويل: الخطة تحتوي على تحذيرات حرجة';
 
   @override
+  String get divePlanner_error_reserveExceedsTank => 'يتجاوز ضغط الأسطوانة';
+
+  @override
+  String get divePlanner_error_reserveMustBePositive => 'يجب أن يكون أكبر من 0';
+
+  @override
+  String divePlanner_info_reserveDefault(Object unit, Object value) {
+    return 'لم يُدخل — افتراض $value $unit';
+  }
+
+  @override
   String get divePlanner_field_hePercent => 'He %';
 
   @override
@@ -4701,6 +4712,9 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get divePlanner_label_remaining => 'المتبقي';
+
+  @override
+  String get divePlanner_label_reserve => 'الاحتياطي:';
 
   @override
   String get divePlanner_label_runtime => 'وقت التشغيل';

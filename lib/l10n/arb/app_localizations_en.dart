@@ -4648,6 +4648,18 @@ class AppLocalizationsEn extends AppLocalizations {
       'Cannot convert: plan has critical warnings';
 
   @override
+  String get divePlanner_error_reserveExceedsTank => 'Exceeds tank pressure';
+
+  @override
+  String get divePlanner_error_reserveMustBePositive =>
+      'Must be greater than 0';
+
+  @override
+  String divePlanner_info_reserveDefault(Object unit, Object value) {
+    return 'Not entered — assuming $value $unit';
+  }
+
+  @override
   String get divePlanner_field_hePercent => 'He %';
 
   @override
@@ -4727,6 +4739,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get divePlanner_label_remaining => 'Remaining';
+
+  @override
+  String get divePlanner_label_reserve => 'Reserve:';
 
   @override
   String get divePlanner_label_runtime => 'Runtime';
