@@ -240,6 +240,15 @@ class SiteRepository {
           if (media.siteId != null) media.id: media.siteId!,
       };
 
+      // Capture raw timestamps for deleted sites (domain entity lacks these)
+      final rawSiteRows = await (_db.select(
+        _db.diveSites,
+      )..where((t) => t.id.isIn(orderedIds))).get();
+      final siteTimestamps = {
+        for (final row in rawSiteRows)
+          row.id: (createdAt: row.createdAt, updatedAt: row.updatedAt),
+      };
+
       final allSpeciesRows = await (_db.select(
         _db.siteSpecies,
       )..where((t) => t.siteId.isIn(orderedIds))).get();
@@ -250,6 +259,7 @@ class SiteRepository {
               siteId: row.siteId,
               speciesId: row.speciesId,
               notes: row.notes,
+              createdAt: row.createdAt,
             ),
           )
           .toList(growable: false);
@@ -309,6 +319,11 @@ class SiteRepository {
         mediaOriginalSiteIds: mediaOriginalSiteIds,
         deletedSpeciesEntries: deletedSpecies,
         modifiedSpeciesEntries: modifiedSpecies,
+        deletedSiteTimestamps: {
+          for (final id in duplicateIds)
+            if (siteTimestamps.containsKey(id)) id: siteTimestamps[id]!,
+        },
+        survivorTimestamps: siteTimestamps[survivorId],
       );
     } catch (e, stackTrace) {
       _log.error('Failed to merge sites: $siteIds', e, stackTrace);
@@ -340,6 +355,7 @@ class SiteRepository {
 
         // 2. Re-create deleted sites
         for (final site in snapshot.deletedSites) {
+          final ts = snapshot.deletedSiteTimestamps[site.id];
           await _db
               .into(_db.diveSites)
               .insert(
@@ -362,8 +378,8 @@ class SiteRepository {
                   mooringNumber: Value(site.mooringNumber),
                   parkingInfo: Value(site.parkingInfo),
                   altitude: Value(site.altitude),
-                  createdAt: Value(now),
-                  updatedAt: Value(now),
+                  createdAt: Value(ts?.createdAt ?? now),
+                  updatedAt: Value(ts?.updatedAt ?? now),
                 ),
               );
           await _syncRepository.markRecordPending(
@@ -411,7 +427,7 @@ class SiteRepository {
                   siteId: Value(entry.siteId),
                   speciesId: Value(entry.speciesId),
                   notes: Value(entry.notes),
-                  createdAt: Value(now),
+                  createdAt: Value(entry.createdAt),
                 ),
               );
           await _syncRepository.markRecordPending(
@@ -714,6 +730,14 @@ class MergeSnapshot {
   final List<SiteSpeciesSnapshot> deletedSpeciesEntries;
   final List<SiteSpeciesSnapshot> modifiedSpeciesEntries;
 
+  /// Original createdAt/updatedAt for each deleted site, keyed by site ID.
+  /// DiveSite domain entity does not carry timestamps, so they are captured
+  /// separately from the database row before deletion.
+  final Map<String, ({int createdAt, int updatedAt})> deletedSiteTimestamps;
+
+  /// Original createdAt/updatedAt for the survivor site before merge.
+  final ({int createdAt, int updatedAt})? survivorTimestamps;
+
   const MergeSnapshot({
     required this.originalSurvivor,
     required this.deletedSites,
@@ -721,6 +745,8 @@ class MergeSnapshot {
     required this.mediaOriginalSiteIds,
     required this.deletedSpeciesEntries,
     required this.modifiedSpeciesEntries,
+    this.deletedSiteTimestamps = const {},
+    this.survivorTimestamps,
   });
 }
 
@@ -730,11 +756,13 @@ class SiteSpeciesSnapshot {
   final String siteId;
   final String speciesId;
   final String notes;
+  final int createdAt;
 
   const SiteSpeciesSnapshot({
     required this.id,
     required this.siteId,
     required this.speciesId,
     required this.notes,
+    required this.createdAt,
   });
 }
