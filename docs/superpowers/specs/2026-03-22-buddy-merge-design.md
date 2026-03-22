@@ -18,7 +18,7 @@ Add the ability to merge duplicate buddy entries, following the established site
 
 Captures pre-merge state for undo, stored in memory (not persisted):
 
-```
+```text
 BuddyMergeSnapshot:
   originalSurvivor: Buddy              // survivor's field values before merge
   deletedBuddies: List<Buddy>          // absorbed buddies
@@ -26,11 +26,11 @@ BuddyMergeSnapshot:
   modifiedDiveBuddyEntries: List<DiveBuddySnapshot>  // junction rows whose role changed
 ```
 
-`DiveBuddySnapshot` captures the original junction row fields: id, diveId, buddyId, role.
+`DiveBuddySnapshot` captures the original junction row fields: id, diveId, buddyId, role. The `createdAt` field is not captured; undo will use the current timestamp when re-creating entries, matching the sites merge pattern.
 
 ### BuddyMergeResult
 
-```
+```text
 BuddyMergeResult:
   survivorId: String
   snapshot: BuddyMergeSnapshot?
@@ -41,22 +41,27 @@ BuddyMergeResult:
 Signature: `Future<BuddyMergeResult?> mergeBuddies({required Buddy mergedBuddy, required List<String> buddyIds})`
 
 Algorithm:
-1. Deduplicate and validate: ensure all buddy IDs exist, require >= 2
+
+1. Deduplicate and validate: ensure all buddy IDs exist, require >= 2. All buddies must belong to the same diver (UI filtering ensures this, but the repository validates as a guard).
 2. First ID is the survivor, remaining are duplicates
 3. Capture snapshot: original survivor state, all duplicate buddies, all affected DiveBuddies entries
 4. Within a single transaction:
    a. Update survivor with merged field values
-   b. Relink DiveBuddies entries (see junction relinking below)
-   c. Delete duplicate buddy records
-   d. Log deletions for sync tracking
+   b. Relink DiveBuddies entries (see junction relinking below) -- **must fully complete before step 4c**
+   c. Explicitly delete collision-loser junction rows and log each for sync
+   d. Delete duplicate buddy records (CASCADE will remove any remaining junction rows for duplicates, but all meaningful rows should already be relinked or explicitly deleted by steps 4b-4c)
+   e. Log buddy deletions for sync tracking
 5. Notify SyncEventBus
 6. Return BuddyMergeResult with snapshot
+
+**CASCADE safety note:** The `DiveBuddies` table has `onDelete: KeyAction.cascade` on `buddyId`. Deleting a buddy row will auto-delete any remaining junction rows for that buddy. Steps 4b-4c must fully complete before step 4d to prevent data loss. After relinking, no meaningful junction rows should remain on duplicate buddies, so CASCADE only cleans up already-handled entries.
 
 ### Repository: undoMerge()
 
 Signature: `Future<void> undoMerge(BuddyMergeSnapshot snapshot)`
 
 Algorithm:
+
 1. Within a transaction:
    a. Restore survivor to original field values
    b. Re-create deleted buddy records
@@ -119,9 +124,11 @@ Add to `buddy_edit_page.dart`:
 - `_loadMergeData()`: fetches all buddies by ID, ordered by selection order
 - Per-field cycling for text fields: name, email, phone, notes
 - Per-field cycling for enum fields: certificationLevel, certificationAgency
+- Photo handling: `photoPath` is included in per-field cycling. Candidates are the distinct non-null photo paths from the merged buddies, displayed as thumbnail previews with the cycle button. If only one buddy has a photo, it is used automatically.
 - Uses `_MergeFieldCandidate<T>`, `_buildDistinctCandidates()`, `_initializeMergeTextField()`, `_buildMergeCycleButton()` patterns from sites
 - Title changes to "Merge Buddies" when `isMerging`
 - Save triggers `_confirmMerge()` confirmation dialog before executing
+- Merge save path pops with `BuddyMergeResult` (not the `Buddy` object used by the normal save path)
 
 ### BuddyMergePage Wrapper
 
@@ -142,6 +149,7 @@ class BuddyMergePage extends StatelessWidget {
 ### Routing
 
 Add route `/buddies/merge` in go_router config:
+
 - Receives `extra` as `List<String>` (buddy IDs)
 - Returns `BuddyMergeResult` via `context.pop(result)`
 
@@ -149,6 +157,7 @@ Add route `/buddies/merge` in go_router config:
 
 - Add `undoMerge(BuddyMergeSnapshot)` method to `BuddyListNotifier`
 - Merge operation is called through the repository via `buddyRepositoryProvider`
+- After merge and undo, invalidate affected providers: `allBuddiesProvider`, `allBuddiesWithDiveCountProvider`, `buddyByIdProvider` (for each affected buddy ID), `buddiesForDiveProvider` (for affected dives), `buddyStatsProvider` (for affected buddies)
 
 ## Localization
 
@@ -173,6 +182,7 @@ New l10n keys following existing naming conventions:
 - **Unit tests** for `mergeBuddies()`: survivor update, junction relinking, role conflict resolution, duplicate deletion, sync metadata
 - **Unit tests** for `undoMerge()`: full state restoration including junction entries and roles
 - **Unit tests** for role hierarchy logic (instructor > diveMaster > buddy)
+- **Unit tests** for edge cases: merging when one buddy has zero dives, merging 3+ buddies simultaneously, collision across 3+ buddies on the same dive
 - **Widget tests** for selection mode toggle, merge flow navigation, undo SnackBar, bulk delete
 
 ## Files to Create
@@ -181,7 +191,7 @@ New l10n keys following existing naming conventions:
 
 ## Files to Modify
 
-- `lib/features/buddies/data/repositories/buddy_repository.dart` -- add mergeBuddies(), undoMerge(), snapshot classes
+- `lib/features/buddies/data/repositories/buddy_repository.dart` -- add mergeBuddies(), undoMerge(), bulkDeleteBuddies(), snapshot classes
 - `lib/features/buddies/presentation/pages/buddy_edit_page.dart` -- add merge mode
 - `lib/features/buddies/presentation/widgets/buddy_list_content.dart` -- add selection mode with merge + delete
 - `lib/features/buddies/presentation/providers/buddy_providers.dart` -- add undoMerge to notifier
