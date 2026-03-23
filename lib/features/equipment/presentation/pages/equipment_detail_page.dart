@@ -1438,7 +1438,7 @@ class _ServiceRecordDialogState extends ConsumerState<ServiceRecordDialog> {
     final picked = await showDatePicker(
       context: context,
       initialDate: _serviceDate,
-      firstDate: DateTime(2000),
+      firstDate: DateTime(1950),
       lastDate: DateTime.now(),
     );
     if (picked != null) {

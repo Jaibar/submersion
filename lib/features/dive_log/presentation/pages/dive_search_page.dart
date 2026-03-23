@@ -719,7 +719,7 @@ class _DiveSearchPageState extends ConsumerState<DiveSearchPage> {
 
   Future<void> _selectDate({required bool isStart}) async {
     final initialDate = isStart ? _startDate : _endDate;
-    final firstDate = DateTime(2000);
+    final firstDate = DateTime(1950);
     final lastDate = DateTime.now().add(const Duration(days: 365));
 
     final picked = await showDatePicker(

@@ -1280,7 +1280,7 @@ class _DiveFilterSheetState extends ConsumerState<DiveFilterSheet> {
     required bool isStart,
   }) async {
     final initialDate = isStart ? _startDate : _endDate;
-    final firstDate = DateTime(2000);
+    final firstDate = DateTime(1950);
     final lastDate = DateTime.now().add(const Duration(days: 365));
 
     final picked = await showDatePicker(

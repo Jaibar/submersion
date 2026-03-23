@@ -635,7 +635,7 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
 
   Future<void> _selectDate(BuildContext context, bool isStartDate) async {
     final initialDate = isStartDate ? _startDate : _endDate;
-    final firstDate = isStartDate ? DateTime(2000) : _startDate;
+    final firstDate = isStartDate ? DateTime(1950) : _startDate;
     final lastDate = DateTime(2100);
 
     final pickedDate = await showDatePicker(

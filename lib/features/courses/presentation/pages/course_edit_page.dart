@@ -425,7 +425,7 @@ class _CourseEditPageState extends ConsumerState<CourseEditPage> {
     final initialDate = isStart
         ? _startDate
         : (_completionDate ?? DateTime.now());
-    final firstDate = isStart ? DateTime(2000) : _startDate;
+    final firstDate = isStart ? DateTime(1950) : _startDate;
     final lastDate = DateTime.now().add(const Duration(days: 365));
 
     final picked = await showDatePicker(
