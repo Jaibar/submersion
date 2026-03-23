@@ -82,6 +82,9 @@ Full support for UDDF, CSV, and PDF export. Import from other dive log apps. Com
 git clone https://github.com/submersion-app/submersion.git
 cd submersion
 
+# Initialize submodules (required for libdivecomputer)
+git submodule update --init --recursive
+
 # Install dependencies
 flutter pub get
 
@@ -97,6 +100,7 @@ flutter run -d macos
 # Clone and setup
 git clone https://github.com/submersion-app/submersion.git
 cd submersion
+git submodule update --init --recursive
 flutter pub get
 dart run build_runner build --delete-conflicting-outputs
 
@@ -112,6 +116,7 @@ flutter run -d ios
 # Clone and setup
 git clone https://github.com/submersion-app/submersion.git
 cd submersion
+git submodule update --init --recursive
 flutter pub get
 dart run build_runner build --delete-conflicting-outputs
 
@@ -124,6 +129,7 @@ flutter run -d android
 # Clone and setup
 git clone https://github.com/submersion-app/submersion.git
 cd submersion
+git submodule update --init --recursive
 flutter pub get
 dart run build_runner build --delete-conflicting-outputs
 
@@ -136,6 +142,7 @@ flutter run -d windows
 # Clone and setup
 git clone https://github.com/submersion-app/submersion.git
 cd submersion
+git submodule update --init --recursive
 flutter pub get
 dart run build_runner build --delete-conflicting-outputs
 

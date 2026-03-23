@@ -134,6 +134,9 @@ Submersion is built on these principles:
 git clone https://github.com/submersion-app/submersion.git
 cd submersion
 
+# Initialize submodules (required for libdivecomputer)
+git submodule update --init --recursive
+
 # Install dependencies
 flutter pub get
 
@@ -292,9 +295,10 @@ See [FEATURE_ROADMAP.md](FEATURE_ROADMAP.md) for the complete development plan.
 Contributions are welcome! Submersion is built by divers, for divers.
 
 1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/your-feature`
-3. Make your changes with tests
-4. Submit a pull request
+2. Clone and initialize submodules: `git clone --recurse-submodules <your-fork-url>`
+3. Create a feature branch: `git checkout -b feature/your-feature`
+4. Make your changes with tests
+5. Submit a pull request
 
 Please run `flutter analyze` and `flutter test` before submitting.
 
