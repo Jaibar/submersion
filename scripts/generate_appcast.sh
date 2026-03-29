@@ -17,8 +17,12 @@
 
 set -euo pipefail
 
-VERSION="${1:?Usage: generate_appcast.sh <version> <build_number> <date> <macos_url> <windows_url> <release_notes_url>}"
+RAW_VERSION="${1:?Usage: generate_appcast.sh <version> <build_number> <date> <macos_url> <windows_url> <release_notes_url>}"
 BUILD_NUMBER="${2:?Missing build_number argument}"
+# Strip the build number from VERSION if the tag included it (e.g. v1.3.7.82
+# → 1.3.7) so that appending .${BUILD_NUMBER} below always produces a clean
+# 4-segment version (1.3.7.82) without duplication (1.3.7.82.82).
+VERSION=$(echo "$RAW_VERSION" | cut -d. -f1-3)
 DATE="${3}"
 MACOS_URL="${4}"
 WINDOWS_URL="${5}"
