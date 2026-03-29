@@ -5,6 +5,17 @@ All notable changes to Submersion are documented in this file.
 
 ## 1.4.0 (2026-03-29)
 
+### Bug Fixes
+
+- remove build number from macOS CFBundleShortVersionString
+
+### Chores
+
+- bump version to 1.4.0+84
+
+
+## 1.4.0 (2026-03-29)
+
 ### Features
 
 - add dive detail section config translations for 9 locales
