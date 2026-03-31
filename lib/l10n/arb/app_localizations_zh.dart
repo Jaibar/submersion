@@ -5025,7 +5025,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get diveSites_detail_siteNotFound_body => '此潜水点已不存在。';
 
   @override
-  String get diveSites_detail_siteNotFound_title => '潜水点未已找到';
+  String get diveSites_detail_siteNotFound_title => '未找到潜水点';
 
   @override
   String get diveSites_difficulty_advanced => '高级';
@@ -5699,7 +5699,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String diveSites_list_tile_semantics(Object name) {
-    return '潜水潜水点: $name';
+    return '潜水点: $name';
   }
 
   @override
@@ -5791,7 +5791,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String diveSites_map_semantics_diveSiteMarker(Object name) {
-    return '潜水潜水点: $name';
+    return '潜水点：$name';
   }
 
   @override
@@ -5992,7 +5992,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get divers_detail_medicalNotesLabel => '备注';
 
   @override
-  String get divers_detail_notFound => '潜水员未已找到';
+  String get divers_detail_notFound => '未找到该潜水员';
 
   @override
   String get divers_detail_notesTitle => '备注';
@@ -6077,7 +6077,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get divers_edit_editTitle => '编辑潜水员';
 
   @override
-  String get divers_edit_emailError => '输入 a 有效电子邮件';
+  String get divers_edit_emailError => '请输入有效的电子邮件地址';
 
   @override
   String get divers_edit_emailLabel => '电子邮件';
@@ -6561,7 +6561,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get enum_equipmentType_knife => '潜水刀';
 
   @override
-  String get enum_equipmentType_light => '轻微';
+  String get enum_equipmentType_light => '潜水灯';
 
   @override
   String get enum_equipmentType_mask => '面镜';
@@ -7680,7 +7680,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get equipment_setDetail_notFoundMessage => '此装备套装已不存在。';
 
   @override
-  String get equipment_setDetail_notFoundTitle => '设置未已找到';
+  String get equipment_setDetail_notFoundTitle => '未找到套装';
 
   @override
   String get equipment_setDetail_snackbar_deleted => '装备套装已删除';
@@ -7727,7 +7727,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get equipment_setEdit_notFoundMessage => '此装备套装已不存在。';
 
   @override
-  String get equipment_setEdit_notFoundTitle => '设置未已找到';
+  String get equipment_setEdit_notFoundTitle => '未找到套装';
 
   @override
   String get equipment_setEdit_saveButton_edit => '保存更改';
@@ -8737,7 +8737,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get media_photoViewer_toggleOverlayLabel => '切换照片叠加层';
 
   @override
-  String get media_photoViewer_videoFileNotFound => '视频文件未已找到';
+  String get media_photoViewer_videoFileNotFound => '视频文件未找到';
 
   @override
   String get media_photoViewer_videoNotLinked => '视频未关联到图库';
@@ -8839,7 +8839,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get media_writeMetadata_keepOriginalVideo => '保留原始视频';
 
   @override
-  String get media_writeMetadata_noDataAvailable => '无潜水数据可用到写入.';
+  String get media_writeMetadata_noDataAvailable => '没有可写入的潜水数据。';
 
   @override
   String get media_writeMetadata_siteLabel => '潜水点';
@@ -9852,7 +9852,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings_decompression_aboutTitle => '关于梯度因子';
 
   @override
-  String get settings_decompression_currentSettings => '水流设置';
+  String get settings_decompression_currentSettings => '当前设置';
 
   @override
   String get settings_decompression_dialog_cancel => '取消';
@@ -9922,7 +9922,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings_existingDb_continue => '继续';
 
   @override
-  String get settings_existingDb_current => '水流';
+  String get settings_existingDb_current => '当前';
 
   @override
   String get settings_existingDb_dialog_message => '此文件夹中已存在 Submersion 数据库。';
@@ -10334,7 +10334,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings_storage_appDefault_subtitle => '标准应用存储位置';
 
   @override
-  String get settings_storage_currentLocation => '水流位置';
+  String get settings_storage_currentLocation => '当前存储位置';
 
   @override
   String get settings_storage_currentLocation_label => '当前位置';
@@ -10478,7 +10478,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings_summary_theme_dark => '深色';
 
   @override
-  String get settings_summary_theme_light => '轻微';
+  String get settings_summary_theme_light => '浅色';
 
   @override
   String get settings_summary_theme_system => '系统';
@@ -10666,7 +10666,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get signatures_drawSignatureSemantics => '绘制签名';
 
   @override
-  String get signatures_error_drawSignature => '请绘制 a 签名';
+  String get signatures_error_drawSignature => '请绘制签名';
 
   @override
   String get signatures_error_enterSignerName => '请输入签名者姓名';
@@ -11274,7 +11274,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get statistics_records_milestones => '里程碑';
 
   @override
-  String get statistics_records_mostRecentDive => '最最近潜水';
+  String get statistics_records_mostRecentDive => '最近一次潜水';
 
   @override
   String statistics_records_recordSemanticLabel(
@@ -11997,7 +11997,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String tides_label_currentHeight(Object height, Object depthSymbol) {
-    return '水流: $height$depthSymbol';
+    return '当前潮位: $height$depthSymbol';
   }
 
   @override
@@ -12734,7 +12734,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get trips_gallery_tooltip_scan => '扫描设备图库';
 
   @override
-  String get trips_gallery_tripNotFound => '旅行未已找到';
+  String get trips_gallery_tripNotFound => '找不到该旅行';
 
   @override
   String get trips_list_button_retry => '重试';
@@ -14637,10 +14637,10 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get tankPresets_edit_validPressure => '输入 a 有效压力';
+  String get tankPresets_edit_validPressure => '请输入有效压力';
 
   @override
-  String get tankPresets_edit_validVolume => '输入 a 有效容积';
+  String get tankPresets_edit_validVolume => '请输入有效容积';
 
   @override
   String get tankPresets_edit_volume => '容积';
