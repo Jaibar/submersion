@@ -1758,6 +1758,33 @@ class AppLocalizationsHe extends AppLocalizations {
   String get dashboard_hero_noDives => 'מוכן לרשום את הצלילה הראשונה?';
 
   @override
+  String get dashboard_hero_divesLoggedLabel => 'dives logged';
+
+  @override
+  String get dashboard_hero_hoursUnderwaterLabel => 'hours underwater';
+
+  @override
+  String get dashboard_hero_daysSinceLabel => 'days since last dive';
+
+  @override
+  String get dashboard_hero_thisMonthLabel => 'this month';
+
+  @override
+  String get dashboard_hero_thisYearLabel => 'this year';
+
+  @override
+  String get dashboard_hero_todayLabel => 'today!';
+
+  @override
+  String get dashboard_hero_noDivesLabel => 'no dives yet';
+
+  @override
+  String get dashboard_hero_diverFallbackName => 'Diver';
+
+  @override
+  String get dashboard_semantics_statsBar => 'Dive statistics summary';
+
+  @override
   String get dashboard_personalRecords_coldest => 'הקרה ביותר';
 
   @override

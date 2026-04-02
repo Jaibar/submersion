@@ -3168,6 +3168,60 @@ abstract class AppLocalizations {
   /// **'Ready to log your first dive?'**
   String get dashboard_hero_noDives;
 
+  /// No description provided for @dashboard_hero_divesLoggedLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'dives logged'**
+  String get dashboard_hero_divesLoggedLabel;
+
+  /// No description provided for @dashboard_hero_hoursUnderwaterLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'hours underwater'**
+  String get dashboard_hero_hoursUnderwaterLabel;
+
+  /// No description provided for @dashboard_hero_daysSinceLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'days since last dive'**
+  String get dashboard_hero_daysSinceLabel;
+
+  /// No description provided for @dashboard_hero_thisMonthLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'this month'**
+  String get dashboard_hero_thisMonthLabel;
+
+  /// No description provided for @dashboard_hero_thisYearLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'this year'**
+  String get dashboard_hero_thisYearLabel;
+
+  /// No description provided for @dashboard_hero_todayLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'today!'**
+  String get dashboard_hero_todayLabel;
+
+  /// No description provided for @dashboard_hero_noDivesLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'no dives yet'**
+  String get dashboard_hero_noDivesLabel;
+
+  /// No description provided for @dashboard_hero_diverFallbackName.
+  ///
+  /// In en, this message translates to:
+  /// **'Diver'**
+  String get dashboard_hero_diverFallbackName;
+
+  /// No description provided for @dashboard_semantics_statsBar.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive statistics summary'**
+  String get dashboard_semantics_statsBar;
+
   /// No description provided for @dashboard_personalRecords_coldest.
   ///
   /// In en, this message translates to:
