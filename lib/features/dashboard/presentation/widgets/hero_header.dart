@@ -333,52 +333,48 @@ class _HeroHeaderState extends ConsumerState<HeroHeader>
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
+          child: Row(
             children: [
-              // Career stats
-              Row(
-                children: [
-                  _careerStatColumn(
-                    totalDives,
-                    context.l10n.dashboard_hero_divesLoggedLabel,
-                    theme,
-                    fontSize: 18,
-                  ),
-                  const SizedBox(width: 12),
-                  _verticalSeparator(22),
-                  const SizedBox(width: 12),
-                  _careerStatColumn(
-                    hoursValue,
-                    context.l10n.dashboard_hero_hoursUnderwaterLabel,
-                    theme,
-                    fontSize: 18,
-                  ),
-                ],
+              Flexible(
+                child: _careerStatColumn(
+                  totalDives,
+                  context.l10n.dashboard_hero_divesLoggedLabel,
+                  theme,
+                  fontSize: 16,
+                ),
               ),
-              const SizedBox(height: 4),
-              // Activity stats
-              Row(
-                children: [
-                  _phoneActivityStat(
-                    daysSinceValue,
-                    context.l10n.dashboard_hero_daysSinceLabel,
-                    theme,
-                  ),
-                  const SizedBox(width: 10),
-                  _phoneActivityStat(
-                    monthly,
-                    context.l10n.dashboard_hero_thisMonthLabel,
-                    theme,
-                  ),
-                  const SizedBox(width: 10),
-                  _phoneActivityStat(
-                    ytd,
-                    context.l10n.dashboard_hero_thisYearLabel,
-                    theme,
-                  ),
-                ],
+              const SizedBox(width: 8),
+              _verticalSeparator(22),
+              const SizedBox(width: 8),
+              Flexible(
+                child: _careerStatColumn(
+                  hoursValue,
+                  context.l10n.dashboard_hero_hoursUnderwaterLabel,
+                  theme,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(width: 8),
+              _verticalSeparator(22),
+              const SizedBox(width: 8),
+              Flexible(
+                child: _careerStatColumn(
+                  daysSinceValue,
+                  context.l10n.dashboard_hero_daysSinceLabel,
+                  theme,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(width: 8),
+              _verticalSeparator(22),
+              const SizedBox(width: 8),
+              Flexible(
+                child: _careerStatColumn(
+                  ytd,
+                  context.l10n.dashboard_hero_thisYearLabel,
+                  theme,
+                  fontSize: 16,
+                ),
               ),
             ],
           ),
@@ -387,30 +383,6 @@ class _HeroHeaderState extends ConsumerState<HeroHeader>
         Column(
           mainAxisSize: MainAxisSize.min,
           children: [nameWidget, const SizedBox(height: 4), icon],
-        ),
-      ],
-    );
-  }
-
-  Widget _phoneActivityStat(String value, String label, ThemeData theme) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          value,
-          style: const TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-          ),
-        ),
-        const SizedBox(width: 3),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 9,
-            color: Colors.white.withValues(alpha: 0.6),
-          ),
         ),
       ],
     );
