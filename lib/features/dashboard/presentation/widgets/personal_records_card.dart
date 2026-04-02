@@ -17,7 +17,6 @@ class PersonalRecordsCard extends ConsumerWidget {
     final settings = ref.watch(settingsProvider);
     final units = UnitFormatter(settings);
     final theme = Theme.of(context);
-    final primary = theme.colorScheme.primary;
     final bodyMedium = theme.textTheme.bodyMedium;
 
     final records = recordsAsync.valueOrNull;
@@ -61,8 +60,6 @@ class PersonalRecordsCard extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.emoji_events, size: 16, color: primary),
-                const SizedBox(width: 6),
                 Text(
                   context.l10n.dashboard_personalRecords_sectionTitle,
                   style: bodyMedium?.copyWith(fontWeight: FontWeight.bold),
