@@ -3,9 +3,15 @@ import 'package:flutter/scheduler.dart';
 
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/universal_import/data/csv/presets/built_in_presets.dart';
+import 'package:submersion/features/universal_import/data/csv/presets/csv_preset.dart';
+import 'package:submersion/features/universal_import/data/csv/presets/preset_registry.dart';
 import 'package:submersion/features/universal_import/data/models/field_mapping.dart';
-import 'package:submersion/features/universal_import/data/services/field_mapping_engine.dart';
+import 'package:submersion/features/universal_import/data/models/import_enums.dart';
+import 'package:submersion/features/universal_import/presentation/providers/csv_preset_providers.dart';
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
+import 'package:submersion/features/universal_import/presentation/widgets/save_preset_dialog.dart';
+import 'package:submersion/features/universal_import/presentation/widgets/select_preset_sheet.dart';
 
 /// Step 2: CSV field mapping editor (only shown for CSV imports).
 ///
@@ -33,11 +39,16 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
     'waterTemp',
     'airTemp',
     'siteName',
+    'gps',
     'buddy',
     'diveMaster',
+    'suit',
     'rating',
     'notes',
     'visibility',
+    'weight',
+    'sac',
+    'tags',
     'startPressure',
     'endPressure',
     'tankVolume',
@@ -51,15 +62,21 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
     final theme = Theme.of(context);
 
     if (!_initialized && state.options != null) {
-      // Auto-generate mapping from detected headers
-      final detection = state.detectionResult;
-      const engine = FieldMappingEngine();
-      _mapping =
-          state.fieldMapping ??
-          engine.autoMap(
-            detection?.csvHeaders ?? [],
-            sourceApp: state.options!.sourceApp,
-          );
+      // Use the preset-based mapping if one was detected, otherwise fall
+      // back to header-based detection via PresetRegistry.
+      if (state.fieldMapping != null) {
+        _mapping = state.fieldMapping!;
+      } else if (state.detectedCsvPreset?.primaryMapping != null) {
+        _mapping = state.detectedCsvPreset!.primaryMapping!;
+      } else {
+        final headers = state.detectionResult?.csvHeaders ?? [];
+        final registry = PresetRegistry(builtInPresets: builtInCsvPresets);
+        final matches = registry.detectPreset(headers);
+        _mapping = matches.isNotEmpty
+            ? matches.first.preset.primaryMapping ??
+                  const FieldMapping(name: 'Auto-detected', columns: [])
+            : const FieldMapping(name: 'Auto-detected', columns: []);
+      }
       _initialized = true;
 
       // Persist the initial mapping to the notifier so the wizard's
@@ -90,11 +107,30 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                context.l10n.universalImport_label_columnMapping,
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      context.l10n.universalImport_label_columnMapping,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => _showSelectPresetSheet(headers),
+                    icon: const Icon(Icons.playlist_add_check, size: 18),
+                    label: const Text('Presets'),
+                  ),
+                  const SizedBox(width: 4),
+                  TextButton.icon(
+                    onPressed: _mapping.columns.isNotEmpty
+                        ? () => _showSavePresetDialog(headers)
+                        : null,
+                    icon: const Icon(Icons.save_alt, size: 18),
+                    label: const Text('Save'),
+                  ),
+                ],
               ),
               const SizedBox(height: 4),
               Text(
@@ -133,6 +169,49 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
         ),
       ],
     );
+  }
+
+  Future<void> _showSelectPresetSheet(List<String> headers) async {
+    final preset = await showModalBottomSheet<CsvPreset>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => SelectPresetSheet(csvHeaders: headers),
+    );
+    if (preset == null || !mounted) return;
+
+    final mapping = preset.primaryMapping;
+    if (mapping == null) return;
+
+    setState(() => _mapping = mapping);
+    ref
+        .read(universalImportNotifierProvider.notifier)
+        .updateFieldMapping(mapping);
+  }
+
+  Future<void> _showSavePresetDialog(List<String> headers) async {
+    final state = ref.read(universalImportNotifierProvider);
+    final preset = await showDialog<CsvPreset>(
+      context: context,
+      builder: (_) => SavePresetDialog(
+        mapping: _mapping,
+        csvHeaders: headers,
+        detectedSourceApp: state.options?.sourceApp,
+        currentEntityTypes:
+            state.detectedCsvPreset?.supportedEntities ??
+            const {ImportEntityType.dives, ImportEntityType.sites},
+      ),
+    );
+    if (preset == null || !mounted) return;
+
+    final repo = ref.read(csvPresetRepositoryProvider);
+    await repo.savePreset(preset);
+    ref.invalidate(userCsvPresetsProvider);
+
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Preset "${preset.name}" saved')));
+    }
   }
 
   void _updateMapping(String sourceColumn, String? targetField) {
@@ -229,6 +308,14 @@ class _ColumnMappingRow extends StatelessWidget {
                   DropdownMenuItem(
                     value: field,
                     child: Text(_displayFieldName(field)),
+                  ),
+                // Include the current target if it's not in the standard list
+                // (e.g. from a user-saved preset with custom field names).
+                if (currentTarget != null &&
+                    !targetFields.contains(currentTarget))
+                  DropdownMenuItem(
+                    value: currentTarget,
+                    child: Text(_displayFieldName(currentTarget!)),
                   ),
               ],
               onChanged: onChanged,

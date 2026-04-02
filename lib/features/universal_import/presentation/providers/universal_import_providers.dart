@@ -1,11 +1,6 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:drift/drift.dart' show Value;
 import 'package:file_picker/file_picker.dart';
-import 'package:submersion/core/database/database.dart'
-    show DiveDataSourcesCompanion, DiveProfilesCompanion;
-import 'package:uuid/uuid.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/export/models/uddf_import_result.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
@@ -13,7 +8,6 @@ import 'package:submersion/features/certifications/presentation/providers/certif
 import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
 import 'package:submersion/features/dive_import/data/services/uddf_entity_importer.dart';
-import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
@@ -30,6 +24,10 @@ import 'package:submersion/features/universal_import/data/models/field_mapping.d
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/models/import_options.dart';
 import 'package:submersion/features/universal_import/data/models/import_payload.dart';
+import 'package:submersion/features/universal_import/data/csv/pipeline/csv_pipeline.dart';
+import 'package:submersion/features/universal_import/data/csv/presets/built_in_presets.dart';
+import 'package:submersion/features/universal_import/data/csv/presets/preset_registry.dart';
+import 'package:submersion/features/universal_import/presentation/providers/csv_preset_providers.dart';
 import 'package:submersion/features/universal_import/data/parsers/csv_import_parser.dart';
 import 'package:submersion/features/universal_import/data/parsers/fit_import_parser.dart';
 import 'package:submersion/features/universal_import/data/parsers/import_parser.dart';
@@ -40,176 +38,10 @@ import 'package:submersion/features/universal_import/data/parsers/uddf_import_pa
 import 'package:submersion/features/universal_import/data/services/format_detector.dart';
 import 'package:submersion/features/universal_import/data/services/shearwater_db_reader.dart';
 import 'package:submersion/features/universal_import/data/services/import_duplicate_checker.dart';
+import 'package:submersion/features/universal_import/presentation/providers/import_consolidation_service.dart';
+import 'package:submersion/features/universal_import/presentation/providers/universal_import_state.dart';
 
-// ============================================================================
-// Wizard Steps
-// ============================================================================
-
-/// Steps in the universal import wizard.
-enum ImportWizardStep {
-  fileSelection,
-  sourceConfirmation,
-  fieldMapping,
-  review,
-  importing,
-  summary,
-}
-
-// ============================================================================
-// State
-// ============================================================================
-
-/// State for the universal import wizard.
-class UniversalImportState {
-  const UniversalImportState({
-    this.currentStep = ImportWizardStep.fileSelection,
-    this.isLoading = false,
-    this.isImporting = false,
-    this.error,
-    this.fileBytes,
-    this.fileName,
-    this.detectionResult,
-    this.pendingSourceOverride,
-    this.options,
-    this.fieldMapping,
-    this.payload,
-    this.duplicateResult,
-    this.selections = const {},
-    this.diveResolutions = const {},
-    this.importCounts = const {},
-    this.importPhase = '',
-    this.importCurrent = 0,
-    this.importTotal = 0,
-  });
-
-  final ImportWizardStep currentStep;
-  final bool isLoading;
-  final bool isImporting;
-  final String? error;
-
-  /// Raw file bytes (kept for re-parsing if field mapping changes).
-  final Uint8List? fileBytes;
-  final String? fileName;
-
-  /// Format detection result (set after file selection).
-  final DetectionResult? detectionResult;
-
-  /// Source app override chosen by the user but not yet confirmed.
-  ///
-  /// Stored here so the wizard's [onBeforeAdvance] callback can pass it to
-  /// [confirmSource] when the user taps "Next".
-  final SourceApp? pendingSourceOverride;
-
-  /// Confirmed import options (set after source confirmation).
-  final ImportOptions? options;
-
-  /// Column mapping for CSV imports (null for non-CSV formats).
-  final FieldMapping? fieldMapping;
-
-  /// Parsed import data (set after parsing).
-  final ImportPayload? payload;
-
-  /// Duplicate check results (set before review step).
-  final ImportDuplicateResult? duplicateResult;
-
-  /// Selected indices per entity type.
-  final Map<ImportEntityType, Set<int>> selections;
-
-  /// Per-dive duplicate resolution choices (keyed by dive index).
-  ///
-  /// Only present for dives that were flagged as potential duplicates.
-  /// Absent entries default to [DiveDuplicateResolution.skip].
-  final Map<int, DiveDuplicateResolution> diveResolutions;
-
-  /// Import result counts per entity type.
-  final Map<ImportEntityType, int> importCounts;
-
-  /// Progress tracking.
-  final String importPhase;
-  final int importCurrent;
-  final int importTotal;
-
-  UniversalImportState copyWith({
-    ImportWizardStep? currentStep,
-    bool? isLoading,
-    bool? isImporting,
-    String? error,
-    bool clearError = false,
-    Uint8List? fileBytes,
-    String? fileName,
-    DetectionResult? detectionResult,
-    ImportOptions? options,
-    FieldMapping? fieldMapping,
-    bool clearFieldMapping = false,
-    ImportPayload? payload,
-    ImportDuplicateResult? duplicateResult,
-    Map<ImportEntityType, Set<int>>? selections,
-    Map<int, DiveDuplicateResolution>? diveResolutions,
-    Map<ImportEntityType, int>? importCounts,
-    String? importPhase,
-    int? importCurrent,
-    int? importTotal,
-    SourceApp? pendingSourceOverride,
-    bool clearPendingSourceOverride = false,
-  }) {
-    return UniversalImportState(
-      currentStep: currentStep ?? this.currentStep,
-      isLoading: isLoading ?? this.isLoading,
-      isImporting: isImporting ?? this.isImporting,
-      error: clearError ? null : (error ?? this.error),
-      fileBytes: fileBytes ?? this.fileBytes,
-      fileName: fileName ?? this.fileName,
-      detectionResult: detectionResult ?? this.detectionResult,
-      pendingSourceOverride: clearPendingSourceOverride
-          ? null
-          : (pendingSourceOverride ?? this.pendingSourceOverride),
-      options: options ?? this.options,
-      fieldMapping: clearFieldMapping
-          ? null
-          : (fieldMapping ?? this.fieldMapping),
-      payload: payload ?? this.payload,
-      duplicateResult: duplicateResult ?? this.duplicateResult,
-      selections: selections ?? this.selections,
-      diveResolutions: diveResolutions ?? this.diveResolutions,
-      importCounts: importCounts ?? this.importCounts,
-      importPhase: importPhase ?? this.importPhase,
-      importCurrent: importCurrent ?? this.importCurrent,
-      importTotal: importTotal ?? this.importTotal,
-    );
-  }
-
-  /// Get the selection set for a given entity type.
-  Set<int> selectionFor(ImportEntityType type) {
-    return selections[type] ?? const {};
-  }
-
-  /// Total count of items for a given entity type.
-  int totalCountFor(ImportEntityType type) {
-    return payload?.entitiesOf(type).length ?? 0;
-  }
-
-  /// Total selected items across all entity types.
-  int get totalSelected =>
-      selections.values.fold(0, (sum, s) => sum + s.length);
-
-  /// Entity types that have data in the payload.
-  List<ImportEntityType> get availableTypes => payload?.availableTypes ?? [];
-
-  /// Whether the format requires a field mapping step.
-  bool get needsFieldMapping => detectionResult?.format == ImportFormat.csv;
-
-  /// Summary of import results.
-  String get importSummary {
-    final parts = <String>[];
-    for (final type in ImportEntityType.values) {
-      final count = importCounts[type] ?? 0;
-      if (count > 0) {
-        parts.add('$count ${type.displayName.toLowerCase()}');
-      }
-    }
-    return parts.isEmpty ? 'No data imported' : 'Imported ${parts.join(', ')}';
-  }
-}
+export 'package:submersion/features/universal_import/presentation/providers/universal_import_state.dart';
 
 // ============================================================================
 // Notifier
@@ -220,6 +52,21 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
   UniversalImportNotifier(this._ref) : super(const UniversalImportState());
 
   final Ref _ref;
+
+  /// Build a [PresetRegistry] that includes both built-in and user-saved
+  /// presets so auto-detection scores against all of them.
+  Future<PresetRegistry> _buildPresetRegistry() async {
+    final registry = PresetRegistry(builtInPresets: builtInCsvPresets);
+    try {
+      final userPresets = await _ref.read(userCsvPresetsProvider.future);
+      for (final preset in userPresets) {
+        registry.addUserPreset(preset);
+      }
+    } catch (_) {
+      // If loading user presets fails, proceed with built-ins only.
+    }
+    return registry;
+  }
 
   // -- Step 0: File Selection --
 
@@ -291,20 +138,30 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
 
   // -- Step 1: Source Confirmation --
 
-  /// Store a pending source-app override chosen by the user.
+  /// Store a pending source-app and format override chosen by the user.
   ///
   /// This is persisted in state so the wizard's [onBeforeAdvance] callback
   /// can pass it through to [confirmSource] when the user taps "Next".
-  void setPendingSourceOverride(SourceApp? app) {
+  void setPendingSourceOverride(SourceApp? app, {ImportFormat? format}) {
     state = app == null
-        ? state.copyWith(clearPendingSourceOverride: true)
-        : state.copyWith(pendingSourceOverride: app);
+        ? state.copyWith(
+            clearPendingSourceOverride: true,
+            clearPendingFormatOverride: true,
+          )
+        : state.copyWith(
+            pendingSourceOverride: app,
+            pendingFormatOverride: format,
+            clearPendingFormatOverride: format == null,
+          );
   }
 
   /// Confirm the detected source or override with a user selection.
   ///
   /// When [overrideApp] is null the pending override from state is used.
-  void confirmSource({SourceApp? overrideApp, ImportFormat? overrideFormat}) {
+  Future<void> confirmSource({
+    SourceApp? overrideApp,
+    ImportFormat? overrideFormat,
+  }) async {
     final detection = state.detectionResult;
     if (detection == null) return;
 
@@ -314,15 +171,42 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
 
     final effectiveOverride = overrideApp ?? state.pendingSourceOverride;
 
-    final format = overrideFormat ?? detection.format;
+    final format =
+        overrideFormat ?? state.pendingFormatOverride ?? detection.format;
     final sourceApp =
         effectiveOverride ?? detection.sourceApp ?? SourceApp.generic;
 
     final options = ImportOptions(sourceApp: sourceApp, format: format);
 
+    // For CSV files, run pipeline detection to check for multi-file presets.
+    if (format == ImportFormat.csv && state.fileBytes != null) {
+      final pipeline = CsvPipeline(registry: await _buildPresetRegistry());
+      try {
+        final parsedCsv = pipeline.parse(state.fileBytes!);
+        final csvDetection = pipeline.detect(parsedCsv);
+
+        final nextStep = csvDetection.hasAdditionalFileRoles
+            ? ImportWizardStep.additionalFiles
+            : ImportWizardStep.fieldMapping;
+
+        state = state.copyWith(
+          options: options,
+          clearPendingSourceOverride: true,
+          clearPendingFormatOverride: true,
+          detectedCsvPreset: csvDetection.matchedPreset,
+          parsedCsv: parsedCsv,
+          currentStep: nextStep,
+        );
+        return;
+      } catch (_) {
+        // If pipeline detection fails, fall through to normal CSV flow.
+      }
+    }
+
     state = state.copyWith(
       options: options,
       clearPendingSourceOverride: true,
+      clearPendingFormatOverride: true,
       currentStep: format == ImportFormat.csv
           ? ImportWizardStep.fieldMapping
           : ImportWizardStep.review,
@@ -334,11 +218,62 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     }
   }
 
-  // -- Step 2: Field Mapping (CSV only) --
+  // -- Step 2a: Additional Files (multi-file CSV presets only) --
+
+  /// Pick a secondary file (e.g. dive profile CSV for Subsurface).
+  Future<void> pickAdditionalFile() async {
+    state = state.copyWith(isLoading: true, clearError: true);
+
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        allowMultiple: false,
+      );
+
+      if (result == null || result.files.isEmpty) {
+        state = state.copyWith(isLoading: false);
+        return;
+      }
+
+      final pickedFile = result.files.first;
+      final filePath = pickedFile.path;
+      if (filePath == null) {
+        state = state.copyWith(
+          isLoading: false,
+          error: 'Could not access file',
+        );
+        return;
+      }
+
+      final bytes = await File(filePath).readAsBytes();
+
+      state = state.copyWith(
+        isLoading: false,
+        additionalFileBytes: bytes,
+        additionalFileName: pickedFile.name,
+        currentStep: ImportWizardStep.fieldMapping,
+      );
+    } catch (e) {
+      state = state.copyWith(
+        isLoading: false,
+        error: 'Failed to pick additional file: $e',
+      );
+    }
+  }
+
+  /// Skip the optional additional file and proceed to field mapping.
+  void skipAdditionalFile() {
+    state = state.copyWith(currentStep: ImportWizardStep.fieldMapping);
+  }
+
+  // -- Step 2b: Field Mapping (CSV only) --
 
   /// Update the field mapping for CSV imports.
+  ///
+  /// Clears any previously produced payload so it will be regenerated from
+  /// the updated mapping when the user advances past the Map Fields step.
   void updateFieldMapping(FieldMapping mapping) {
-    state = state.copyWith(fieldMapping: mapping);
+    state = state.copyWith(fieldMapping: mapping, clearPayload: true);
   }
 
   /// Confirm field mapping and proceed to parsing.
@@ -346,10 +281,10 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
   /// This is a no-op if the payload has already been produced (e.g. for
   /// non-CSV formats where parsing happens immediately after source
   /// confirmation).
-  void confirmFieldMapping() {
+  Future<void> confirmFieldMapping() async {
     if (state.payload != null) return;
     state = state.copyWith(currentStep: ImportWizardStep.review);
-    _parseAndCheckDuplicates();
+    await _parseAndCheckDuplicates();
   }
 
   // -- Parsing + Duplicate Check --
@@ -362,8 +297,21 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     state = state.copyWith(isLoading: true, clearError: true);
 
     try {
-      final parser = _parserFor(opts.format);
-      final payload = await parser.parse(bytes, options: opts);
+      final registry = opts.format == ImportFormat.csv
+          ? await _buildPresetRegistry()
+          : null;
+      final parser = _parserFor(opts.format, registry: registry);
+      final ImportPayload payload;
+      if (parser is CsvImportParser) {
+        payload = await parser.parse(
+          bytes,
+          options: opts,
+          customMappingOverride: state.fieldMapping,
+          profileFileBytes: state.additionalFileBytes,
+        );
+      } else {
+        payload = await parser.parse(bytes, options: opts);
+      }
 
       if (payload.isEmpty) {
         final errorMsg = payload.warnings.isNotEmpty
@@ -409,9 +357,12 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
     }
   }
 
-  ImportParser _parserFor(ImportFormat format) {
+  ImportParser _parserFor(ImportFormat format, {PresetRegistry? registry}) {
     return switch (format) {
-      ImportFormat.csv => CsvImportParser(customMapping: state.fieldMapping),
+      ImportFormat.csv => CsvImportParser(
+        customMapping: state.fieldMapping,
+        pipeline: registry != null ? CsvPipeline(registry: registry) : null,
+      ),
       ImportFormat.uddf => UddfImportParser(),
       ImportFormat.subsurfaceXml => SubsurfaceXmlParser(),
       ImportFormat.fit => const FitImportParser(),
@@ -598,12 +549,10 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
       if (consolidateIndices.isNotEmpty) {
         final diveRepo = _ref.read(diveRepositoryProvider);
         final diveItems = payload.entitiesOf(ImportEntityType.dives);
-        final dupResult = state.duplicateResult;
-        consolidatedCount = await _performConsolidations(
+        consolidatedCount = await performConsolidations(
           indices: consolidateIndices,
           diveItems: diveItems,
-          diveResolutions: state.diveResolutions,
-          duplicateResult: dupResult,
+          duplicateResult: state.duplicateResult,
           diveRepository: diveRepo,
         );
       }
@@ -672,80 +621,6 @@ class UniversalImportNotifier extends StateNotifier<UniversalImportState> {
       dives: sel[ImportEntityType.dives] ?? const {},
       courses: sel[ImportEntityType.courses] ?? const {},
     );
-  }
-
-  // -- Consolidation --
-
-  /// Attaches each consolidate-flagged imported dive as a secondary computer
-  /// reading on the matched existing dive.
-  ///
-  /// Returns the number of successful consolidations.
-  Future<int> _performConsolidations({
-    required Set<int> indices,
-    required List<Map<String, dynamic>> diveItems,
-    required Map<int, DiveDuplicateResolution> diveResolutions,
-    required ImportDuplicateResult? duplicateResult,
-    required DiveRepository diveRepository,
-  }) async {
-    const uuid = Uuid();
-    final now = DateTime.now();
-    var count = 0;
-
-    for (final index in indices) {
-      final matchResult = duplicateResult?.diveMatchFor(index);
-      if (matchResult == null) continue;
-
-      final diveData = diveItems[index];
-      final dateTime = diveData['dateTime'] as DateTime? ?? now;
-      final runtime = diveData['runtime'] as Duration?;
-      final duration = diveData['duration'] as Duration?;
-      final effectiveDuration = runtime ?? duration;
-      final exitTime = runtime != null ? dateTime.add(runtime) : null;
-
-      final secondaryReading = DiveDataSourcesCompanion.insert(
-        id: uuid.v4(),
-        diveId: matchResult.diveId,
-        isPrimary: const Value(false),
-        computerModel: Value(diveData['diveComputerModel'] as String?),
-        computerSerial: Value(diveData['diveComputerSerial'] as String?),
-        sourceFormat: Value(diveData['sourceFormat'] as String?),
-        maxDepth: Value(diveData['maxDepth'] as double?),
-        avgDepth: Value(diveData['avgDepth'] as double?),
-        duration: Value(effectiveDuration?.inSeconds),
-        waterTemp: Value(diveData['waterTemp'] as double?),
-        entryTime: Value(dateTime),
-        exitTime: Value(exitTime),
-        importedAt: now,
-        createdAt: now,
-      );
-
-      final profileData =
-          diveData['profile'] as List<Map<String, dynamic>>? ?? [];
-      final secondaryProfile = profileData
-          .map(
-            (p) => DiveProfilesCompanion.insert(
-              id: uuid.v4(),
-              diveId: matchResult.diveId,
-              isPrimary: const Value(false),
-              timestamp: p['timestamp'] as int? ?? 0,
-              depth: p['depth'] as double? ?? 0.0,
-              temperature: Value(p['temperature'] as double?),
-              pressure: Value(p['pressure'] as double?),
-              setpoint: Value(p['setpoint'] as double?),
-              ppO2: Value(p['ppO2'] as double?),
-            ),
-          )
-          .toList();
-
-      await diveRepository.consolidateComputer(
-        targetDiveId: matchResult.diveId,
-        secondaryReading: secondaryReading,
-        secondaryProfile: secondaryProfile,
-      );
-      count++;
-    }
-
-    return count;
   }
 
   // -- Provider Invalidation --

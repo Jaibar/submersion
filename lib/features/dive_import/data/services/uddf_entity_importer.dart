@@ -194,6 +194,20 @@ class UddfEntityImporter {
        _defaultStartPressure = defaultStartPressure,
        _applyDefaultTankToImports = applyDefaultTankToImports;
 
+  /// Parse a value that may be either an enum instance or a string matching
+  /// an enum name. Returns null if the value is null or unrecognised.
+  static T? _parseEnum<T extends Enum>(Object? value, List<T> values) {
+    if (value == null) return null;
+    if (value is T) return value;
+    if (value is String) {
+      final lower = value.toLowerCase();
+      for (final v in values) {
+        if (v.name.toLowerCase() == lower) return v;
+      }
+    }
+    return null;
+  }
+
   /// Import selected entities from [data] using [repositories].
   ///
   /// Only entities at indices present in [selections] are imported.
@@ -486,10 +500,14 @@ class UddfEntityImporter {
         name: name,
         email: buddyData['email'] as String?,
         phone: buddyData['phone'] as String?,
-        certificationLevel:
-            buddyData['certificationLevel'] as CertificationLevel?,
-        certificationAgency:
-            buddyData['certificationAgency'] as CertificationAgency?,
+        certificationLevel: _parseEnum(
+          buddyData['certificationLevel'],
+          CertificationLevel.values,
+        ),
+        certificationAgency: _parseEnum(
+          buddyData['certificationAgency'],
+          CertificationAgency.values,
+        ),
         notes: buddyData['notes'] as String? ?? '',
         createdAt: now,
         updatedAt: now,
@@ -972,6 +990,11 @@ class UddfEntityImporter {
         final uddfSiteId = siteDataMap['uddfId'] as String?;
         if (uddfSiteId != null) linkedSite = siteIdMapping[uddfSiteId];
       }
+      // Fallback: CSV imports store siteId directly on the dive map.
+      if (linkedSite == null) {
+        final directSiteId = diveData['siteId'] as String?;
+        if (directSiteId != null) linkedSite = siteIdMapping[directSiteId];
+      }
 
       // Link to imported trip
       String? linkedTripId;
@@ -1031,14 +1054,18 @@ class UddfEntityImporter {
           [];
 
       final dateTime = diveData['dateTime'] as DateTime? ?? now;
-      final runtime = diveData['runtime'] as Duration?;
+      // CSV imports provide only 'duration' (used as bottomTime); fall back
+      // to it for runtime so the total dive time is populated.
+      final runtime =
+          diveData['runtime'] as Duration? ?? diveData['duration'] as Duration?;
       final parsedEntryTime = diveData['entryTime'] as DateTime?;
       final entryTime = parsedEntryTime ?? dateTime;
       final exitTime = runtime != null ? dateTime.add(runtime) : null;
       final diveTypeId = diveData['diveType'] as String? ?? 'recreational';
 
       // Parse dive mode, planner flag, and favorite
-      final diveMode = diveData['diveMode'] as DiveMode? ?? DiveMode.oc;
+      final diveMode =
+          _parseEnum(diveData['diveMode'], DiveMode.values) ?? DiveMode.oc;
       final isPlanned = diveData['isPlanned'] as bool? ?? false;
       final isFavorite = diveData['isFavorite'] as bool? ?? false;
 
@@ -1087,7 +1114,7 @@ class UddfEntityImporter {
         diveMaster: diveData['diveMaster'] as String?,
         rating: diveData['rating'] as int?,
         notes: notes,
-        visibility: diveData['visibility'] as Visibility?,
+        visibility: _parseEnum(diveData['visibility'], Visibility.values),
         diveTypeId: diveTypeId,
         profile: profile,
         tanks: tanks,
@@ -1097,12 +1124,18 @@ class UddfEntityImporter {
         diveCenter: linkedDiveCenter,
         equipment: linkedEquipment,
         sightings: sightings,
-        currentDirection: diveData['currentDirection'] as CurrentDirection?,
-        currentStrength: diveData['currentStrength'] as CurrentStrength?,
+        currentDirection: _parseEnum(
+          diveData['currentDirection'],
+          CurrentDirection.values,
+        ),
+        currentStrength: _parseEnum(
+          diveData['currentStrength'],
+          CurrentStrength.values,
+        ),
         swellHeight: diveData['swellHeight'] as double?,
-        entryMethod: diveData['entryMethod'] as EntryMethod?,
-        exitMethod: diveData['exitMethod'] as EntryMethod?,
-        waterType: diveData['waterType'] as WaterType?,
+        entryMethod: _parseEnum(diveData['entryMethod'], EntryMethod.values),
+        exitMethod: _parseEnum(diveData['exitMethod'], EntryMethod.values),
+        waterType: _parseEnum(diveData['waterType'], WaterType.values),
         altitude: diveData['altitude'] as double?,
         // Dive mode and rebreather fields
         diveMode: diveMode,
