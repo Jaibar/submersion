@@ -83,7 +83,7 @@ class _FieldMappingStepState extends ConsumerState<FieldMappingStep> {
       // canAdvance provider and onBeforeAdvance callback can access it.
       // Deferred to a post-frame callback to avoid modifying provider
       // state during build.
-      if (state.fieldMapping == null) {
+      if (state.fieldMapping == null && state.payload == null) {
         final initialMapping = _mapping;
         SchedulerBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
