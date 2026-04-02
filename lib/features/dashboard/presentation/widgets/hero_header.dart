@@ -48,6 +48,7 @@ const _bubbleSpecs = [
 
 /// Format total seconds into a concise hours string.
 String _formatHours(int totalSeconds) {
+  if (totalSeconds == 0) return '0';
   final hours = totalSeconds / 3600;
   if (hours < 1) {
     final minutes = totalSeconds ~/ 60;
