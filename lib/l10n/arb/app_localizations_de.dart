@@ -1830,31 +1830,31 @@ class AppLocalizationsDe extends AppLocalizations {
       'Bereit, Ihren ersten Tauchgang zu protokollieren?';
 
   @override
-  String get dashboard_hero_divesLoggedLabel => 'dives logged';
+  String get dashboard_hero_divesLoggedLabel => 'Tauchgänge';
 
   @override
-  String get dashboard_hero_hoursUnderwaterLabel => 'hours underwater';
+  String get dashboard_hero_hoursUnderwaterLabel => 'Stunden unter Wasser';
 
   @override
-  String get dashboard_hero_daysSinceLabel => 'days since last dive';
+  String get dashboard_hero_daysSinceLabel => 'Tage seit letztem Tauchgang';
 
   @override
-  String get dashboard_hero_thisMonthLabel => 'this month';
+  String get dashboard_hero_thisMonthLabel => 'diesen Monat';
 
   @override
-  String get dashboard_hero_thisYearLabel => 'dives this year';
+  String get dashboard_hero_thisYearLabel => 'Tauchgänge dieses Jahr';
 
   @override
-  String get dashboard_hero_todayLabel => 'today!';
+  String get dashboard_hero_todayLabel => 'Heute!';
 
   @override
-  String get dashboard_hero_noDivesLabel => 'no dives yet';
+  String get dashboard_hero_noDivesLabel => 'Noch keine Tauchgänge';
 
   @override
-  String get dashboard_hero_diverFallbackName => 'Diver';
+  String get dashboard_hero_diverFallbackName => 'Taucher';
 
   @override
-  String get dashboard_semantics_statsBar => 'Dive statistics summary';
+  String get dashboard_semantics_statsBar => 'Tauchstatistik-Zusammenfassung';
 
   @override
   String get dashboard_personalRecords_coldest => 'Kaeltester';

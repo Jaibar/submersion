@@ -4486,5 +4486,14 @@
   "enum_precipitation_heavyRain": "Heavy Rain",
   "enum_precipitation_snow": "Snow",
   "enum_precipitation_sleet": "Sleet",
-  "enum_precipitation_hail": "Hail"
+  "enum_precipitation_hail": "Hail",
+  "dashboard_hero_daysSinceLabel": "ימים מהצלילה האחרונה",
+  "dashboard_hero_diverFallbackName": "צוללן",
+  "dashboard_hero_divesLoggedLabel": "צלילות מתועדות",
+  "dashboard_hero_hoursUnderwaterLabel": "שעות מתחת למים",
+  "dashboard_hero_noDivesLabel": "אין צלילות עדיין",
+  "dashboard_hero_thisMonthLabel": "החודש",
+  "dashboard_hero_thisYearLabel": "צלילות השנה",
+  "dashboard_hero_todayLabel": "!היום",
+  "dashboard_semantics_statsBar": "סיכום סטטיסטיקות צלילה"
 }

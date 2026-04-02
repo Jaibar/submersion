@@ -1758,31 +1758,31 @@ class AppLocalizationsHe extends AppLocalizations {
   String get dashboard_hero_noDives => 'מוכן לרשום את הצלילה הראשונה?';
 
   @override
-  String get dashboard_hero_divesLoggedLabel => 'dives logged';
+  String get dashboard_hero_divesLoggedLabel => 'צלילות מתועדות';
 
   @override
-  String get dashboard_hero_hoursUnderwaterLabel => 'hours underwater';
+  String get dashboard_hero_hoursUnderwaterLabel => 'שעות מתחת למים';
 
   @override
-  String get dashboard_hero_daysSinceLabel => 'days since last dive';
+  String get dashboard_hero_daysSinceLabel => 'ימים מהצלילה האחרונה';
 
   @override
-  String get dashboard_hero_thisMonthLabel => 'this month';
+  String get dashboard_hero_thisMonthLabel => 'החודש';
 
   @override
-  String get dashboard_hero_thisYearLabel => 'dives this year';
+  String get dashboard_hero_thisYearLabel => 'צלילות השנה';
 
   @override
-  String get dashboard_hero_todayLabel => 'today!';
+  String get dashboard_hero_todayLabel => '!היום';
 
   @override
-  String get dashboard_hero_noDivesLabel => 'no dives yet';
+  String get dashboard_hero_noDivesLabel => 'אין צלילות עדיין';
 
   @override
-  String get dashboard_hero_diverFallbackName => 'Diver';
+  String get dashboard_hero_diverFallbackName => 'צוללן';
 
   @override
-  String get dashboard_semantics_statsBar => 'Dive statistics summary';
+  String get dashboard_semantics_statsBar => 'סיכום סטטיסטיקות צלילה';
 
   @override
   String get dashboard_personalRecords_coldest => 'הקרה ביותר';

@@ -1821,31 +1821,31 @@ class AppLocalizationsIt extends AppLocalizations {
       'Pronto a registrare la tua prima immersione?';
 
   @override
-  String get dashboard_hero_divesLoggedLabel => 'dives logged';
+  String get dashboard_hero_divesLoggedLabel => 'immersioni registrate';
 
   @override
-  String get dashboard_hero_hoursUnderwaterLabel => 'hours underwater';
+  String get dashboard_hero_hoursUnderwaterLabel => 'ore sott\'acqua';
 
   @override
-  String get dashboard_hero_daysSinceLabel => 'days since last dive';
+  String get dashboard_hero_daysSinceLabel => 'giorni dall\'ultima immersione';
 
   @override
-  String get dashboard_hero_thisMonthLabel => 'this month';
+  String get dashboard_hero_thisMonthLabel => 'questo mese';
 
   @override
-  String get dashboard_hero_thisYearLabel => 'dives this year';
+  String get dashboard_hero_thisYearLabel => 'immersioni quest\'anno';
 
   @override
-  String get dashboard_hero_todayLabel => 'today!';
+  String get dashboard_hero_todayLabel => 'oggi!';
 
   @override
-  String get dashboard_hero_noDivesLabel => 'no dives yet';
+  String get dashboard_hero_noDivesLabel => 'nessuna immersione';
 
   @override
-  String get dashboard_hero_diverFallbackName => 'Diver';
+  String get dashboard_hero_diverFallbackName => 'Subacqueo';
 
   @override
-  String get dashboard_semantics_statsBar => 'Dive statistics summary';
+  String get dashboard_semantics_statsBar => 'Riepilogo statistiche immersioni';
 
   @override
   String get dashboard_personalRecords_coldest => 'Piu fredda';

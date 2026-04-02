@@ -4486,5 +4486,14 @@
   "enum_precipitation_heavyRain": "Heavy Rain",
   "enum_precipitation_snow": "Snow",
   "enum_precipitation_sleet": "Sleet",
-  "enum_precipitation_hail": "Hail"
+  "enum_precipitation_hail": "Hail",
+  "dashboard_hero_daysSinceLabel": "أيام منذ آخر غوصة",
+  "dashboard_hero_diverFallbackName": "غواص",
+  "dashboard_hero_divesLoggedLabel": "غوصات مسجلة",
+  "dashboard_hero_hoursUnderwaterLabel": "ساعات تحت الماء",
+  "dashboard_hero_noDivesLabel": "لا غوصات بعد",
+  "dashboard_hero_thisMonthLabel": "هذا الشهر",
+  "dashboard_hero_thisYearLabel": "غوصات هذا العام",
+  "dashboard_hero_todayLabel": "اليوم!",
+  "dashboard_semantics_statsBar": "ملخص إحصائيات الغوص"
 }

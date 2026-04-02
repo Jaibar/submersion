@@ -4486,5 +4486,14 @@
   "enum_precipitation_heavyRain": "Heavy Rain",
   "enum_precipitation_snow": "Snow",
   "enum_precipitation_sleet": "Sleet",
-  "enum_precipitation_hail": "Hail"
+  "enum_precipitation_hail": "Hail",
+  "dashboard_hero_daysSinceLabel": "napja volt az utolsó merülés",
+  "dashboard_hero_diverFallbackName": "Búvár",
+  "dashboard_hero_divesLoggedLabel": "rögzített merülés",
+  "dashboard_hero_hoursUnderwaterLabel": "óra a víz alatt",
+  "dashboard_hero_noDivesLabel": "még nincs merülés",
+  "dashboard_hero_thisMonthLabel": "ebben a hónapban",
+  "dashboard_hero_thisYearLabel": "merülés idén",
+  "dashboard_hero_todayLabel": "ma!",
+  "dashboard_semantics_statsBar": "Merülési statisztika összefoglaló"
 }

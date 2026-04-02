@@ -4486,5 +4486,14 @@
   "enum_precipitation_heavyRain": "Heavy Rain",
   "enum_precipitation_snow": "Snow",
   "enum_precipitation_sleet": "Sleet",
-  "enum_precipitation_hail": "Hail"
+  "enum_precipitation_hail": "Hail",
+  "dashboard_hero_daysSinceLabel": "jours depuis la dernière plongée",
+  "dashboard_hero_diverFallbackName": "Plongeur",
+  "dashboard_hero_divesLoggedLabel": "plongées enregistrées",
+  "dashboard_hero_hoursUnderwaterLabel": "heures sous l'eau",
+  "dashboard_hero_noDivesLabel": "aucune plongée",
+  "dashboard_hero_thisMonthLabel": "ce mois",
+  "dashboard_hero_thisYearLabel": "plongées cette année",
+  "dashboard_hero_todayLabel": "aujourd'hui !",
+  "dashboard_semantics_statsBar": "Résumé des statistiques de plongée"
 }

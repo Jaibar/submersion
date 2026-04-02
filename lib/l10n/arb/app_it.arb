@@ -4486,5 +4486,14 @@
   "diveDetailSection_tide_description": "Grafico ciclo marea e tempi",
   "diveDetailSection_tide_name": "Marea",
   "diveDetailSection_weights_description": "Ripartizione pesi, peso totale",
-  "diveDetailSection_weights_name": "Zavorra"
+  "diveDetailSection_weights_name": "Zavorra",
+  "dashboard_hero_daysSinceLabel": "giorni dall'ultima immersione",
+  "dashboard_hero_diverFallbackName": "Subacqueo",
+  "dashboard_hero_divesLoggedLabel": "immersioni registrate",
+  "dashboard_hero_hoursUnderwaterLabel": "ore sott'acqua",
+  "dashboard_hero_noDivesLabel": "nessuna immersione",
+  "dashboard_hero_thisMonthLabel": "questo mese",
+  "dashboard_hero_thisYearLabel": "immersioni quest'anno",
+  "dashboard_hero_todayLabel": "oggi!",
+  "dashboard_semantics_statsBar": "Riepilogo statistiche immersioni"
 }

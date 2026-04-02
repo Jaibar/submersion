@@ -1828,31 +1828,33 @@ class AppLocalizationsFr extends AppLocalizations {
       'Pret a enregistrer ta premiere plongee ?';
 
   @override
-  String get dashboard_hero_divesLoggedLabel => 'dives logged';
+  String get dashboard_hero_divesLoggedLabel => 'plongées enregistrées';
 
   @override
-  String get dashboard_hero_hoursUnderwaterLabel => 'hours underwater';
+  String get dashboard_hero_hoursUnderwaterLabel => 'heures sous l\'eau';
 
   @override
-  String get dashboard_hero_daysSinceLabel => 'days since last dive';
+  String get dashboard_hero_daysSinceLabel =>
+      'jours depuis la dernière plongée';
 
   @override
-  String get dashboard_hero_thisMonthLabel => 'this month';
+  String get dashboard_hero_thisMonthLabel => 'ce mois';
 
   @override
-  String get dashboard_hero_thisYearLabel => 'dives this year';
+  String get dashboard_hero_thisYearLabel => 'plongées cette année';
 
   @override
-  String get dashboard_hero_todayLabel => 'today!';
+  String get dashboard_hero_todayLabel => 'aujourd\'hui !';
 
   @override
-  String get dashboard_hero_noDivesLabel => 'no dives yet';
+  String get dashboard_hero_noDivesLabel => 'aucune plongée';
 
   @override
-  String get dashboard_hero_diverFallbackName => 'Diver';
+  String get dashboard_hero_diverFallbackName => 'Plongeur';
 
   @override
-  String get dashboard_semantics_statsBar => 'Dive statistics summary';
+  String get dashboard_semantics_statsBar =>
+      'Résumé des statistiques de plongée';
 
   @override
   String get dashboard_personalRecords_coldest => 'La plus froide';

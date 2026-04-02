@@ -4486,5 +4486,14 @@
   "weightCalc_tankLine": "气瓶（{tankMaterial}）：{adjustment} kg",
   "weightCalc_title": "配重计算：",
   "weightCalc_total": "总计：{total} kg",
-  "weightCalc_waterLine": "水型（{waterType}）：{adjustment} kg"
+  "weightCalc_waterLine": "水型（{waterType}）：{adjustment} kg",
+  "dashboard_hero_daysSinceLabel": "天前最后一潜",
+  "dashboard_hero_diverFallbackName": "潜水员",
+  "dashboard_hero_divesLoggedLabel": "次潜水记录",
+  "dashboard_hero_hoursUnderwaterLabel": "小时水下时间",
+  "dashboard_hero_noDivesLabel": "暂无潜水记录",
+  "dashboard_hero_thisMonthLabel": "本月",
+  "dashboard_hero_thisYearLabel": "今年潜水次数",
+  "dashboard_hero_todayLabel": "今天！",
+  "dashboard_semantics_statsBar": "潜水统计摘要"
 }
