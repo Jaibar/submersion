@@ -307,7 +307,10 @@ class _HeroHeaderState extends ConsumerState<HeroHeader>
           fontSize: 24,
         ),
         const Spacer(),
-        Flexible(child: nameWidget),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 160),
+          child: nameWidget,
+        ),
         const SizedBox(width: 16),
         icon,
       ],
