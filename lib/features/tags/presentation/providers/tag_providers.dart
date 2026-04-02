@@ -128,18 +128,22 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
     return tag;
   }
 
+  void _invalidateDiveProviders() {
+    _ref.invalidate(tagStatisticsProvider);
+    _ref.invalidate(divesProvider);
+    _ref.read(paginatedDiveListProvider.notifier).refresh();
+  }
+
   Future<void> updateTag(Tag tag) async {
     await _repository.updateTag(tag);
     await _loadTags();
-    _ref.invalidate(tagStatisticsProvider);
-    _ref.invalidate(divesProvider);
+    _invalidateDiveProviders();
   }
 
   Future<void> deleteTag(String id) async {
     await _repository.deleteTag(id);
     await _loadTags();
-    _ref.invalidate(tagStatisticsProvider);
-    _ref.invalidate(divesProvider);
+    _invalidateDiveProviders();
   }
 
   Future<void> deleteTags(List<String> ids) async {
@@ -147,8 +151,7 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
       await _repository.deleteTag(id);
     }
     await _loadTags();
-    _ref.invalidate(tagStatisticsProvider);
-    _ref.invalidate(divesProvider);
+    _invalidateDiveProviders();
   }
 
   Future<void> mergeTags({
@@ -164,26 +167,22 @@ class TagListNotifier extends StateNotifier<AsyncValue<List<Tag>>> {
       colorHex: colorHex,
     );
     await _loadTags();
-    _ref.invalidate(tagStatisticsProvider);
-    _ref.invalidate(divesProvider);
+    _invalidateDiveProviders();
   }
 
   Future<void> setTagsForDive(String diveId, List<Tag> tags) async {
     await _repository.setTagsForDive(diveId, tags);
-    _ref.invalidate(tagStatisticsProvider);
-    _ref.invalidate(divesProvider);
+    _invalidateDiveProviders();
   }
 
   Future<void> addTagToDive(String diveId, String tagId) async {
     await _repository.addTagToDive(diveId, tagId);
-    _ref.invalidate(tagStatisticsProvider);
-    _ref.invalidate(divesProvider);
+    _invalidateDiveProviders();
   }
 
   Future<void> removeTagFromDive(String diveId, String tagId) async {
     await _repository.removeTagFromDive(diveId, tagId);
-    _ref.invalidate(tagStatisticsProvider);
-    _ref.invalidate(divesProvider);
+    _invalidateDiveProviders();
   }
 }
 
