@@ -23,11 +23,14 @@ class EquipmentSetListContent extends ConsumerWidget {
   /// the parent Scaffold's AppBar.
   final bool showAppBar;
 
+  final Widget? headerExtension;
+
   const EquipmentSetListContent({
     super.key,
     this.onItemSelected,
     this.selectedId,
     this.showAppBar = true,
+    this.headerExtension,
   });
 
   @override
@@ -46,6 +49,7 @@ class EquipmentSetListContent extends ConsumerWidget {
       return Column(
         children: [
           _buildCompactAppBar(context),
+          if (headerExtension != null) headerExtension!,
           Expanded(child: content),
         ],
       );
@@ -57,6 +61,7 @@ class EquipmentSetListContent extends ConsumerWidget {
   Widget _buildCompactAppBar(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      constraints: const BoxConstraints(minHeight: kMinInteractiveDimension),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
         border: Border(
@@ -70,7 +75,7 @@ class EquipmentSetListContent extends ConsumerWidget {
         children: [
           const SizedBox(width: 8),
           Text(
-            context.l10n.equipment_sets_appBar_title,
+            context.l10n.equipment_appBar_title,
             style: Theme.of(
               context,
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),

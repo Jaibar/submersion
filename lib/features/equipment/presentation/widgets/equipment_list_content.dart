@@ -26,6 +26,7 @@ class EquipmentListContent extends ConsumerStatefulWidget {
   final String? selectedId;
   final bool showAppBar;
   final Widget? floatingActionButton;
+  final Widget? headerExtension;
 
   const EquipmentListContent({
     super.key,
@@ -33,6 +34,7 @@ class EquipmentListContent extends ConsumerStatefulWidget {
     this.selectedId,
     this.showAppBar = true,
     this.floatingActionButton,
+    this.headerExtension,
   });
 
   @override
@@ -133,6 +135,7 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
       return Column(
         children: [
           _buildCompactAppBar(context),
+          if (widget.headerExtension != null) widget.headerExtension!,
           _buildFilterChips(context),
           Expanded(child: content),
         ],

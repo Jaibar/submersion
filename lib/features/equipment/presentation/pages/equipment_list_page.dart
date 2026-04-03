@@ -144,53 +144,48 @@ class _EquipmentListPageState extends ConsumerState<EquipmentListPage>
   }
 
   Widget _buildMasterDetailLayout(BuildContext context) {
+    return _isEquipmentTab
+        ? _buildEquipmentMasterDetail()
+        : _buildSetsMasterDetail();
+  }
+
+  Widget _buildMasterTabBar(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(context.l10n.equipment_appBar_title),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: [
-            Tab(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.backpack, size: 20),
-                  const SizedBox(width: 8),
-                  Text(context.l10n.equipment_tab_equipment),
-                ],
-              ),
-            ),
-            Tab(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.folder_special, size: 20),
-                  const SizedBox(width: 8),
-                  Text(context.l10n.equipment_tab_sets),
-                ],
-              ),
-            ),
-          ],
-          indicatorSize: TabBarIndicatorSize.tab,
-          indicator: BoxDecoration(
-            borderRadius: BorderRadius.circular(24),
-            color: colorScheme.primaryContainer,
+    return TabBar(
+      controller: _tabController,
+      tabs: [
+        Tab(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.backpack, size: 20),
+              const SizedBox(width: 8),
+              Text(context.l10n.equipment_tab_equipment),
+            ],
           ),
-          indicatorPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 6,
-          ),
-          labelColor: colorScheme.onPrimaryContainer,
-          labelStyle: const TextStyle(fontWeight: FontWeight.w600),
-          unselectedLabelColor: colorScheme.onSurfaceVariant,
-          splashBorderRadius: BorderRadius.circular(24),
         ),
+        Tab(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.folder_special, size: 20),
+              const SizedBox(width: 8),
+              Text(context.l10n.equipment_tab_sets),
+            ],
+          ),
+        ),
+      ],
+      indicatorSize: TabBarIndicatorSize.tab,
+      indicator: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        color: colorScheme.primaryContainer,
       ),
-      body: _isEquipmentTab
-          ? _buildEquipmentMasterDetail()
-          : _buildSetsMasterDetail(),
+      indicatorPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      labelColor: colorScheme.onPrimaryContainer,
+      labelStyle: const TextStyle(fontWeight: FontWeight.w600),
+      unselectedLabelColor: colorScheme.onSurfaceVariant,
+      splashBorderRadius: BorderRadius.circular(24),
     );
   }
 
@@ -203,6 +198,7 @@ class _EquipmentListPageState extends ConsumerState<EquipmentListPage>
             onItemSelected: onItemSelected,
             selectedId: selectedId,
             showAppBar: false,
+            headerExtension: _buildMasterTabBar(context),
           ),
       detailBuilder: (context, id) => EquipmentDetailPage(
         equipmentId: id,
@@ -241,6 +237,7 @@ class _EquipmentListPageState extends ConsumerState<EquipmentListPage>
             onItemSelected: onItemSelected,
             selectedId: selectedId,
             showAppBar: false,
+            headerExtension: _buildMasterTabBar(context),
           ),
       detailBuilder: (context, id) => EquipmentSetDetailPage(setId: id),
       summaryBuilder: (context) => _buildSetsSummary(context),
