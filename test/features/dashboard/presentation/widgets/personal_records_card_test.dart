@@ -10,11 +10,12 @@ import '../../../../helpers/mock_providers.dart';
 
 void main() {
   group('PersonalRecordsCard bottomTime coverage', () {
-    testWidgets('shows longest dive duration from bottomTime', (tester) async {
+    testWidgets('shows longest dive duration from runtime', (tester) async {
       final dives = [
         createTestDiveWithBottomTime(
           id: 'longest',
-          bottomTime: const Duration(minutes: 60),
+          bottomTime: const Duration(minutes: 50),
+          runtime: const Duration(minutes: 65),
           maxDepth: 30.0,
           waterTemp: 20.0,
         ),
@@ -50,7 +51,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('60min'), findsOneWidget);
+      expect(find.text('65min'), findsOneWidget);
     });
   });
 }

@@ -153,12 +153,13 @@ final personalRecordsProvider = FutureProvider<PersonalRecords>((ref) async {
     }
   }
 
-  // Find longest dive
+  // Find longest dive (by total runtime, including descent/ascent)
   Dive? longestDive;
   int maxDuration = 0;
   for (final dive in allDives) {
-    if (dive.bottomTime != null && dive.bottomTime!.inMinutes > maxDuration) {
-      maxDuration = dive.bottomTime!.inMinutes;
+    final runtime = dive.effectiveRuntime;
+    if (runtime != null && runtime.inSeconds > maxDuration) {
+      maxDuration = runtime.inSeconds;
       longestDive = dive;
     }
   }

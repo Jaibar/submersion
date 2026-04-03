@@ -32,7 +32,10 @@ class PersonalRecordsCard extends ConsumerWidget {
     String longestValue = '-';
     VoidCallback? longestTap;
     if (records?.longestDive != null) {
-      longestValue = '${records!.longestDive!.bottomTime!.inMinutes}min';
+      final runtime = records!.longestDive!.effectiveRuntime;
+      if (runtime != null) {
+        longestValue = '${runtime.inMinutes}min';
+      }
       longestTap = () => context.push('/dives/${records.longestDive!.id}');
     }
 

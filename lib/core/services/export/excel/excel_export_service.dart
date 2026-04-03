@@ -458,12 +458,14 @@ class ExcelExportService {
 
       final longestDive = dives.reduce(
         (a, b) =>
-            (a.bottomTime?.inMinutes ?? 0) > (b.bottomTime?.inMinutes ?? 0)
+            (a.effectiveRuntime?.inSeconds ?? 0) >
+                (b.effectiveRuntime?.inSeconds ?? 0)
             ? a
             : b,
       );
-      if (longestDive.bottomTime != null) {
-        addStat('Longest Dive', '${longestDive.bottomTime!.inMinutes} min');
+      final longestRuntime = longestDive.effectiveRuntime;
+      if (longestRuntime != null) {
+        addStat('Longest Dive', '${longestRuntime.inMinutes} min');
       }
 
       final divesWithTemp = dives.where((d) => d.waterTemp != null).toList();

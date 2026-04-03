@@ -1780,13 +1780,14 @@ class DiveRepository {
       LIMIT 1
     ''', variables: vars).getSingleOrNull();
 
-      // Longest dive
+      // Longest dive (by runtime, falling back to bottom_time)
       final longestResult = await _db.customSelect('''
-      SELECT d.*, s.name as site_name
+      SELECT d.*, s.name as site_name,
+        COALESCE(d.runtime, d.bottom_time) as effective_runtime
       FROM dives d
       LEFT JOIN dive_sites s ON d.site_id = s.id
-      WHERE d.bottom_time IS NOT NULL $diverFilter
-      ORDER BY d.bottom_time DESC
+      WHERE COALESCE(d.runtime, d.bottom_time) IS NOT NULL $diverFilter
+      ORDER BY effective_runtime DESC
       LIMIT 1
     ''', variables: vars).getSingleOrNull();
 
@@ -1881,6 +1882,9 @@ class DiveRepository {
       maxDepth: row.data['max_depth'] as double?,
       bottomTime: row.data['bottom_time'] != null
           ? Duration(seconds: row.data['bottom_time'] as int)
+          : null,
+      runtime: row.data['runtime'] != null
+          ? Duration(seconds: row.data['runtime'] as int)
           : null,
       waterTemp: row.data['water_temp'] as double?,
     );
@@ -4036,6 +4040,7 @@ class DiveRecord {
   final DateTime dateTime;
   final double? maxDepth;
   final Duration? bottomTime;
+  final Duration? runtime;
   final double? waterTemp;
 
   DiveRecord({
@@ -4045,8 +4050,12 @@ class DiveRecord {
     required this.dateTime,
     this.maxDepth,
     this.bottomTime,
+    this.runtime,
     this.waterTemp,
   });
+
+  /// Best available runtime (runtime, then bottomTime).
+  Duration? get effectiveRuntime => runtime ?? bottomTime;
 }
 
 /// Information about dive numbering, including gaps
