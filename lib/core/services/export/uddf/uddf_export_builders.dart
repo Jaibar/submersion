@@ -99,8 +99,9 @@ class UddfExportBuilders {
     List<ProfileEvent> profileEvents,
     List<DiveWeight> diveWeights,
     List<Trip>? trips,
-    List<GasSwitchWithTank> gasSwitches,
-  ) {
+    List<GasSwitchWithTank> gasSwitches, {
+    Map<String, List<TankPressurePoint>>? tankPressures,
+  }) {
     // Separate buddies by role for UDDF export
     final regularBuddies = diveBuddyList
         .where((b) => b.role == BuddyRole.buddy || b.role == BuddyRole.student)
@@ -322,11 +323,20 @@ class UddfExportBuilders {
                         nest: (point.temperature! + 273.15).toString(),
                       );
                     }
-                    if (point.pressure != null) {
-                      builder.element(
-                        'tankpressure',
-                        nest: (point.pressure! * 100000).toString(),
-                      );
+                    if (tankPressures != null) {
+                      for (final entry in tankPressures.entries) {
+                        final pressure = findPressureAtTimestamp(
+                          entry.value,
+                          point.timestamp,
+                        );
+                        if (pressure != null) {
+                          builder.element(
+                            'tankpressure',
+                            attributes: {'ref': 'tank_${entry.key}'},
+                            nest: (pressure * 100000).toString(),
+                          );
+                        }
+                      }
                     }
                     if (point.heartRate != null) {
                       builder.element(
@@ -394,6 +404,7 @@ class UddfExportBuilders {
           for (final tank in dive.tanks) {
             builder.element(
               'tankdata',
+              attributes: {'id': 'tank_${tank.id}'},
               nest: () {
                 // Link to gas mix
                 final mixId =
@@ -1492,6 +1503,49 @@ class UddfExportBuilders {
         );
       },
     );
+  }
+
+  /// Find pressure at a given timestamp using binary search.
+  /// Points must be sorted by timestamp (ascending).
+  /// Returns null if no point exists within 2 seconds of [timestamp].
+  static double? findPressureAtTimestamp(
+    List<TankPressurePoint> points,
+    int timestamp,
+  ) {
+    if (points.isEmpty) return null;
+
+    // Binary search for the insertion point
+    int low = 0;
+    int high = points.length;
+    while (low < high) {
+      final mid = low + ((high - low) >> 1);
+      if (points[mid].timestamp < timestamp) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+
+    // Check the two candidates (before and at insertion point)
+    const maxDiff = 3; // exclusive — accepts diffs of 0, 1, 2
+    TankPressurePoint? closest;
+    int minDiff = maxDiff;
+
+    if (low > 0) {
+      final diff = (points[low - 1].timestamp - timestamp).abs();
+      if (diff < minDiff) {
+        minDiff = diff;
+        closest = points[low - 1];
+      }
+    }
+    if (low < points.length) {
+      final diff = (points[low].timestamp - timestamp).abs();
+      if (diff < minDiff) {
+        closest = points[low];
+      }
+    }
+
+    return closest?.pressure;
   }
 
   static String _visibilityToUddf(enums.Visibility visibility) {
