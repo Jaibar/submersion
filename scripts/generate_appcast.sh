@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Generates appcast.xml for Sparkle/WinSparkle auto-updates.
 #
-# Usage: ./scripts/generate_appcast.sh <version> <build_number> <date> <macos_dmg_url> <windows_url> <release_notes_url>
+# Usage: ./scripts/generate_appcast.sh <version> <build_number> <date> <macos_dmg_url> <windows_url> <release_notes_html_file>
 #
 # Arguments:
-#   version           - Marketing version string (e.g. "1.1.3")
-#   build_number      - Build number (e.g. "40"), used as sparkle:version for macOS (CFBundleVersion)
-#   date              - RFC 2822 date string for pubDate
-#   macos_dmg_url     - Download URL for macOS DMG
-#   windows_url       - Download URL for Windows installer
-#   release_notes_url - URL to a simple HTML page with release notes
+#   version                  - Marketing version string (e.g. "1.1.3")
+#   build_number             - Build number (e.g. "40"), used as sparkle:version for macOS (CFBundleVersion)
+#   date                     - RFC 2822 date string for pubDate
+#   macos_dmg_url            - Download URL for macOS DMG
+#   windows_url              - Download URL for Windows installer
+#   release_notes_html_file  - Path to generated release-notes.html (inlined in appcast via CDATA)
 #
 # Requires:
 #   SPARKLE_EDDSA_SIGNATURE env var (EdDSA signature of macOS DMG)
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-RAW_VERSION="${1:?Usage: generate_appcast.sh <version> <build_number> <date> <macos_url> <windows_url> <release_notes_url>}"
+RAW_VERSION="${1:?Usage: generate_appcast.sh <version> <build_number> <date> <macos_url> <windows_url> <release_notes_html_file>}"
 BUILD_NUMBER="${2:?Missing build_number argument}"
 # Strip the build number from VERSION if the tag included it (e.g. v1.3.7.82
 # → 1.3.7) so that appending .${BUILD_NUMBER} below always produces a clean
@@ -26,9 +26,16 @@ VERSION=$(echo "$RAW_VERSION" | cut -d. -f1-3)
 DATE="${3}"
 MACOS_URL="${4}"
 WINDOWS_URL="${5}"
-RELEASE_NOTES_URL="${6}"
+RELEASE_NOTES_FILE="${6:?Missing release_notes_html_file argument}"
 EDDSA_SIG="${SPARKLE_EDDSA_SIGNATURE:-}"
 DMG_LENGTH="${SPARKLE_DMG_LENGTH:-0}"
+
+if [ ! -f "$RELEASE_NOTES_FILE" ]; then
+  echo "Error: release notes file not found: $RELEASE_NOTES_FILE" >&2
+  exit 1
+fi
+
+RELEASE_NOTES_HTML=$(cat "$RELEASE_NOTES_FILE")
 
 cat <<APPCAST
 <?xml version="1.0" encoding="utf-8"?>
@@ -39,7 +46,7 @@ cat <<APPCAST
       <title>Version ${VERSION}.${BUILD_NUMBER}</title>
       <sparkle:version>${BUILD_NUMBER}</sparkle:version>
       <sparkle:shortVersionString>${VERSION}.${BUILD_NUMBER}</sparkle:shortVersionString>
-      <sparkle:releaseNotesLink>${RELEASE_NOTES_URL}</sparkle:releaseNotesLink>
+      <description><![CDATA[${RELEASE_NOTES_HTML}]]></description>
       <pubDate>${DATE}</pubDate>
       <enclosure
         url="${MACOS_URL}"
@@ -53,7 +60,7 @@ cat <<APPCAST
       <title>Version ${VERSION}.${BUILD_NUMBER}</title>
       <sparkle:version>${VERSION}.${BUILD_NUMBER}</sparkle:version>
       <sparkle:shortVersionString>${VERSION}.${BUILD_NUMBER}</sparkle:shortVersionString>
-      <sparkle:releaseNotesLink>${RELEASE_NOTES_URL}</sparkle:releaseNotesLink>
+      <description><![CDATA[${RELEASE_NOTES_HTML}]]></description>
       <pubDate>${DATE}</pubDate>
       <enclosure
         url="${WINDOWS_URL}"

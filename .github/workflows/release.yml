@@ -915,8 +915,7 @@ jobs:
           DATE=$(date -R)
           MACOS_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/Submersion-${TAG_NAME}-macOS.dmg"
           WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/Submersion-${TAG_NAME}-Windows-Setup.exe"
-          RELEASE_NOTES_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/release-notes.html"
-          ./scripts/generate_appcast.sh "$VERSION" "$BUILD_NUMBER" "$DATE" "$MACOS_URL" "$WINDOWS_URL" "$RELEASE_NOTES_URL" > appcast.xml
+          ./scripts/generate_appcast.sh "$VERSION" "$BUILD_NUMBER" "$DATE" "$MACOS_URL" "$WINDOWS_URL" "release-notes.html" > appcast.xml
 
       - name: Generate checksums
         run: sha256sum Submersion-* > checksums-sha256.txt
