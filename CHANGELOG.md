@@ -3,6 +3,31 @@
 All notable changes to Submersion are documented in this file.
 
 
+## 1.4.2 (2026-04-05)
+
+### Bug Fixes
+
+- await dive list instead of reading synchronously (#62)
+- remove _showPressure gate that blocked all tank pressure lines
+- restore startup check with background guard (#107)
+- stop programmatic background check that suppresses manual dialog (#107)
+- show MOD and MND for Air gas mix (#138)
+- load tank pressure data for single-tank dives in SAC calculation
+- apply tank preset name when defaulting imported dives
+- inline release notes HTML in appcast.xml to fix empty update dialog
+- use runtime instead of bottom time for longest dive record
+- add User-Agent to OSM tile requests, correct package name (#134)
+- use correct column name in computer stats temperature query
+
+### Chores
+
+- bump version to 1.4.2+87
+
+### Other
+
+- Deprecate legacy pressure field, fix multi-tank import (#115) (#136)
+
+
 ## 1.4.1 (2026-04-03)
 
 ### Bug Fixes
