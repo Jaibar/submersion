@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/database/database.dart'
     show DiveDataSourcesCompanion, DiveProfilesCompanion;
+import 'package:submersion/core/utils/number_utils.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/universal_import/data/services/import_duplicate_checker.dart';
 
@@ -41,12 +42,14 @@ Future<int> performConsolidations({
       computerModel: Value(diveData['diveComputerModel'] as String?),
       computerSerial: Value(diveData['diveComputerSerial'] as String?),
       sourceFormat: Value(diveData['sourceFormat'] as String?),
-      maxDepth: Value(diveData['maxDepth'] as double?),
-      avgDepth: Value(diveData['avgDepth'] as double?),
+      maxDepth: Value(asDoubleOrNull(diveData['maxDepth'])),
+      avgDepth: Value(asDoubleOrNull(diveData['avgDepth'])),
       duration: Value(effectiveDuration?.inSeconds),
-      waterTemp: Value(diveData['waterTemp'] as double?),
+      waterTemp: Value(asDoubleOrNull(diveData['waterTemp'])),
       entryTime: Value(dateTime),
       exitTime: Value(exitTime),
+      cns: Value(asDoubleOrNull(diveData['cnsEnd'])),
+      otu: Value(asDoubleOrNull(diveData['otu'])),
       importedAt: now,
       createdAt: now,
     );
@@ -61,11 +64,17 @@ Future<int> performConsolidations({
             diveId: matchResult.diveId,
             isPrimary: const Value(false),
             timestamp: p['timestamp'] as int? ?? 0,
-            depth: p['depth'] as double? ?? 0.0,
-            temperature: Value(p['temperature'] as double?),
+            depth: asDoubleOrNull(p['depth']) ?? 0.0,
+            temperature: Value(asDoubleOrNull(p['temperature'])),
             pressure: const Value(null),
-            setpoint: Value(p['setpoint'] as double?),
-            ppO2: Value(p['ppO2'] as double?),
+            heartRate: Value(p['heartRate'] as int?),
+            setpoint: Value(asDoubleOrNull(p['setpoint'])),
+            ppO2: Value(asDoubleOrNull(p['ppO2'])),
+            cns: Value(asDoubleOrNull(p['cns'])),
+            ndl: Value(p['ndl'] as int?),
+            rbt: Value(p['rbt'] as int?),
+            decoType: Value(p['decoType'] as int?),
+            tts: Value(p['tts'] as int?),
           ),
         )
         .toList();
