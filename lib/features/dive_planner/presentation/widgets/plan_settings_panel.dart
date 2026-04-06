@@ -77,7 +77,10 @@ class PlanSettingsPanel extends ConsumerWidget {
             // SAC rate
             Row(
               children: [
-                Text(context.l10n.divePlanner_label_sacRate),
+                Flexible(
+                  flex: 0,
+                  child: Text(context.l10n.divePlanner_label_sacRate),
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Semantics(
@@ -99,7 +102,7 @@ class PlanSettingsPanel extends ConsumerWidget {
                   ),
                 ),
                 SizedBox(
-                  width: 80,
+                  width: 70,
                   child: Text(
                     '${planState.sacRate.toStringAsFixed(0)} ${units.volumeSymbol}/min',
                     style: theme.textTheme.bodyMedium,
@@ -110,39 +113,47 @@ class PlanSettingsPanel extends ConsumerWidget {
             const SizedBox(height: 16),
 
             // Altitude and reserve pressure row
-            Row(
-              children: [
-                Expanded(
-                  child: _AltitudeInput(
-                    altitude: planState.altitude,
-                    units: units,
-                    onChanged: (value) {
-                      ref
-                          .read(divePlanNotifierProvider.notifier)
-                          .updateAltitude(value);
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _ReservePressureInput(
-                    reservePressure: planState.reservePressure,
-                    defaultPressureBar:
-                        settings.pressureUnit == PressureUnit.psi
-                        ? PressureUnit.psi.convert(500, PressureUnit.bar)
-                        : DivePlanState.kDefaultReservePressureBar,
-                    maxPressureBar: planState.tanks
-                        .map((t) => t.startPressure ?? 0.0)
-                        .fold(0.0, (a, b) => a > b ? a : b),
-                    units: units,
-                    onChanged: (value) {
-                      ref
-                          .read(divePlanNotifierProvider.notifier)
-                          .updateReservePressure(value);
-                    },
-                  ),
-                ),
-              ],
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final compact = constraints.maxWidth < 400;
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: _AltitudeInput(
+                        altitude: planState.altitude,
+                        units: units,
+                        compact: compact,
+                        onChanged: (value) {
+                          ref
+                              .read(divePlanNotifierProvider.notifier)
+                              .updateAltitude(value);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _ReservePressureInput(
+                        reservePressure: planState.reservePressure,
+                        defaultPressureBar:
+                            settings.pressureUnit == PressureUnit.psi
+                            ? PressureUnit.psi.convert(500, PressureUnit.bar)
+                            : DivePlanState.kDefaultReservePressureBar,
+                        maxPressureBar: planState.tanks
+                            .map((t) => t.startPressure ?? 0.0)
+                            .fold(0.0, (a, b) => a > b ? a : b),
+                        units: units,
+                        compact: compact,
+                        onChanged: (value) {
+                          ref
+                              .read(divePlanNotifierProvider.notifier)
+                              .updateReservePressure(value);
+                        },
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ],
         ),
@@ -155,11 +166,13 @@ class PlanSettingsPanel extends ConsumerWidget {
 class _AltitudeInput extends StatefulWidget {
   final double? altitude;
   final UnitFormatter units;
+  final bool compact;
   final ValueChanged<double?> onChanged;
 
   const _AltitudeInput({
     required this.altitude,
     required this.units,
+    this.compact = false,
     required this.onChanged,
   });
 
@@ -205,54 +218,82 @@ class _AltitudeInputState extends State<_AltitudeInput> {
     final theme = Theme.of(context);
     final altitudeGroup = AltitudeGroup.fromAltitude(widget.altitude);
     final hasAltitude = widget.altitude != null && widget.altitude! > 0;
+    final showGroup = hasAltitude && altitudeGroup != AltitudeGroup.seaLevel;
+
+    final textField = SizedBox(
+      width: 80,
+      child: TextField(
+        controller: _controller,
+        decoration: InputDecoration(
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 8,
+            vertical: 8,
+          ),
+          suffixText: widget.units.altitudeSymbol,
+          hintText: '0',
+        ),
+        keyboardType: TextInputType.number,
+        onChanged: (value) {
+          if (value.isEmpty) {
+            widget.onChanged(null);
+          } else {
+            final parsed = double.tryParse(value);
+            if (parsed != null) {
+              final meters = widget.units.altitudeToMeters(parsed);
+              widget.onChanged(meters);
+            }
+          }
+        },
+      ),
+    );
+
+    final groupChip = showGroup
+        ? Flexible(
+            child: Semantics(
+              label: 'Altitude group: ${altitudeGroup.displayName}',
+              child: _buildGroupChip(theme, altitudeGroup),
+            ),
+          )
+        : null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Icon(Icons.terrain, size: 18),
-            const SizedBox(width: 8),
-            Text(context.l10n.divePlanner_label_altitude),
-            const SizedBox(width: 8),
-            SizedBox(
-              width: 100,
-              child: TextField(
-                controller: _controller,
-                decoration: InputDecoration(
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 8,
-                  ),
-                  suffixText: widget.units.altitudeSymbol,
-                  hintText: '0',
+        if (widget.compact) ...[
+          Row(
+            children: [
+              const Icon(Icons.terrain, size: 18),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  context.l10n.divePlanner_label_altitude,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                keyboardType: TextInputType.number,
-                onChanged: (value) {
-                  if (value.isEmpty) {
-                    widget.onChanged(null);
-                  } else {
-                    final parsed = double.tryParse(value);
-                    if (parsed != null) {
-                      final meters = widget.units.altitudeToMeters(parsed);
-                      widget.onChanged(meters);
-                    }
-                  }
-                },
               ),
-            ),
-            const SizedBox(width: 8),
-            if (hasAltitude && altitudeGroup != AltitudeGroup.seaLevel)
-              Semantics(
-                label: 'Altitude group: ${altitudeGroup.displayName}',
-                child: _buildGroupChip(theme, altitudeGroup),
-              ),
-          ],
-        ),
-        if (hasAltitude && altitudeGroup != AltitudeGroup.seaLevel)
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              textField,
+              if (groupChip != null) ...[const SizedBox(width: 8), groupChip],
+            ],
+          ),
+        ] else
+          Row(
+            children: [
+              const Icon(Icons.terrain, size: 18),
+              const SizedBox(width: 8),
+              Flexible(child: Text(context.l10n.divePlanner_label_altitude)),
+              const SizedBox(width: 8),
+              textField,
+              if (groupChip != null) ...[const SizedBox(width: 8), groupChip],
+            ],
+          ),
+        if (showGroup)
           Padding(
-            padding: const EdgeInsets.only(top: 4, left: 26),
+            padding: const EdgeInsets.only(top: 4),
             child: Text(
               altitudeGroup.rangeDescription,
               style: theme.textTheme.bodySmall?.copyWith(
@@ -306,6 +347,7 @@ class _ReservePressureInput extends StatefulWidget {
   final double defaultPressureBar;
   final double maxPressureBar;
   final UnitFormatter units;
+  final bool compact;
   final ValueChanged<double> onChanged;
 
   const _ReservePressureInput({
@@ -313,6 +355,7 @@ class _ReservePressureInput extends StatefulWidget {
     required this.defaultPressureBar,
     required this.maxPressureBar,
     required this.units,
+    this.compact = false,
     required this.onChanged,
   });
 
@@ -407,40 +450,46 @@ class _ReservePressureInputState extends State<_ReservePressureInput> {
 
   @override
   Widget build(BuildContext context) {
+    final textField = SizedBox(
+      width: 80,
+      child: Semantics(
+        label: 'Reserve pressure in ${widget.units.pressureSymbol}',
+        child: TextField(
+          controller: _controller,
+          decoration: InputDecoration(
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 8,
+              vertical: 8,
+            ),
+            suffixText: widget.units.pressureSymbol,
+            errorText: _isError ? '' : null,
+            errorStyle: const TextStyle(height: 0, fontSize: 0),
+          ),
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          onChanged: _validate,
+        ),
+      ),
+    );
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.end,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(context.l10n.divePlanner_label_reserve),
-            const SizedBox(width: 8),
-            SizedBox(
-              width: 80,
-              child: Semantics(
-                label: 'Reserve pressure in ${widget.units.pressureSymbol}',
-                child: TextField(
-                  controller: _controller,
-                  decoration: InputDecoration(
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 8,
-                    ),
-                    suffixText: widget.units.pressureSymbol,
-                    // Error text rendered separately below
-                    errorText: _isError ? '' : null,
-                    errorStyle: const TextStyle(height: 0, fontSize: 0),
-                  ),
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  onChanged: _validate,
-                ),
-              ),
-            ),
-          ],
-        ),
+        if (widget.compact) ...[
+          Text(context.l10n.divePlanner_label_reserve),
+          const SizedBox(height: 4),
+          textField,
+        ] else
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(child: Text(context.l10n.divePlanner_label_reserve)),
+              const SizedBox(width: 8),
+              textField,
+            ],
+          ),
         if (_messageText != null)
           Padding(
             padding: const EdgeInsets.only(top: 4),
