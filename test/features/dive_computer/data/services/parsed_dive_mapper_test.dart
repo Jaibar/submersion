@@ -570,6 +570,43 @@ void main() {
       expect(sample.ceiling, isNull);
     });
 
+    // --- Average depth fallback for unsupported computers ---
+
+    test('maps avgDepthMeters of 0.0 to null avgDepth', () {
+      // Computers like Cressi Leonardo don't report average depth;
+      // libdivecomputer returns 0.0 from zero-initialized struct.
+      final parsed = makeParsedDive(
+        fingerprint: 'cressi-leonardo',
+        maxDepthMeters: 18.0,
+        avgDepthMeters: 0.0,
+        durationSeconds: 2400,
+        samples: [
+          pigeon.ProfileSample(timeSeconds: 0, depthMeters: 0.0),
+          pigeon.ProfileSample(timeSeconds: 600, depthMeters: 18.0),
+          pigeon.ProfileSample(timeSeconds: 1200, depthMeters: 15.0),
+          pigeon.ProfileSample(timeSeconds: 2400, depthMeters: 0.0),
+        ],
+      );
+
+      final downloaded = parsedDiveToDownloaded(parsed);
+
+      // 0.0 should be treated as "not reported", not a real value
+      expect(downloaded.avgDepth, isNull);
+    });
+
+    test('preserves non-zero avgDepthMeters as-is', () {
+      final parsed = makeParsedDive(
+        fingerprint: 'shearwater-teric',
+        maxDepthMeters: 30.0,
+        avgDepthMeters: 18.5,
+        durationSeconds: 3600,
+      );
+
+      final downloaded = parsedDiveToDownloaded(parsed);
+
+      expect(downloaded.avgDepth, 18.5);
+    });
+
     // --- Deco model fields ---
 
     test('maps deco model fields correctly', () {
