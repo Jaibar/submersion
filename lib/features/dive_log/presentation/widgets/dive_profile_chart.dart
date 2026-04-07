@@ -22,6 +22,20 @@ import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_l
 import 'package:submersion/features/dive_log/presentation/widgets/gas_colors.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
+/// Structured row emitted via [DiveProfileChart.onTooltipData] so callers
+/// can render the tooltip externally (e.g., below the chart).
+class TooltipRow {
+  final String label;
+  final String value;
+  final Color bulletColor;
+
+  const TooltipRow({
+    required this.label,
+    required this.value,
+    required this.bulletColor,
+  });
+}
+
 /// Interactive dive profile chart showing depth over time with zoom/pan support
 class DiveProfileChart extends ConsumerStatefulWidget {
   final List<DiveProfilePoint> profile;
@@ -146,6 +160,15 @@ class DiveProfileChart extends ConsumerStatefulWidget {
   /// Computers not in this set use a dashed line style.
   final Set<String>? primaryComputers;
 
+  /// When true, the built-in tooltip is suppressed and tooltip data is
+  /// emitted via [onTooltipData] so callers can render it externally
+  /// (e.g., below the chart in the profile panel).
+  final bool tooltipBelow;
+
+  /// Called with structured tooltip row data when a point is touched
+  /// and [tooltipBelow] is true. Null clears the tooltip.
+  final void Function(List<TooltipRow>? rows)? onTooltipData;
+
   /// Returns responsive left axis reserved size based on available chart width.
   /// Tick labels are plain numbers (e.g. "30", "60") so don't need much space.
   static double leftAxisSize(double availableWidth) =>
@@ -199,6 +222,8 @@ class DiveProfileChart extends ConsumerStatefulWidget {
     this.visibleComputers,
     this.computerLineColors,
     this.primaryComputers,
+    this.tooltipBelow = false,
+    this.onTooltipData,
   });
 
   @override
@@ -412,6 +437,363 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     });
   }
 
+  /// Build and emit [TooltipRow] data for external rendering when
+  /// [DiveProfileChart.tooltipBelow] is true.
+  void _emitExternalTooltip(
+    List<LineBarSpot> touchedSpots,
+    UnitFormatter units,
+    ColorScheme colorScheme,
+  ) {
+    if (widget.onTooltipData == null) return;
+
+    final spot = touchedSpots.where((s) => s.barIndex == 0).firstOrNull;
+    if (spot == null || spot.spotIndex >= widget.profile.length) {
+      widget.onTooltipData!(null);
+      return;
+    }
+
+    final point = widget.profile[spot.spotIndex];
+    final rows = <TooltipRow>[];
+    final onSurface = colorScheme.onInverseSurface;
+
+    // Time
+    final minutes = point.timestamp ~/ 60;
+    final seconds = point.timestamp % 60;
+    rows.add(
+      TooltipRow(
+        label: 'Time',
+        value: '$minutes:${seconds.toString().padLeft(2, '0')}',
+        bulletColor: onSurface.withValues(alpha: 0.5),
+      ),
+    );
+
+    // Depth
+    rows.add(
+      TooltipRow(
+        label: 'Depth',
+        value: units.formatDepth(point.depth),
+        bulletColor: AppColors.chartDepth,
+      ),
+    );
+
+    // Temperature
+    if (_showTemperature) {
+      rows.add(
+        TooltipRow(
+          label: 'Temp',
+          value: point.temperature != null
+              ? units.formatTemperature(point.temperature)
+              : '-',
+          bulletColor: colorScheme.tertiary,
+        ),
+      );
+    }
+
+    // Ceiling
+    if (_showCeiling &&
+        widget.ceilingCurve != null &&
+        spot.spotIndex < widget.ceilingCurve!.length) {
+      final ceiling = widget.ceilingCurve![spot.spotIndex];
+      rows.add(
+        TooltipRow(
+          label: 'Ceiling',
+          value: ceiling > 0 ? units.formatDepth(ceiling) : '-',
+          bulletColor: const Color(0xFFD32F2F),
+        ),
+      );
+    }
+
+    // Ascent rate
+    if (_showAscentRateColors &&
+        widget.ascentRates != null &&
+        spot.spotIndex < widget.ascentRates!.length) {
+      final ascentRate = widget.ascentRates![spot.spotIndex];
+      final rate = ascentRate.rateMetersPerMin;
+      final convertedRate = units.convertDepth(rate.abs());
+      String arrow = '-';
+      Color rateColor = Colors.grey;
+      if (rate > 0.5) {
+        arrow = '\u2191';
+        rateColor = ascentRate.category == AscentRateCategory.safe
+            ? Colors.lime
+            : _getAscentRateColor(ascentRate.category);
+      } else if (rate < -0.5) {
+        arrow = '\u2193';
+        rateColor = Colors.cyan;
+      }
+      rows.add(
+        TooltipRow(
+          label: 'Rate',
+          value:
+              '$arrow ${convertedRate.toStringAsFixed(1)} ${units.depthSymbol}/min',
+          bulletColor: rateColor,
+        ),
+      );
+    }
+
+    // Heart rate
+    if (_showHeartRate) {
+      rows.add(
+        TooltipRow(
+          label: 'HR',
+          value: point.heartRate != null ? '${point.heartRate} bpm' : '-',
+          bulletColor: Colors.red,
+        ),
+      );
+    }
+
+    // SAC
+    if (_showSac &&
+        widget.sacCurve != null &&
+        spot.spotIndex < widget.sacCurve!.length) {
+      final sacBarPerMin = widget.sacCurve![spot.spotIndex];
+      String sacValue = '-';
+      if (sacBarPerMin > 0) {
+        final normalizedSac = sacBarPerMin * widget.sacNormalizationFactor;
+        final sacUnit = ref.read(settingsProvider).sacUnit;
+        if (sacUnit == SacUnit.litersPerMin && widget.tankVolume != null) {
+          final sacLPerMin = normalizedSac * widget.tankVolume!;
+          sacValue =
+              '${units.convertVolume(sacLPerMin).toStringAsFixed(1)} ${units.volumeSymbol}/min';
+        } else {
+          sacValue =
+              '${units.convertPressure(normalizedSac).toStringAsFixed(1)} ${units.pressureSymbol}/min';
+        }
+      }
+      rows.add(
+        TooltipRow(label: 'SAC', value: sacValue, bulletColor: Colors.teal),
+      );
+    }
+
+    // NDL
+    if (_showNdl &&
+        widget.ndlCurve != null &&
+        spot.spotIndex < widget.ndlCurve!.length) {
+      final ndl = widget.ndlCurve![spot.spotIndex];
+      String ndlValue;
+      if (ndl < 0) {
+        ndlValue = 'DECO';
+      } else if (ndl < 3600) {
+        final min = ndl ~/ 60;
+        final sec = ndl % 60;
+        ndlValue = '$min:${sec.toString().padLeft(2, '0')}';
+      } else {
+        ndlValue = '>60 min';
+      }
+      rows.add(
+        TooltipRow(
+          label: 'NDL',
+          value: ndlValue,
+          bulletColor: Colors.yellow.shade700,
+        ),
+      );
+    }
+
+    // ppO2
+    if (_showPpO2 &&
+        widget.ppO2Curve != null &&
+        spot.spotIndex < widget.ppO2Curve!.length) {
+      rows.add(
+        TooltipRow(
+          label: 'ppO2',
+          value: '${widget.ppO2Curve![spot.spotIndex].toStringAsFixed(2)} bar',
+          bulletColor: const Color(0xFF00ACC1),
+        ),
+      );
+    }
+
+    // ppN2
+    if (_showPpN2 &&
+        widget.ppN2Curve != null &&
+        spot.spotIndex < widget.ppN2Curve!.length) {
+      rows.add(
+        TooltipRow(
+          label: 'ppN2',
+          value: '${widget.ppN2Curve![spot.spotIndex].toStringAsFixed(2)} bar',
+          bulletColor: Colors.indigo,
+        ),
+      );
+    }
+
+    // ppHe
+    if (_showPpHe &&
+        widget.ppHeCurve != null &&
+        spot.spotIndex < widget.ppHeCurve!.length) {
+      final ppHe = widget.ppHeCurve![spot.spotIndex];
+      if (ppHe > 0.001) {
+        rows.add(
+          TooltipRow(
+            label: 'ppHe',
+            value: '${ppHe.toStringAsFixed(2)} bar',
+            bulletColor: Colors.pink.shade300,
+          ),
+        );
+      }
+    }
+
+    // MOD
+    if (_showMod &&
+        widget.modCurve != null &&
+        spot.spotIndex < widget.modCurve!.length) {
+      final mod = widget.modCurve![spot.spotIndex];
+      if (mod > 0 && mod < 200) {
+        rows.add(
+          TooltipRow(
+            label: 'MOD',
+            value: units.formatDepth(mod),
+            bulletColor: Colors.deepOrange,
+          ),
+        );
+      }
+    }
+
+    // Gas density
+    if (_showDensity &&
+        widget.densityCurve != null &&
+        spot.spotIndex < widget.densityCurve!.length) {
+      rows.add(
+        TooltipRow(
+          label: 'Density',
+          value:
+              '${widget.densityCurve![spot.spotIndex].toStringAsFixed(2)} g/L',
+          bulletColor: Colors.brown,
+        ),
+      );
+    }
+
+    // GF%
+    if (_showGf &&
+        widget.gfCurve != null &&
+        spot.spotIndex < widget.gfCurve!.length) {
+      rows.add(
+        TooltipRow(
+          label: 'GF',
+          value: '${widget.gfCurve![spot.spotIndex].toStringAsFixed(0)}%',
+          bulletColor: Colors.deepPurple,
+        ),
+      );
+    }
+
+    // Surface GF
+    if (_showSurfaceGf &&
+        widget.surfaceGfCurve != null &&
+        spot.spotIndex < widget.surfaceGfCurve!.length) {
+      rows.add(
+        TooltipRow(
+          label: 'Srf GF',
+          value:
+              '${widget.surfaceGfCurve![spot.spotIndex].toStringAsFixed(0)}%',
+          bulletColor: Colors.purple.shade300,
+        ),
+      );
+    }
+
+    // Mean depth
+    if (_showMeanDepth &&
+        widget.meanDepthCurve != null &&
+        spot.spotIndex < widget.meanDepthCurve!.length) {
+      rows.add(
+        TooltipRow(
+          label: 'Mean',
+          value: units.formatDepth(widget.meanDepthCurve![spot.spotIndex]),
+          bulletColor: Colors.blueGrey,
+        ),
+      );
+    }
+
+    // TTS
+    if (_showTts &&
+        widget.ttsCurve != null &&
+        spot.spotIndex < widget.ttsCurve!.length) {
+      final tts = widget.ttsCurve![spot.spotIndex];
+      rows.add(
+        TooltipRow(
+          label: 'TTS',
+          value: tts > 0 ? '${(tts / 60).ceil()} min' : '0 min',
+          bulletColor: const Color(0xFFAD1457),
+        ),
+      );
+    }
+
+    // CNS%
+    if (_showCns &&
+        widget.cnsCurve != null &&
+        spot.spotIndex < widget.cnsCurve!.length) {
+      rows.add(
+        TooltipRow(
+          label: 'CNS',
+          value: '${widget.cnsCurve![spot.spotIndex].toStringAsFixed(1)}%',
+          bulletColor: const Color(0xFFE65100),
+        ),
+      );
+    }
+
+    // OTU
+    if (_showOtu &&
+        widget.otuCurve != null &&
+        spot.spotIndex < widget.otuCurve!.length) {
+      rows.add(
+        TooltipRow(
+          label: 'OTU',
+          value: widget.otuCurve![spot.spotIndex].toStringAsFixed(0),
+          bulletColor: const Color(0xFF6D4C41),
+        ),
+      );
+    }
+
+    // Per-tank pressure
+    if (widget.tankPressures != null) {
+      final timestamp = point.timestamp;
+      final sortedTankIds = _sortedTankIds(widget.tankPressures!.keys);
+      for (var i = 0; i < sortedTankIds.length; i++) {
+        final tankId = sortedTankIds[i];
+        if (!(_showTankPressure[tankId] ?? true)) continue;
+        final pressurePoints = widget.tankPressures![tankId];
+        if (pressurePoints == null || pressurePoints.isEmpty) continue;
+        final pressure = _interpolateTankPressure(pressurePoints, timestamp);
+        final tank = _getTankById(tankId);
+        final color = tank != null
+            ? GasColors.forGasMix(tank.gasMix)
+            : _getTankColor(i);
+        final tankLabel = tank?.name ?? 'Tank ${i + 1}';
+        rows.add(
+          TooltipRow(
+            label: tankLabel,
+            value: pressure != null ? units.formatPressure(pressure) : '-',
+            bulletColor: color,
+          ),
+        );
+      }
+    }
+
+    // Marker info (if touching near a marker)
+    if (widget.markers != null && widget.markers!.isNotEmpty) {
+      final timestamp = point.timestamp;
+      const timestampThreshold = 3;
+      for (final marker in widget.markers!) {
+        if (marker.type == ProfileMarkerType.maxDepth) {
+          if (!widget.showMaxDepthMarker || !_showMaxDepthMarkerLocal) continue;
+        } else {
+          if (!widget.showPressureThresholdMarkers ||
+              !_showPressureMarkersLocal) {
+            continue;
+          }
+        }
+        if ((marker.timestamp - timestamp).abs() <= timestampThreshold) {
+          rows.add(
+            TooltipRow(
+              label: 'Marker',
+              value: marker.chartLabel,
+              bulletColor: marker.getColor(),
+            ),
+          );
+        }
+      }
+    }
+
+    widget.onTooltipData!(rows);
+  }
+
   void _zoomIn() {
     setState(() {
       _zoomLevel = (_zoomLevel * 1.5).clamp(_minZoom, _maxZoom);
@@ -565,7 +947,6 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
                 ),
               ),
             ),
-
             // Zoom hint
             if (_zoomLevel > 1.0)
               Padding(
@@ -1084,22 +1465,31 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
               touchSpotThreshold: 20,
               handleBuiltInTouches: true,
               touchCallback: (event, response) {
-                if (widget.onPointSelected != null) {
-                  // Clear selection on any touch-end event (finger lift,
-                  // mouse exit, etc.) so data returns to end-of-dive values.
-                  // Check end events first — fl_chart may still report spot
-                  // data in the response for the last-touched position.
+                if (widget.onPointSelected != null ||
+                    widget.onTooltipData != null) {
                   if (event is FlPointerExitEvent ||
                       event is FlLongPressEnd ||
                       event is FlTapUpEvent ||
                       event is FlPanEndEvent) {
-                    widget.onPointSelected!(null);
+                    widget.onPointSelected?.call(null);
+                    if (widget.tooltipBelow) {
+                      widget.onTooltipData?.call(null);
+                    }
                   } else if (response?.lineBarSpots != null &&
                       response!.lineBarSpots!.isNotEmpty) {
                     final spot = response.lineBarSpots!.first;
                     if (spot.barIndex == 0 &&
                         spot.spotIndex < widget.profile.length) {
-                      widget.onPointSelected!(spot.spotIndex);
+                      widget.onPointSelected?.call(spot.spotIndex);
+                      if (widget.tooltipBelow) {
+                        final settings = ref.read(settingsProvider);
+                        final units = UnitFormatter(settings);
+                        _emitExternalTooltip(
+                          response.lineBarSpots!,
+                          units,
+                          Theme.of(context).colorScheme,
+                        );
+                      }
                     }
                   }
                 }
@@ -1110,8 +1500,15 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
                 fitInsideVertically: false,
                 showOnTopOfTheChartBoxArea: true,
                 tooltipMargin: 0,
-                getTooltipColor: (spot) => colorScheme.inverseSurface,
+                getTooltipColor: widget.tooltipBelow
+                    ? (_) => Colors.transparent
+                    : (spot) => colorScheme.inverseSurface,
                 getTooltipItems: (touchedSpots) {
+                  // When tooltipBelow, suppress the visual bubble.
+                  // Tooltip data is emitted via touchCallback instead.
+                  if (widget.tooltipBelow) {
+                    return touchedSpots.map((_) => null).toList();
+                  }
                   // Return cached result if the same spot index is touched again
                   if (touchedSpots.isNotEmpty) {
                     final firstDepthSpot = touchedSpots

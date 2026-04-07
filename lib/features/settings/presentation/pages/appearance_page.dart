@@ -134,6 +134,28 @@ class AppearancePage extends ConsumerWidget {
                   .setShowMapBackgroundOnDiveCards(value);
             },
           ),
+          SwitchListTile(
+            title: const Text('Show Profile Panel in Table View'),
+            subtitle: const Text(
+              'Display dive profile chart above the table by default',
+            ),
+            secondary: const Icon(Icons.area_chart),
+            value: settings.showProfilePanelInTableView,
+            onChanged: (value) {
+              ref
+                  .read(settingsProvider.notifier)
+                  .setShowProfilePanelInTableView(value);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.view_column),
+            title: Text(context.l10n.settings_appearance_columnConfig),
+            subtitle: Text(
+              context.l10n.settings_appearance_columnConfig_subtitle,
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/settings/appearance/column-config'),
+          ),
           const Divider(),
           _buildSectionHeader(context, 'Dive Sites'),
           ListTile(
@@ -532,6 +554,7 @@ class AppearancePage extends ConsumerWidget {
       ListViewMode.detailed => 'Detailed',
       ListViewMode.compact => 'Compact',
       ListViewMode.dense => 'Dense',
+      ListViewMode.table => 'Table',
     };
   }
 

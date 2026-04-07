@@ -3,12 +3,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:submersion/core/constants/card_color.dart';
+import 'package:submersion/core/constants/dive_field.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/presentation/providers/highlight_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/compact_dive_list_tile.dart';
-import 'package:submersion/features/dive_log/presentation/widgets/dense_dive_list_tile.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_panel.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/table_column_picker.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
 import 'package:submersion/shared/widgets/master_detail/map_view_toggle_button.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
@@ -27,6 +31,7 @@ import 'package:submersion/features/dive_log/presentation/providers/dive_provide
 import 'package:submersion/features/dive_log/presentation/pages/dive_list_page.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/add_dive_bottom_sheet.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_numbering_dialog.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_table_view.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Content widget for the dive list, used in master-detail layout.
@@ -98,6 +103,13 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
         _scrollToSelectedItem();
       });
     }
+    // Initialize profile panel visibility from persisted setting
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final settings = ref.read(settingsProvider);
+      ref.read(showProfilePanelProvider.notifier).state =
+          settings.showProfilePanelInTableView;
+    });
   }
 
   @override
@@ -173,6 +185,7 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
   }
 
   void _enterSelectionMode(String? initialId) {
+    ref.read(highlightedDiveIdProvider.notifier).state = null;
     setState(() {
       _isSelectionMode = true;
       _selectedIds.clear();
@@ -763,6 +776,19 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
     }
   }
 
+  /// Returns the [DiveField] for [slotId] from [slots], or [defaultField] if
+  /// no matching slot is found.
+  DiveField _slotField(
+    List<CardSlotConfig> slots,
+    String slotId,
+    DiveField defaultField,
+  ) {
+    for (final slot in slots) {
+      if (slot.slotId == slotId) return slot.field;
+    }
+    return defaultField;
+  }
+
   void _handleItemTap(DiveSummary dive) {
     if (_isSelectionMode) {
       _toggleSelection(dive.id);
@@ -780,13 +806,16 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
       return;
     }
 
+    // Highlight the dive in all modes.
+    ref.read(highlightedDiveIdProvider.notifier).state = dive.id;
+
+    // In card/list modes, also navigate (table mode uses double-tap instead).
     if (widget.onItemSelected != null) {
-      // Master-detail mode: notify parent
-      // Mark that selection came from list tap (don't scroll)
+      // Master-detail mode: notify parent to open detail pane
       _selectionFromList = true;
       widget.onItemSelected!(dive.id);
     } else {
-      // Standalone mode: navigate
+      // Standalone mode: navigate to detail page
       context.go('/dives/${dive.id}');
     }
   }
@@ -813,8 +842,16 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
 
   @override
   Widget build(BuildContext context) {
-    final paginatedAsync = ref.watch(paginatedDiveListProvider);
+    final viewMode = ref.watch(diveListViewModeProvider);
     final filter = ref.watch(diveFilterProvider);
+
+    // Table mode uses a completely different data path (full Dive objects
+    // instead of DiveSummary) and renders a DiveTableView widget.
+    if (viewMode == ListViewMode.table) {
+      return _buildTableModeScaffold(context, filter);
+    }
+
+    final paginatedAsync = ref.watch(paginatedDiveListProvider);
 
     final content = paginatedAsync.when(
       data: (paginatedState) => paginatedState.dives.isEmpty
@@ -851,15 +888,33 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
     );
   }
 
-  AppBar _buildAppBar(BuildContext context, DiveFilterState filter) {
+  AppBar _buildAppBar(
+    BuildContext context,
+    DiveFilterState filter, {
+    String? title,
+    List<Widget> extraActions = const [],
+  }) {
     return AppBar(
-      title: Text(context.l10n.diveLog_listPage_title),
+      title: Text(title ?? context.l10n.diveLog_listPage_title),
       actions: [
-        IconButton(
-          icon: const Icon(Icons.map),
-          tooltip: context.l10n.diveLog_listPage_tooltip_mapView,
-          onPressed: () => context.push('/dives/activity'),
-        ),
+        ...extraActions,
+        if (widget.onMapViewToggle != null)
+          IconButton(
+            icon: Icon(
+              Icons.map,
+              color: widget.isMapViewActive
+                  ? Theme.of(context).colorScheme.primary
+                  : null,
+            ),
+            tooltip: context.l10n.diveLog_listPage_tooltip_mapView,
+            onPressed: widget.onMapViewToggle,
+          )
+        else
+          IconButton(
+            icon: const Icon(Icons.map),
+            tooltip: context.l10n.diveLog_listPage_tooltip_mapView,
+            onPressed: () => context.push('/dives/activity'),
+          ),
         IconButton(
           icon: const Icon(Icons.search),
           tooltip: context.l10n.diveLog_listPage_tooltip_searchDives,
@@ -906,6 +961,11 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
               ...ListViewModeToggle.menuItems(
                 context,
                 currentMode: currentMode,
+                modes: const [
+                  ListViewMode.detailed,
+                  ListViewMode.compact,
+                  ListViewMode.table,
+                ],
               ),
               const PopupMenuDivider(),
               PopupMenuItem(
@@ -1015,6 +1075,11 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                 ...ListViewModeToggle.menuItems(
                   context,
                   currentMode: currentMode,
+                  modes: const [
+                    ListViewMode.detailed,
+                    ListViewMode.compact,
+                    ListViewMode.table,
+                  ],
                 ),
                 const PopupMenuDivider(),
                 PopupMenuItem(
@@ -1153,6 +1218,116 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
     );
   }
 
+  /// Build the full scaffold/layout for table mode.
+  ///
+  /// Table mode uses the [allDivesForTableProvider] (full Dive objects with
+  /// filters and sorting applied) instead of the paginated DiveSummary list.
+  Widget _buildTableModeScaffold(BuildContext context, DiveFilterState filter) {
+    final content = _buildTableView(context, filter);
+
+    if (!widget.showAppBar) {
+      // Inside MasterDetailScaffold (though table mode typically skips it)
+      return Column(
+        children: [
+          if (_isSelectionMode)
+            _buildSelectionBar(const [])
+          else
+            _buildCompactAppBar(context, filter),
+          Expanded(child: content),
+        ],
+      );
+    }
+
+    // Standalone mode with full Scaffold
+    return Scaffold(
+      appBar: _isSelectionMode
+          ? _buildSelectionAppBar(const [])
+          : _buildAppBar(
+              context,
+              filter,
+              title: context.l10n.nav_dives,
+              extraActions: [
+                IconButton(
+                  icon: Icon(
+                    Icons.area_chart,
+                    color: ref.watch(showProfilePanelProvider)
+                        ? Theme.of(context).colorScheme.primary
+                        : null,
+                  ),
+                  tooltip: 'Toggle profile panel',
+                  onPressed: () {
+                    ref.read(showProfilePanelProvider.notifier).state = !ref
+                        .read(showProfilePanelProvider);
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(Icons.view_column_outlined),
+                  tooltip: 'Column settings',
+                  onPressed: () => showTableColumnPicker(context),
+                ),
+                SizedBox(
+                  height: 24,
+                  child: VerticalDivider(
+                    width: 16,
+                    thickness: 1,
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.outlineVariant.withValues(alpha: 0.5),
+                  ),
+                ),
+              ],
+            ),
+      body: content,
+      floatingActionButton: _isSelectionMode
+          ? null
+          : widget.floatingActionButton,
+    );
+  }
+
+  /// Build the DiveTableView widget from the full-Dive provider.
+  Widget _buildTableView(BuildContext context, DiveFilterState filter) {
+    final divesAsync = ref.watch(allDivesForTableProvider);
+
+    return divesAsync.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, s) => _buildErrorState(context, e),
+      data: (dives) {
+        if (dives.isEmpty) {
+          return _buildEmptyState(context, filter.hasActiveFilters);
+        }
+        final showPanel = ref.watch(showProfilePanelProvider);
+        return Column(
+          children: [
+            if (filter.hasActiveFilters) _buildActiveFiltersBar(context),
+            if (showPanel) const DiveProfilePanel(),
+            Expanded(
+              child: DiveTableView(
+                dives: dives,
+                onDiveTap: (id) {
+                  if (_isSelectionMode) {
+                    _toggleSelection(id);
+                  } else {
+                    ref.read(highlightedDiveIdProvider.notifier).state = id;
+                  }
+                },
+                onDiveDoubleTap: (id) {
+                  if (_isSelectionMode) return;
+                  context.push('/dives/$id');
+                },
+                onDiveLongPress: _isSelectionMode
+                    ? null
+                    : (id) => _enterSelectionMode(id),
+                selectedIds: _selectedIds,
+                isSelectionMode: _isSelectionMode,
+                highlightedId: ref.watch(highlightedDiveIdProvider),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Widget _buildDiveList(
     BuildContext context,
     PaginatedDiveListState paginatedState,
@@ -1177,6 +1352,24 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
       customStart: settings.cardColorGradientStart,
       customEnd: settings.cardColorGradientEnd,
     );
+
+    // Check if detailed mode needs full Dive objects for non-summary fields
+    final detailedConfig = ref.watch(detailedCardConfigProvider);
+    final needsFullDive =
+        detailedConfig.extraFields.any(
+          (f) => !DiveField.summaryFields.contains(f),
+        ) ||
+        detailedConfig.slots.any(
+          (s) => !DiveField.summaryFields.contains(s.field),
+        );
+    final Map<String, Dive> fullDiveLookup;
+    if (needsFullDive) {
+      final divesAsync = ref.watch(allDivesForTableProvider);
+      final fullDives = divesAsync.whenOrNull(data: (d) => d) ?? [];
+      fullDiveLookup = {for (final d in fullDives) d.id: d};
+    } else {
+      fullDiveLookup = {};
+    }
 
     // +1 for loading indicator when more pages are available
     final itemCount =
@@ -1234,6 +1427,8 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                     onLongPress: _isSelectionMode
                         ? null
                         : () => _enterSelectionMode(dive.id),
+                    summary: dive,
+                    fullDive: fullDiveLookup[dive.id],
                   ),
                   ListViewMode.compact => CompactDiveListTile(
                     diveId: dive.id,
@@ -1251,18 +1446,46 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                     maxValueInList: maxValue,
                     gradientStartColor: gradientColors.start,
                     gradientEndColor: gradientColors.end,
+                    summary: dive,
+                    titleField: _slotField(
+                      ref.watch(compactCardConfigProvider).slots,
+                      'title',
+                      DiveField.siteName,
+                    ),
+                    dateField: _slotField(
+                      ref.watch(compactCardConfigProvider).slots,
+                      'date',
+                      DiveField.dateTime,
+                    ),
+                    stat1Field: _slotField(
+                      ref.watch(compactCardConfigProvider).slots,
+                      'stat1',
+                      DiveField.maxDepth,
+                    ),
+                    stat2Field: _slotField(
+                      ref.watch(compactCardConfigProvider).slots,
+                      'stat2',
+                      DiveField.bottomTime,
+                    ),
                     onTap: () => _handleItemTap(dive),
                     onLongPress: _isSelectionMode
                         ? null
                         : () => _enterSelectionMode(dive.id),
                   ),
-                  ListViewMode.dense => DenseDiveListTile(
+                  // Dense is no longer a dive view option; table is handled
+                  // in _buildTableModeScaffold. Fall through to detailed.
+                  ListViewMode.dense || ListViewMode.table => DiveListTile(
                     diveId: dive.id,
                     diveNumber: dive.diveNumber ?? index + 1,
                     dateTime: dive.dateTime,
                     siteName: dive.siteName,
+                    siteLocation: dive.siteLocation,
                     maxDepth: dive.maxDepth,
                     duration: dive.runtime ?? dive.bottomTime,
+                    waterTemp: dive.waterTemp,
+                    rating: dive.rating,
+                    isFavorite: dive.isFavorite,
+                    tags: dive.tags,
                     isSelectionMode: _isSelectionMode,
                     isSelected: _isSelectionMode
                         ? isSelected
@@ -1272,10 +1495,14 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                     maxValueInList: maxValue,
                     gradientStartColor: gradientColors.start,
                     gradientEndColor: gradientColors.end,
+                    siteLatitude: dive.siteLatitude,
+                    siteLongitude: dive.siteLongitude,
                     onTap: () => _handleItemTap(dive),
                     onLongPress: _isSelectionMode
                         ? null
                         : () => _enterSelectionMode(dive.id),
+                    summary: dive,
+                    fullDive: fullDiveLookup[dive.id],
                   ),
                 };
               },

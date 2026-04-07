@@ -12,6 +12,7 @@ import 'package:latlong2/latlong.dart';
 
 import 'package:submersion/core/constants/dive_detail_sections.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/tank_presets.dart';
 import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
@@ -170,17 +171,20 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    // On desktop, redirect standalone detail pages to master-detail view
-    // This ensures all dive detail navigation shows the split layout on desktop
+    // On desktop, redirect standalone detail pages to master-detail view.
+    // Skip in table mode -- table view has no master-detail split to redirect into.
     if (!widget.embedded &&
         !_hasRedirected &&
         ResponsiveBreakpoints.isMasterDetail(context)) {
-      _hasRedirected = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          context.go('/dives?selected=$diveId');
-        }
-      });
+      final viewMode = ref.read(diveListViewModeProvider);
+      if (viewMode != ListViewMode.table) {
+        _hasRedirected = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            context.go('/dives?selected=$diveId');
+          }
+        });
+      }
     }
 
     final diveAsync = ref.watch(diveProvider(diveId));
@@ -495,7 +499,7 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
           IconButton(
             icon: const Icon(Icons.edit),
             tooltip: context.l10n.diveLog_detail_tooltip_editDive,
-            onPressed: () => context.go('/dives/$diveId/edit'),
+            onPressed: () => context.push('/dives/$diveId/edit'),
           ),
           PopupMenuButton<String>(
             onSelected: (value) {

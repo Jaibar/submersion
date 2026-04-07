@@ -719,6 +719,9 @@ class DiverSettings extends Table {
       boolean().withDefault(const Constant(true))();
   // Dive detail section order and visibility (v56) — JSON array
   TextColumn get diveDetailSections => text().nullable()();
+  // Table view profile panel default visibility (v61)
+  BoolColumn get showProfilePanelInTableView =>
+      boolean().withDefault(const Constant(true))();
   IntColumn get createdAt => integer()();
   IntColumn get updatedAt => integer()();
 
@@ -1188,6 +1191,34 @@ class CsvPresets extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// Stores the active view configuration per (diver, view_mode).
+class ViewConfigs extends Table {
+  TextColumn get id => text()();
+  TextColumn get diverId =>
+      text().references(Divers, #id, onDelete: KeyAction.cascade)();
+  TextColumn get viewMode => text()();
+  TextColumn get configJson => text()();
+  IntColumn get updatedAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// Named presets per (diver, view_mode).
+class FieldPresets extends Table {
+  TextColumn get id => text()();
+  TextColumn get diverId =>
+      text().references(Divers, #id, onDelete: KeyAction.cascade)();
+  TextColumn get viewMode => text()();
+  TextColumn get name => text()();
+  TextColumn get configJson => text()();
+  BoolColumn get isBuiltIn => boolean().withDefault(const Constant(false))();
+  IntColumn get createdAt => integer()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
 // ============================================================================
 // Database Class
 // ============================================================================
@@ -1247,6 +1278,9 @@ class CsvPresets extends Table {
     TripItineraryDays,
     // CSV import presets (local-only)
     CsvPresets,
+    // Column view configuration
+    ViewConfigs,
+    FieldPresets,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -1254,7 +1288,7 @@ class AppDatabase extends _$AppDatabase {
 
   /// The current schema version as a static constant so that pre-open checks
   /// (e.g. version-mismatch guard) can reference it without an instance.
-  static const int currentSchemaVersion = 59;
+  static const int currentSchemaVersion = 62;
 
   @override
   int get schemaVersion => currentSchemaVersion;
@@ -2637,6 +2671,61 @@ class AppDatabase extends _$AppDatabase {
               [diveId, tankId, diveId],
             );
           }
+        }
+
+        if (from < 60) {
+          await customStatement('''
+            CREATE TABLE IF NOT EXISTS view_configs (
+              id TEXT NOT NULL PRIMARY KEY,
+              diver_id TEXT NOT NULL REFERENCES divers(id) ON DELETE CASCADE,
+              view_mode TEXT NOT NULL,
+              config_json TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            )
+          ''');
+          await customStatement('''
+            CREATE TABLE IF NOT EXISTS field_presets (
+              id TEXT NOT NULL PRIMARY KEY,
+              diver_id TEXT NOT NULL REFERENCES divers(id) ON DELETE CASCADE,
+              view_mode TEXT NOT NULL,
+              name TEXT NOT NULL,
+              config_json TEXT NOT NULL,
+              is_built_in INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL
+            )
+          ''');
+          await customStatement(
+            'CREATE INDEX IF NOT EXISTS idx_view_configs_diver ON view_configs(diver_id, view_mode)',
+          );
+          await customStatement(
+            'CREATE INDEX IF NOT EXISTS idx_field_presets_diver ON field_presets(diver_id, view_mode)',
+          );
+        }
+
+        if (from < 61) {
+          // Add showProfilePanelInTableView column to diver_settings.
+          // Guard against table not existing in older migration test contexts.
+          final columns = await customSelect(
+            "PRAGMA table_info('diver_settings')",
+          ).get();
+          if (columns.isNotEmpty &&
+              !columns.any(
+                (c) =>
+                    c.read<String>('name') ==
+                    'show_profile_panel_in_table_view',
+              )) {
+            await customStatement('''
+              ALTER TABLE diver_settings
+              ADD COLUMN show_profile_panel_in_table_view INTEGER NOT NULL DEFAULT 1
+            ''');
+          }
+        }
+
+        if (from < 62) {
+          await customStatement('''
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_view_configs_unique
+            ON view_configs(diver_id, view_mode)
+          ''');
         }
       },
       beforeOpen: (details) async {

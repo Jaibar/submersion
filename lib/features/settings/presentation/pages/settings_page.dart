@@ -7,6 +7,7 @@ import 'package:material_design_icons_flutter/material_design_icons_flutter.dart
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/core/constants/card_color.dart';
+import 'package:submersion/features/settings/presentation/pages/column_config_page.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/core/constants/profile_metrics.dart';
@@ -1090,10 +1091,27 @@ class _AppearanceSectionContent extends ConsumerStatefulWidget {
 class _AppearanceSectionContentState
     extends ConsumerState<_AppearanceSectionContent> {
   bool _showLanguageList = false;
+  bool _showColumnConfig = false;
 
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
+
+    if (_showColumnConfig) {
+      return Column(
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () => setState(() => _showColumnConfig = false),
+              icon: const Icon(Icons.arrow_back, size: 18),
+              label: const Text('Appearance'),
+            ),
+          ),
+          const Expanded(child: ColumnConfigPage(embedded: true)),
+        ],
+      );
+    }
 
     if (_showLanguageList) {
       return _buildLanguageSubPage(context, settings);
@@ -1238,6 +1256,16 @@ class _AppearanceSectionContentState
                         .read(settingsProvider.notifier)
                         .setShowMapBackgroundOnDiveCards(value);
                   },
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.view_column),
+                  title: Text(context.l10n.settings_appearance_columnConfig),
+                  subtitle: Text(
+                    context.l10n.settings_appearance_columnConfig_subtitle,
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => setState(() => _showColumnConfig = true),
                 ),
               ],
             ),
@@ -1615,6 +1643,7 @@ class _AppearanceSectionContentState
       ListViewMode.detailed => 'Detailed',
       ListViewMode.compact => 'Compact',
       ListViewMode.dense => 'Dense',
+      ListViewMode.table => 'Table',
     };
   }
 
