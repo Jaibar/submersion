@@ -107,7 +107,7 @@ void main() {
       );
       await tester.pump();
 
-      // Verify column headers from shortLabel values
+      // Verify column headers from displayName values
       expect(find.text('Name'), findsWidgets);
       expect(find.text('Type'), findsOneWidget);
       expect(find.text('Brand'), findsOneWidget);
@@ -495,7 +495,8 @@ void main() {
 
       expect(find.text('Sort Equipment'), findsOneWidget);
 
-      await tester.tap(find.text('Last Service'));
+      // Use .last because 'Last Service' also appears in the column header
+      await tester.tap(find.text('Last Service').last);
       await tester.pumpAndSettle();
     });
 
@@ -543,7 +544,8 @@ void main() {
 
       expect(find.text('Sort Equipment'), findsOneWidget);
 
-      await tester.tap(find.text('Last Service'));
+      // Use .last because 'Last Service' also appears in the column header
+      await tester.tap(find.text('Last Service').last);
       await tester.pumpAndSettle();
     });
 

@@ -132,10 +132,10 @@ void main() {
       );
       await tester.pump();
 
-      // Verify column headers from shortLabel values
+      // Verify column headers from displayName values
       expect(find.text('Name'), findsWidgets);
-      expect(find.text('Start'), findsOneWidget);
-      expect(find.text('End'), findsOneWidget);
+      expect(find.text('Start Date'), findsOneWidget);
+      expect(find.text('End Date'), findsOneWidget);
     });
 
     testWidgets('renders rows for each trip', (tester) async {
@@ -481,7 +481,8 @@ void main() {
 
       expect(find.text('Sort Trips'), findsOneWidget);
 
-      await tester.tap(find.text('End Date'));
+      // Use .last because 'End Date' also appears in the column header
+      await tester.tap(find.text('End Date').last);
       await tester.pumpAndSettle();
     });
 
@@ -529,7 +530,8 @@ void main() {
 
       expect(find.text('Sort Trips'), findsOneWidget);
 
-      await tester.tap(find.text('End Date'));
+      // Use .last because 'End Date' also appears in the column header
+      await tester.tap(find.text('End Date').last);
       await tester.pumpAndSettle();
     });
 

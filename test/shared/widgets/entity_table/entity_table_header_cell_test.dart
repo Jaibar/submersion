@@ -92,11 +92,11 @@ Widget _buildHeaderCell({
 
 void main() {
   group('EntityTableHeaderCell', () {
-    testWidgets('renders shortLabel text', (tester) async {
+    testWidgets('renders displayName text', (tester) async {
       await tester.pumpWidget(_buildHeaderCell());
       await tester.pumpAndSettle();
 
-      expect(find.text('Sort'), findsOneWidget);
+      expect(find.text('Sortable Field'), findsOneWidget);
     });
 
     testWidgets(
@@ -143,7 +143,7 @@ void main() {
       await tester.pumpWidget(_buildHeaderCell(onTap: () => tapped = true));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Sort'));
+      await tester.tap(find.text('Sortable Field'));
       await tester.pumpAndSettle();
 
       expect(tapped, isTrue);
@@ -188,13 +188,13 @@ void main() {
       await tester.pumpAndSettle();
 
       // The InkWell should have onTap == null for non-sortable fields
-      await tester.tap(find.text('NoSort'));
+      await tester.tap(find.text('Non-Sortable Field'));
       await tester.pumpAndSettle();
 
       expect(tapped, isFalse);
     });
 
-    testWidgets('non-sortable field renders shortLabel correctly', (
+    testWidgets('non-sortable field renders displayName correctly', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -202,7 +202,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('NoSort'), findsOneWidget);
+      expect(find.text('Non-Sortable Field'), findsOneWidget);
     });
   });
 }

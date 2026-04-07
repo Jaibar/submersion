@@ -120,10 +120,10 @@ void main() {
       );
       await tester.pump();
 
-      // Verify column headers from shortLabel values
+      // Verify column headers from displayName values
       expect(find.text('Name'), findsWidgets);
       expect(find.text('Agency'), findsOneWidget);
-      expect(find.text('Started'), findsOneWidget);
+      expect(find.text('Start Date'), findsOneWidget);
     });
 
     testWidgets('renders rows for each course', (tester) async {

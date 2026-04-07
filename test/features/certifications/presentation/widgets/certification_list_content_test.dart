@@ -122,12 +122,12 @@ void main() {
       );
       await tester.pump();
 
-      // Verify column headers appear (shortLabel values)
+      // Verify column headers appear (displayName values)
       expect(find.text('Name'), findsWidgets);
       expect(find.text('Agency'), findsOneWidget);
       expect(find.text('Level'), findsOneWidget);
-      expect(find.text('Issued'), findsOneWidget);
-      expect(find.text('Expires'), findsOneWidget);
+      expect(find.text('Issue Date'), findsOneWidget);
+      expect(find.text('Expiry Date'), findsOneWidget);
     });
 
     testWidgets('renders rows for each certification', (tester) async {

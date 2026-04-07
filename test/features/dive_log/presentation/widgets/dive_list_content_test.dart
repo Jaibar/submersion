@@ -136,15 +136,15 @@ void main() {
       await tester.pumpWidget(_buildTableModeLayout(dives: dives));
       await tester.pumpAndSettle();
 
-      // Pinned header columns
-      expect(find.text('#'), findsOneWidget);
-      expect(find.text('Site'), findsOneWidget);
+      // Pinned header columns (displayName)
+      expect(find.text('Dive Number'), findsOneWidget);
+      expect(find.text('Site Name'), findsOneWidget);
 
-      // Scrollable header columns
-      expect(find.text('Date'), findsOneWidget);
-      expect(find.text('Max D'), findsOneWidget);
-      expect(find.text('BT'), findsOneWidget);
-      expect(find.text('W Temp'), findsOneWidget);
+      // Scrollable header columns (displayName)
+      expect(find.text('Date & Time'), findsOneWidget);
+      expect(find.text('Max Depth'), findsOneWidget);
+      expect(find.text('Bottom Time'), findsOneWidget);
+      expect(find.text('Water Temperature'), findsOneWidget);
 
       // Row data
       expect(find.text('#1'), findsOneWidget);
@@ -441,9 +441,9 @@ void main() {
       await tester.pumpWidget(_buildTableModeLayout(dives: []));
       await tester.pumpAndSettle();
 
-      expect(find.text('#'), findsOneWidget);
-      expect(find.text('Site'), findsOneWidget);
-      expect(find.text('Date'), findsOneWidget);
+      expect(find.text('Dive Number'), findsOneWidget);
+      expect(find.text('Site Name'), findsOneWidget);
+      expect(find.text('Date & Time'), findsOneWidget);
       // No data rows
       expect(find.text('#1'), findsNothing);
     });
@@ -528,8 +528,8 @@ void main() {
       await tester.pumpWidget(_buildTableModeLayout(dives: dives));
       await tester.pumpAndSettle();
 
-      // Tap the '#' header to trigger sort
-      await tester.tap(find.text('#'));
+      // Tap the 'Dive Number' header to trigger sort
+      await tester.tap(find.text('Dive Number'));
       await tester.pumpAndSettle();
 
       // Both rows still present
@@ -606,13 +606,13 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Headers
-      expect(find.text('#'), findsOneWidget);
-      expect(find.text('Site'), findsOneWidget);
-      expect(find.text('Date'), findsOneWidget);
-      expect(find.text('Max D'), findsOneWidget);
-      expect(find.text('Avg D'), findsOneWidget);
-      expect(find.text('BT'), findsOneWidget);
+      // Headers (displayName values)
+      expect(find.text('Dive Number'), findsOneWidget);
+      expect(find.text('Site Name'), findsOneWidget);
+      expect(find.text('Date & Time'), findsOneWidget);
+      expect(find.text('Max Depth'), findsOneWidget);
+      expect(find.text('Average Depth'), findsOneWidget);
+      expect(find.text('Bottom Time'), findsOneWidget);
 
       // Data
       expect(find.text('#5'), findsOneWidget);

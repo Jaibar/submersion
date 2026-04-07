@@ -109,11 +109,11 @@ void main() {
       );
       await tester.pump();
 
-      // Verify column headers from the config (shortLabel values)
+      // Verify column headers from the config (displayName values)
       expect(find.text('Name'), findsWidgets);
       expect(find.text('Country'), findsOneWidget);
-      expect(find.text('Max D'), findsOneWidget);
-      expect(find.text('Dives'), findsOneWidget);
+      expect(find.text('Max Depth'), findsOneWidget);
+      expect(find.text('Dive Count'), findsOneWidget);
     });
 
     testWidgets('renders rows for each site', (tester) async {

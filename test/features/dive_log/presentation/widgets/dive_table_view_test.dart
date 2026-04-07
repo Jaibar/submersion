@@ -87,14 +87,14 @@ void main() {
       await tester.pumpWidget(_buildTable(dives: []));
       await tester.pumpAndSettle();
 
-      // Verify pinned column headers
-      expect(find.text('#'), findsOneWidget);
-      expect(find.text('Site'), findsOneWidget);
+      // Verify pinned column headers use displayName
+      expect(find.text('Dive Number'), findsOneWidget);
+      expect(find.text('Site Name'), findsOneWidget);
 
-      // Verify scrollable column headers
-      expect(find.text('Date'), findsOneWidget);
-      expect(find.text('Max D'), findsOneWidget);
-      expect(find.text('BT'), findsOneWidget);
+      // Verify scrollable column headers use displayName
+      expect(find.text('Date & Time'), findsOneWidget);
+      expect(find.text('Max Depth'), findsOneWidget);
+      expect(find.text('Bottom Time'), findsOneWidget);
     });
 
     testWidgets('renders one row per dive', (tester) async {
@@ -239,12 +239,12 @@ void main() {
       await tester.pumpWidget(_buildTable(dives: []));
       await tester.pumpAndSettle();
 
-      // Headers present
-      expect(find.text('#'), findsOneWidget);
-      expect(find.text('Site'), findsOneWidget);
-      expect(find.text('Date'), findsOneWidget);
-      expect(find.text('Max D'), findsOneWidget);
-      expect(find.text('BT'), findsOneWidget);
+      // Headers present (displayName)
+      expect(find.text('Dive Number'), findsOneWidget);
+      expect(find.text('Site Name'), findsOneWidget);
+      expect(find.text('Date & Time'), findsOneWidget);
+      expect(find.text('Max Depth'), findsOneWidget);
+      expect(find.text('Bottom Time'), findsOneWidget);
 
       // No dive data rows
       expect(find.text('#1'), findsNothing);
@@ -329,8 +329,8 @@ void main() {
       await tester.pumpWidget(_buildTable(dives: dives));
       await tester.pumpAndSettle();
 
-      // Tap the '#' header (diveNumber) to trigger ascending sort
-      await tester.tap(find.text('#'));
+      // Tap the 'Dive Number' header to trigger ascending sort
+      await tester.tap(find.text('Dive Number'));
       await tester.pumpAndSettle();
 
       // After ascending sort, dive numbers should be ordered 1,2,3
@@ -354,15 +354,15 @@ void main() {
       await tester.pumpAndSettle();
 
       // First tap: ascending
-      await tester.tap(find.text('#'));
+      await tester.tap(find.text('Dive Number'));
       await tester.pumpAndSettle();
 
       // Second tap: descending
-      await tester.tap(find.text('#'));
+      await tester.tap(find.text('Dive Number'));
       await tester.pumpAndSettle();
 
       // Third tap: clear sort
-      await tester.tap(find.text('#'));
+      await tester.tap(find.text('Dive Number'));
       await tester.pumpAndSettle();
 
       // Both dives still render

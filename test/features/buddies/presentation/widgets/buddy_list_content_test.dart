@@ -123,12 +123,12 @@ void main() {
       );
       await tester.pump();
 
-      // Verify column headers from the config (shortLabel values)
+      // Verify column headers from the config (displayName values)
       expect(find.text('Name'), findsWidgets);
-      expect(find.text('Cert Level'), findsOneWidget);
-      expect(find.text('Agency'), findsOneWidget);
+      expect(find.text('Certification Level'), findsOneWidget);
+      expect(find.text('Certification Agency'), findsOneWidget);
       expect(find.text('Email'), findsOneWidget);
-      expect(find.text('Dives'), findsOneWidget);
+      expect(find.text('Dive Count'), findsOneWidget);
     });
 
     testWidgets('renders rows for each buddy', (tester) async {
@@ -493,7 +493,8 @@ void main() {
 
       expect(find.text('Sort Buddies'), findsOneWidget);
 
-      await tester.tap(find.text('Dive Count'));
+      // Use .last because 'Dive Count' also appears in the column header
+      await tester.tap(find.text('Dive Count').last);
       await tester.pumpAndSettle();
     });
 
@@ -541,7 +542,8 @@ void main() {
 
       expect(find.text('Sort Buddies'), findsOneWidget);
 
-      await tester.tap(find.text('Dive Count'));
+      // Use .last because 'Dive Count' also appears in the column header
+      await tester.tap(find.text('Dive Count').last);
       await tester.pumpAndSettle();
     });
 

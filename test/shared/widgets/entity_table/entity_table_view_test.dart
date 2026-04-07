@@ -149,12 +149,12 @@ Widget _buildTable({
 
 void main() {
   group('EntityTableView', () {
-    testWidgets('renders header row with column short labels', (tester) async {
+    testWidgets('renders header row with column display names', (tester) async {
       await tester.pumpWidget(_buildTable(entities: []));
       await tester.pumpAndSettle();
 
       expect(find.text('Name'), findsOneWidget);
-      expect(find.text('Cnt'), findsOneWidget);
+      expect(find.text('Count'), findsOneWidget);
     });
 
     testWidgets('renders one row per entity', (tester) async {
@@ -361,9 +361,9 @@ void main() {
       await tester.pumpWidget(_buildTable(entities: []));
       await tester.pumpAndSettle();
 
-      // Headers should be present
+      // Headers should be present (displayName)
       expect(find.text('Name'), findsOneWidget);
-      expect(find.text('Cnt'), findsOneWidget);
+      expect(find.text('Count'), findsOneWidget);
 
       // No data rows: the entity-specific text should be absent
       expect(find.text('Alpha'), findsNothing);
@@ -586,8 +586,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Tap the "Cnt" (scrollable column) header
-      await tester.tap(find.text('Cnt'));
+      // Tap the "Count" (scrollable column) header
+      await tester.tap(find.text('Count'));
       await tester.pumpAndSettle();
 
       expect(sortedField, equals(_TestField.entityCount));

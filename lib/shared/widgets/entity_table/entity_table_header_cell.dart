@@ -65,7 +65,7 @@ class EntityTableHeaderCell extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        field.shortLabel,
+                        field.displayName,
                         overflow: TextOverflow.ellipsis,
                         maxLines: 1,
                         style: theme.textTheme.labelSmall?.copyWith(

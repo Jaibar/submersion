@@ -122,7 +122,7 @@ void main() {
       );
       await tester.pump();
 
-      // Verify column headers from shortLabel values
+      // Verify column headers from displayName values
       expect(find.text('Name'), findsWidgets);
       expect(find.text('City'), findsOneWidget);
       expect(find.text('Country'), findsOneWidget);
@@ -498,7 +498,8 @@ void main() {
 
       expect(find.text('Sort Dive Centers'), findsOneWidget);
 
-      await tester.tap(find.text('Dive Count'));
+      // Use .last because 'Dive Count' also appears in the column header
+      await tester.tap(find.text('Dive Count').last);
       await tester.pumpAndSettle();
     });
 
@@ -546,7 +547,8 @@ void main() {
 
       expect(find.text('Sort Dive Centers'), findsOneWidget);
 
-      await tester.tap(find.text('Dive Count'));
+      // Use .last because 'Dive Count' also appears in the column header
+      await tester.tap(find.text('Dive Count').last);
       await tester.pumpAndSettle();
     });
 
