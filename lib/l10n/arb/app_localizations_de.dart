@@ -15778,103 +15778,103 @@ class AppLocalizationsDe extends AppLocalizations {
   String get enum_precipitation_hail => 'Hail';
 
   @override
-  String get columnConfig_title => 'Dive Details List Fields';
+  String get columnConfig_title => 'Tauchdetails-Listenfelder';
 
   @override
-  String get columnConfig_viewMode => 'View Mode';
+  String get columnConfig_viewMode => 'Ansichtsmodus';
 
   @override
-  String get columnConfig_visibleColumns => 'Visible Columns';
+  String get columnConfig_visibleColumns => 'Sichtbare Spalten';
 
   @override
-  String get columnConfig_availableFields => 'Available Fields';
+  String get columnConfig_availableFields => 'Verfügbare Felder';
 
   @override
-  String get columnConfig_extraFields => 'Extra Fields';
+  String get columnConfig_extraFields => 'Zusätzliche Felder';
 
   @override
   String get columnConfig_extraFields_description =>
-      'Shown below main card content';
+      'Unter dem Hauptkarteninhalt angezeigt';
 
   @override
-  String get columnConfig_slotAssignments => 'Slot Assignments';
+  String get columnConfig_slotAssignments => 'Slot-Zuweisungen';
 
   @override
-  String get columnConfig_resetToDefault => 'Reset to Default';
+  String get columnConfig_resetToDefault => 'Auf Standard zurücksetzen';
 
   @override
-  String get columnConfig_preset => 'Preset';
+  String get columnConfig_preset => 'Voreinstellung';
 
   @override
-  String get columnConfig_presetSaveAs => 'Save As';
+  String get columnConfig_presetSaveAs => 'Speichern unter';
 
   @override
-  String get columnConfig_presetName => 'Preset Name';
+  String get columnConfig_presetName => 'Name der Voreinstellung';
 
   @override
-  String get columnConfig_presetNameHint => 'e.g., Tech Diving';
+  String get columnConfig_presetNameHint => 'z. B. Technisches Tauchen';
 
   @override
-  String get columnConfig_presetSave => 'Save';
+  String get columnConfig_presetSave => 'Speichern';
 
   @override
-  String get columnConfig_presetCancel => 'Cancel';
+  String get columnConfig_presetCancel => 'Abbrechen';
 
   @override
-  String get columnConfig_columns => 'Columns';
+  String get columnConfig_columns => 'Spalten';
 
   @override
-  String get columnConfig_done => 'Done';
+  String get columnConfig_done => 'Fertig';
 
   @override
-  String get settings_appearance_columnConfig => 'Dive Details List Fields';
+  String get settings_appearance_columnConfig => 'Tauchdetails-Listenfelder';
 
   @override
   String get settings_appearance_columnConfig_subtitle =>
-      'Customize fields shown in dive list views';
+      'Angezeigte Felder in Tauchlistenansichten anpassen';
 
   @override
-  String get diveField_category_core => 'Core';
+  String get diveField_category_core => 'Grundlagen';
 
   @override
-  String get diveField_category_environment => 'Environment';
+  String get diveField_category_environment => 'Umgebung';
 
   @override
   String get diveField_category_gas => 'Gas';
 
   @override
-  String get diveField_category_tank => 'Tank';
+  String get diveField_category_tank => 'Flasche';
 
   @override
-  String get diveField_category_weight => 'Weight';
+  String get diveField_category_weight => 'Gewicht';
 
   @override
-  String get diveField_category_equipment => 'Equipment';
+  String get diveField_category_equipment => 'Ausrüstung';
 
   @override
-  String get diveField_category_deco => 'Decompression';
+  String get diveField_category_deco => 'Dekompression';
 
   @override
-  String get diveField_category_physiology => 'Physiology';
+  String get diveField_category_physiology => 'Physiologie';
 
   @override
   String get diveField_category_rebreather => 'Rebreather';
 
   @override
-  String get diveField_category_people => 'People';
+  String get diveField_category_people => 'Personen';
 
   @override
-  String get diveField_category_location => 'Location';
+  String get diveField_category_location => 'Ort';
 
   @override
-  String get diveField_category_trip => 'Trip';
+  String get diveField_category_trip => 'Reise';
 
   @override
-  String get diveField_category_rating => 'Rating';
+  String get diveField_category_rating => 'Bewertung';
 
   @override
-  String get diveField_category_metadata => 'Metadata';
+  String get diveField_category_metadata => 'Metadaten';
 
   @override
-  String get listViewMode_table => 'Table';
+  String get listViewMode_table => 'Tabelle';
 }

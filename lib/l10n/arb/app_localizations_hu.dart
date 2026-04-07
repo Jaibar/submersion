@@ -15742,103 +15742,103 @@ class AppLocalizationsHu extends AppLocalizations {
   String get enum_precipitation_hail => 'Hail';
 
   @override
-  String get columnConfig_title => 'Dive Details List Fields';
+  String get columnConfig_title => 'Merülési lista mezői';
 
   @override
-  String get columnConfig_viewMode => 'View Mode';
+  String get columnConfig_viewMode => 'Nézet mód';
 
   @override
-  String get columnConfig_visibleColumns => 'Visible Columns';
+  String get columnConfig_visibleColumns => 'Látható oszlopok';
 
   @override
-  String get columnConfig_availableFields => 'Available Fields';
+  String get columnConfig_availableFields => 'Elérhető mezők';
 
   @override
-  String get columnConfig_extraFields => 'Extra Fields';
+  String get columnConfig_extraFields => 'Extra mezők';
 
   @override
   String get columnConfig_extraFields_description =>
-      'Shown below main card content';
+      'A kártya fő tartalma alatt jelenik meg';
 
   @override
-  String get columnConfig_slotAssignments => 'Slot Assignments';
+  String get columnConfig_slotAssignments => 'Helykiosztások';
 
   @override
-  String get columnConfig_resetToDefault => 'Reset to Default';
+  String get columnConfig_resetToDefault => 'Visszaállítás alapértelmezettre';
 
   @override
-  String get columnConfig_preset => 'Preset';
+  String get columnConfig_preset => 'Előbeállítás';
 
   @override
-  String get columnConfig_presetSaveAs => 'Save As';
+  String get columnConfig_presetSaveAs => 'Mentés másként';
 
   @override
-  String get columnConfig_presetName => 'Preset Name';
+  String get columnConfig_presetName => 'Előbeállítás neve';
 
   @override
-  String get columnConfig_presetNameHint => 'e.g., Tech Diving';
+  String get columnConfig_presetNameHint => 'pl. Technikai merülés';
 
   @override
-  String get columnConfig_presetSave => 'Save';
+  String get columnConfig_presetSave => 'Mentés';
 
   @override
-  String get columnConfig_presetCancel => 'Cancel';
+  String get columnConfig_presetCancel => 'Mégse';
 
   @override
-  String get columnConfig_columns => 'Columns';
+  String get columnConfig_columns => 'Oszlopok';
 
   @override
-  String get columnConfig_done => 'Done';
+  String get columnConfig_done => 'Kész';
 
   @override
-  String get settings_appearance_columnConfig => 'Dive Details List Fields';
+  String get settings_appearance_columnConfig => 'Merülési lista mezői';
 
   @override
   String get settings_appearance_columnConfig_subtitle =>
-      'Customize fields shown in dive list views';
+      'Merülési listanézetekben megjelenő mezők testreszabása';
 
   @override
-  String get diveField_category_core => 'Core';
+  String get diveField_category_core => 'Alapvető';
 
   @override
-  String get diveField_category_environment => 'Environment';
+  String get diveField_category_environment => 'Környezet';
 
   @override
-  String get diveField_category_gas => 'Gas';
+  String get diveField_category_gas => 'Gáz';
 
   @override
-  String get diveField_category_tank => 'Tank';
+  String get diveField_category_tank => 'Palack';
 
   @override
-  String get diveField_category_weight => 'Weight';
+  String get diveField_category_weight => 'Súlyozás';
 
   @override
-  String get diveField_category_equipment => 'Equipment';
+  String get diveField_category_equipment => 'Felszerelés';
 
   @override
-  String get diveField_category_deco => 'Decompression';
+  String get diveField_category_deco => 'Dekompresszió';
 
   @override
-  String get diveField_category_physiology => 'Physiology';
+  String get diveField_category_physiology => 'Fiziológia';
 
   @override
-  String get diveField_category_rebreather => 'Rebreather';
+  String get diveField_category_rebreather => 'Visszalégző';
 
   @override
-  String get diveField_category_people => 'People';
+  String get diveField_category_people => 'Személyek';
 
   @override
-  String get diveField_category_location => 'Location';
+  String get diveField_category_location => 'Helyszín';
 
   @override
-  String get diveField_category_trip => 'Trip';
+  String get diveField_category_trip => 'Utazás';
 
   @override
-  String get diveField_category_rating => 'Rating';
+  String get diveField_category_rating => 'Értékelés';
 
   @override
-  String get diveField_category_metadata => 'Metadata';
+  String get diveField_category_metadata => 'Metaadatok';
 
   @override
-  String get listViewMode_table => 'Table';
+  String get listViewMode_table => 'Táblázat';
 }

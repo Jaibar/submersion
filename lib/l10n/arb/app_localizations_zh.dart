@@ -15026,103 +15026,101 @@ class AppLocalizationsZh extends AppLocalizations {
   String get enum_precipitation_hail => '冰雹';
 
   @override
-  String get columnConfig_title => 'Dive Details List Fields';
+  String get columnConfig_title => '潜水详情列表字段';
 
   @override
-  String get columnConfig_viewMode => 'View Mode';
+  String get columnConfig_viewMode => '视图模式';
 
   @override
-  String get columnConfig_visibleColumns => 'Visible Columns';
+  String get columnConfig_visibleColumns => '可见列';
 
   @override
-  String get columnConfig_availableFields => 'Available Fields';
+  String get columnConfig_availableFields => '可用字段';
 
   @override
-  String get columnConfig_extraFields => 'Extra Fields';
+  String get columnConfig_extraFields => '额外字段';
 
   @override
-  String get columnConfig_extraFields_description =>
-      'Shown below main card content';
+  String get columnConfig_extraFields_description => '显示在卡片主要内容下方';
 
   @override
-  String get columnConfig_slotAssignments => 'Slot Assignments';
+  String get columnConfig_slotAssignments => '位置分配';
 
   @override
-  String get columnConfig_resetToDefault => 'Reset to Default';
+  String get columnConfig_resetToDefault => '恢复默认设置';
 
   @override
-  String get columnConfig_preset => 'Preset';
+  String get columnConfig_preset => '预设';
 
   @override
-  String get columnConfig_presetSaveAs => 'Save As';
+  String get columnConfig_presetSaveAs => '另存为';
 
   @override
-  String get columnConfig_presetName => 'Preset Name';
+  String get columnConfig_presetName => '预设名称';
 
   @override
-  String get columnConfig_presetNameHint => 'e.g., Tech Diving';
+  String get columnConfig_presetNameHint => '例如：技术潜水';
 
   @override
-  String get columnConfig_presetSave => 'Save';
+  String get columnConfig_presetSave => '保存';
 
   @override
-  String get columnConfig_presetCancel => 'Cancel';
+  String get columnConfig_presetCancel => '取消';
 
   @override
-  String get columnConfig_columns => 'Columns';
+  String get columnConfig_columns => '列';
 
   @override
-  String get columnConfig_done => 'Done';
+  String get columnConfig_done => '完成';
 
   @override
-  String get settings_appearance_columnConfig => 'Dive Details List Fields';
+  String get settings_appearance_columnConfig => '潜水详情列表字段';
 
   @override
-  String get settings_appearance_columnConfig_subtitle =>
-      'Customize fields shown in dive list views';
+  String get settings_appearance_columnConfig_subtitle => '自定义潜水列表视图中显示的字段';
 
   @override
-  String get diveField_category_core => 'Core';
+  String get diveField_category_core => '核心';
 
   @override
-  String get diveField_category_environment => 'Environment';
+  String get diveField_category_environment => '环境';
 
   @override
-  String get diveField_category_gas => 'Gas';
+  String get diveField_category_gas => '气体';
 
   @override
-  String get diveField_category_tank => 'Tank';
+  String get diveField_category_tank => '气瓶';
 
   @override
-  String get diveField_category_weight => 'Weight';
+  String get diveField_category_weight => '配重';
 
   @override
-  String get diveField_category_equipment => 'Equipment';
+  String get diveField_category_equipment => '装备';
 
   @override
-  String get diveField_category_deco => 'Decompression';
+  String get diveField_category_deco => '减压';
 
   @override
-  String get diveField_category_physiology => 'Physiology';
+  String get diveField_category_physiology => '生理';
 
   @override
-  String get diveField_category_rebreather => 'Rebreather';
+  String get diveField_category_rebreather => '循环呼吸器';
 
   @override
-  String get diveField_category_people => 'People';
+  String get diveField_category_people => '人员';
 
   @override
-  String get diveField_category_location => 'Location';
+  String get diveField_category_location => '位置';
 
   @override
-  String get diveField_category_trip => 'Trip';
+  String get diveField_category_trip => '旅程';
 
   @override
-  String get diveField_category_rating => 'Rating';
+  String get diveField_category_rating => '评分';
 
   @override
-  String get diveField_category_metadata => 'Metadata';
+  String get diveField_category_metadata => '元数据';
 
   @override
-  String get listViewMode_table => 'Table';
+  String get listViewMode_table => '表格';
 }

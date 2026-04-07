@@ -15373,103 +15373,103 @@ class AppLocalizationsHe extends AppLocalizations {
   String get enum_precipitation_hail => 'Hail';
 
   @override
-  String get columnConfig_title => 'Dive Details List Fields';
+  String get columnConfig_title => 'שדות רשימת פרטי צלילות';
 
   @override
-  String get columnConfig_viewMode => 'View Mode';
+  String get columnConfig_viewMode => 'מצב תצוגה';
 
   @override
-  String get columnConfig_visibleColumns => 'Visible Columns';
+  String get columnConfig_visibleColumns => 'עמודות גלויות';
 
   @override
-  String get columnConfig_availableFields => 'Available Fields';
+  String get columnConfig_availableFields => 'שדות זמינים';
 
   @override
-  String get columnConfig_extraFields => 'Extra Fields';
+  String get columnConfig_extraFields => 'שדות נוספים';
 
   @override
   String get columnConfig_extraFields_description =>
-      'Shown below main card content';
+      'מוצגים מתחת לתוכן הכרטיס הראשי';
 
   @override
-  String get columnConfig_slotAssignments => 'Slot Assignments';
+  String get columnConfig_slotAssignments => 'הקצאות משבצות';
 
   @override
-  String get columnConfig_resetToDefault => 'Reset to Default';
+  String get columnConfig_resetToDefault => 'איפוס לברירת מחדל';
 
   @override
-  String get columnConfig_preset => 'Preset';
+  String get columnConfig_preset => 'הגדרה מוגדרת מראש';
 
   @override
-  String get columnConfig_presetSaveAs => 'Save As';
+  String get columnConfig_presetSaveAs => 'שמירה בשם';
 
   @override
-  String get columnConfig_presetName => 'Preset Name';
+  String get columnConfig_presetName => 'שם ההגדרה';
 
   @override
-  String get columnConfig_presetNameHint => 'e.g., Tech Diving';
+  String get columnConfig_presetNameHint => 'לדוגמה: צלילה טכנית';
 
   @override
-  String get columnConfig_presetSave => 'Save';
+  String get columnConfig_presetSave => 'שמור';
 
   @override
-  String get columnConfig_presetCancel => 'Cancel';
+  String get columnConfig_presetCancel => 'ביטול';
 
   @override
-  String get columnConfig_columns => 'Columns';
+  String get columnConfig_columns => 'עמודות';
 
   @override
-  String get columnConfig_done => 'Done';
+  String get columnConfig_done => 'סיום';
 
   @override
-  String get settings_appearance_columnConfig => 'Dive Details List Fields';
+  String get settings_appearance_columnConfig => 'שדות רשימת פרטי צלילות';
 
   @override
   String get settings_appearance_columnConfig_subtitle =>
-      'Customize fields shown in dive list views';
+      'התאמה אישית של שדות המוצגים בתצוגות רשימת הצלילות';
 
   @override
-  String get diveField_category_core => 'Core';
+  String get diveField_category_core => 'ליבה';
 
   @override
-  String get diveField_category_environment => 'Environment';
+  String get diveField_category_environment => 'סביבה';
 
   @override
-  String get diveField_category_gas => 'Gas';
+  String get diveField_category_gas => 'גז';
 
   @override
-  String get diveField_category_tank => 'Tank';
+  String get diveField_category_tank => 'מיכל';
 
   @override
-  String get diveField_category_weight => 'Weight';
+  String get diveField_category_weight => 'משקולות';
 
   @override
-  String get diveField_category_equipment => 'Equipment';
+  String get diveField_category_equipment => 'ציוד';
 
   @override
-  String get diveField_category_deco => 'Decompression';
+  String get diveField_category_deco => 'דקומפרסיה';
 
   @override
-  String get diveField_category_physiology => 'Physiology';
+  String get diveField_category_physiology => 'פיזיולוגיה';
 
   @override
-  String get diveField_category_rebreather => 'Rebreather';
+  String get diveField_category_rebreather => 'ריברידר';
 
   @override
-  String get diveField_category_people => 'People';
+  String get diveField_category_people => 'אנשים';
 
   @override
-  String get diveField_category_location => 'Location';
+  String get diveField_category_location => 'מיקום';
 
   @override
-  String get diveField_category_trip => 'Trip';
+  String get diveField_category_trip => 'טיול';
 
   @override
-  String get diveField_category_rating => 'Rating';
+  String get diveField_category_rating => 'דירוג';
 
   @override
-  String get diveField_category_metadata => 'Metadata';
+  String get diveField_category_metadata => 'מטא-נתונים';
 
   @override
-  String get listViewMode_table => 'Table';
+  String get listViewMode_table => 'טבלה';
 }

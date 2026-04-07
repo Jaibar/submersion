@@ -15482,103 +15482,103 @@ class AppLocalizationsAr extends AppLocalizations {
   String get enum_precipitation_hail => 'Hail';
 
   @override
-  String get columnConfig_title => 'Dive Details List Fields';
+  String get columnConfig_title => 'حقول قائمة تفاصيل الغوصات';
 
   @override
-  String get columnConfig_viewMode => 'View Mode';
+  String get columnConfig_viewMode => 'وضع العرض';
 
   @override
-  String get columnConfig_visibleColumns => 'Visible Columns';
+  String get columnConfig_visibleColumns => 'الأعمدة المرئية';
 
   @override
-  String get columnConfig_availableFields => 'Available Fields';
+  String get columnConfig_availableFields => 'الحقول المتاحة';
 
   @override
-  String get columnConfig_extraFields => 'Extra Fields';
+  String get columnConfig_extraFields => 'حقول إضافية';
 
   @override
   String get columnConfig_extraFields_description =>
-      'Shown below main card content';
+      'تظهر أسفل محتوى البطاقة الرئيسي';
 
   @override
-  String get columnConfig_slotAssignments => 'Slot Assignments';
+  String get columnConfig_slotAssignments => 'تعيينات الخانات';
 
   @override
-  String get columnConfig_resetToDefault => 'Reset to Default';
+  String get columnConfig_resetToDefault => 'إعادة التعيين إلى الافتراضي';
 
   @override
-  String get columnConfig_preset => 'Preset';
+  String get columnConfig_preset => 'إعداد مسبق';
 
   @override
-  String get columnConfig_presetSaveAs => 'Save As';
+  String get columnConfig_presetSaveAs => 'حفظ باسم';
 
   @override
-  String get columnConfig_presetName => 'Preset Name';
+  String get columnConfig_presetName => 'اسم الإعداد المسبق';
 
   @override
-  String get columnConfig_presetNameHint => 'e.g., Tech Diving';
+  String get columnConfig_presetNameHint => 'مثال: الغوص التقني';
 
   @override
-  String get columnConfig_presetSave => 'Save';
+  String get columnConfig_presetSave => 'حفظ';
 
   @override
-  String get columnConfig_presetCancel => 'Cancel';
+  String get columnConfig_presetCancel => 'إلغاء';
 
   @override
-  String get columnConfig_columns => 'Columns';
+  String get columnConfig_columns => 'الأعمدة';
 
   @override
-  String get columnConfig_done => 'Done';
+  String get columnConfig_done => 'تم';
 
   @override
-  String get settings_appearance_columnConfig => 'Dive Details List Fields';
+  String get settings_appearance_columnConfig => 'حقول قائمة تفاصيل الغوصات';
 
   @override
   String get settings_appearance_columnConfig_subtitle =>
-      'Customize fields shown in dive list views';
+      'تخصيص الحقول المعروضة في عروض قائمة الغوصات';
 
   @override
-  String get diveField_category_core => 'Core';
+  String get diveField_category_core => 'أساسي';
 
   @override
-  String get diveField_category_environment => 'Environment';
+  String get diveField_category_environment => 'البيئة';
 
   @override
-  String get diveField_category_gas => 'Gas';
+  String get diveField_category_gas => 'الغاز';
 
   @override
-  String get diveField_category_tank => 'Tank';
+  String get diveField_category_tank => 'الأسطوانة';
 
   @override
-  String get diveField_category_weight => 'Weight';
+  String get diveField_category_weight => 'الأثقال';
 
   @override
-  String get diveField_category_equipment => 'Equipment';
+  String get diveField_category_equipment => 'المعدات';
 
   @override
-  String get diveField_category_deco => 'Decompression';
+  String get diveField_category_deco => 'تخفيف الضغط';
 
   @override
-  String get diveField_category_physiology => 'Physiology';
+  String get diveField_category_physiology => 'علم وظائف الأعضاء';
 
   @override
-  String get diveField_category_rebreather => 'Rebreather';
+  String get diveField_category_rebreather => 'جهاز إعادة التنفس';
 
   @override
-  String get diveField_category_people => 'People';
+  String get diveField_category_people => 'الأشخاص';
 
   @override
-  String get diveField_category_location => 'Location';
+  String get diveField_category_location => 'الموقع';
 
   @override
-  String get diveField_category_trip => 'Trip';
+  String get diveField_category_trip => 'الرحلة';
 
   @override
-  String get diveField_category_rating => 'Rating';
+  String get diveField_category_rating => 'التقييم';
 
   @override
-  String get diveField_category_metadata => 'Metadata';
+  String get diveField_category_metadata => 'البيانات الوصفية';
 
   @override
-  String get listViewMode_table => 'Table';
+  String get listViewMode_table => 'جدول';
 }
