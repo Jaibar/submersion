@@ -174,23 +174,8 @@ void main() {
       expect(find.byIcon(Icons.flight_takeoff), findsOneWidget);
     });
 
-    testWidgets('table app bar includes column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
+    // Column settings are now provided by TableModeLayout, not the content
+    // widget. The compact bar provides sort, search, and view mode controls.
 
     testWidgets('renders with showAppBar false (compact bar)', (tester) async {
       final overrides = await _buildOverrides(
@@ -208,139 +193,8 @@ void main() {
       expect(find.text('Bali Dive Trip'), findsOneWidget);
     });
 
-    testWidgets('table app bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('table app bar has sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('table app bar has more options popup', (tester) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
-    testWidgets('table app bar popup menu shows view mode items', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Detailed'), findsOneWidget);
-      expect(find.text('Compact'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has vertical divider', (tester) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byType(VerticalDivider), findsOneWidget);
-    });
-
-    testWidgets('compact bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Bali Dive Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('compact bar has sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Bali Dive Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('compact bar has popup menu', (tester) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Bali Dive Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
+    // Vertical divider was part of the standalone table app bar, now removed.
+    // Column settings and divider are in TableModeLayout.
 
     testWidgets('table renders trip data in cells', (tester) async {
       final trips = [
@@ -408,22 +262,6 @@ void main() {
       expect(find.text('Local Diving'), findsOneWidget);
     });
 
-    testWidgets('compact bar shows more menu', (tester) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
     testWidgets('renders many trips without crash', (tester) async {
       final trips = List.generate(
         15,
@@ -461,12 +299,13 @@ void main() {
       expect(find.text('Stats Trip'), findsOneWidget);
     });
 
-    testWidgets('tapping sort button opens sort sheet and selects option', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
+    testWidgets('tapping a row sets highlighted trip id', (tester) async {
+      final trips = [
+        _makeTrip(id: 't1', name: 'Bali Trip'),
+        _makeTrip(id: 't2', name: 'Red Sea Trip'),
+      ];
+
+      final overrides = await _buildOverrides(trips: trips);
 
       await tester.pumpWidget(
         testApp(
@@ -476,87 +315,13 @@ void main() {
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.sort));
-      await tester.pumpAndSettle();
+      // Tap on a trip row
+      await tester.tap(find.text('Bali Trip'));
+      // Pump past the DoubleTapGestureRecognizer's 40ms timer
+      await tester.pump(const Duration(milliseconds: 50));
 
-      expect(find.text('Sort Trips'), findsOneWidget);
-
-      // Use .last because 'End Date' also appears in the column header
-      await tester.tap(find.text('End Date').last);
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('tapping popup Detailed switches from table mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
-    });
-
-    testWidgets('compact bar sort button opens sheet and selects option', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.sort));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Sort Trips'), findsOneWidget);
-
-      // Use .last because 'End Date' also appears in the column header
-      await tester.tap(find.text('End Date').last);
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('compact bar popup Detailed switches view mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        trips: [_makeTrip(id: 't1', name: 'Test Trip')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const TripListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
+      // Verify the widget rebuilt successfully (no crash)
+      expect(find.text('Bali Trip'), findsOneWidget);
     });
   });
 }

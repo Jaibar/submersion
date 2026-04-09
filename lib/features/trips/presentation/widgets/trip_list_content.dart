@@ -7,7 +7,6 @@ import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
-import 'package:submersion/shared/widgets/entity_table/entity_table_column_picker.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
@@ -209,7 +208,10 @@ class _TripListContentState extends ConsumerState<TripListContent> {
     );
   }
 
-  /// Build the full scaffold/layout for table mode.
+  /// Build the table content for table mode.
+  ///
+  /// When embedded inside [TableModeLayout], provides only the table content.
+  /// The app bar, map, and column settings are managed by [TableModeLayout].
   Widget _buildTableModeScaffold(
     BuildContext context,
     AsyncValue<List<TripWithStats>> tripsAsync,
@@ -217,93 +219,7 @@ class _TripListContentState extends ConsumerState<TripListContent> {
   ) {
     final tableContent = _buildTableView(context, tripsAsync, filter);
 
-    if (!widget.showAppBar) {
-      return Column(
-        children: [
-          _buildCompactAppBar(context),
-          Expanded(child: tableContent),
-        ],
-      );
-    }
-
-    return Scaffold(
-      appBar: _buildTableAppBar(context, filter),
-      body: tableContent,
-      floatingActionButton: widget.floatingActionButton,
-    );
-  }
-
-  /// Build the AppBar for table mode, adding column picker button before the
-  /// standard actions.
-  AppBar _buildTableAppBar(BuildContext context, TripFilterState filter) {
-    return AppBar(
-      title: Text(context.l10n.trips_appBar_title),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.view_column_outlined),
-          tooltip: 'Column settings',
-          onPressed: () {
-            final config = ref.read(tripTableConfigProvider);
-            final notifier = ref.read(tripTableConfigProvider.notifier);
-            showEntityTableColumnPicker<TripField>(
-              context,
-              config: config,
-              adapter: TripFieldAdapter.instance,
-              onToggleColumn: notifier.toggleColumn,
-              onReorderColumn: notifier.reorderColumn,
-              onTogglePin: notifier.togglePin,
-            );
-          },
-        ),
-        SizedBox(
-          height: 24,
-          child: VerticalDivider(
-            width: 16,
-            thickness: 1,
-            color: Theme.of(
-              context,
-            ).colorScheme.outlineVariant.withValues(alpha: 0.5),
-          ),
-        ),
-        IconButton(
-          icon: const Icon(Icons.search),
-          tooltip: context.l10n.trips_list_tooltip_search,
-          onPressed: () {
-            showSearch(context: context, delegate: TripSearchDelegate());
-          },
-        ),
-        IconButton(
-          icon: const Icon(Icons.sort),
-          tooltip: context.l10n.trips_list_tooltip_sort,
-          onPressed: () => _showSortSheet(context),
-        ),
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert),
-          onSelected: (value) {
-            if (value.startsWith('view_')) {
-              final mode = ListViewMode.fromName(
-                value.replaceFirst('view_', ''),
-              );
-              ref.read(tripListViewModeProvider.notifier).state = mode;
-            }
-          },
-          itemBuilder: (context) {
-            final currentMode = ref.read(tripListViewModeProvider);
-            return [
-              ...ListViewModeToggle.menuItems(
-                context,
-                currentMode: currentMode,
-                modes: const [
-                  ListViewMode.detailed,
-                  ListViewMode.compact,
-                  ListViewMode.table,
-                ],
-              ),
-            ];
-          },
-        ),
-      ],
-    );
+    return tableContent;
   }
 
   /// Build the [EntityTableView] for trip table mode.
@@ -337,13 +253,12 @@ class _TripListContentState extends ConsumerState<TripListContent> {
                 onSortFieldChanged: notifier.setSortField,
                 onResizeColumn: notifier.resizeColumn,
                 onEntityTap: (id) {
-                  final match = trips.firstWhere((t) => t.trip.id == id);
-                  _handleItemTap(match.trip);
+                  ref.read(highlightedTripIdProvider.notifier).state = id;
                 },
                 onEntityDoubleTap: (id) {
-                  context.go('/trips/$id');
+                  context.push('/trips/$id');
                 },
-                highlightedId: widget.selectedId,
+                highlightedId: ref.watch(highlightedTripIdProvider),
               ),
             ),
           ],
@@ -402,6 +317,11 @@ class _TripListContentState extends ConsumerState<TripListContent> {
                 ...ListViewModeToggle.menuItems(
                   context,
                   currentMode: currentMode,
+                  modes: const [
+                    ListViewMode.detailed,
+                    ListViewMode.compact,
+                    ListViewMode.table,
+                  ],
                 ),
               ];
             },

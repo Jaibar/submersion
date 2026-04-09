@@ -10,7 +10,6 @@ import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/core/providers/provider.dart';
-import 'package:submersion/shared/widgets/entity_table/entity_table_column_picker.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
 import 'package:submersion/shared/widgets/master_detail/map_view_toggle_button.dart';
@@ -478,7 +477,11 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     );
   }
 
-  /// Build the full scaffold/layout for table mode.
+  /// Build the table content for table mode.
+  ///
+  /// When used inside [TableModeLayout], this provides only the table content
+  /// (or selection app bar + table during multi-selection). The outer Scaffold,
+  /// app bar, map, and column settings are all managed by [TableModeLayout].
   Widget _buildTableModeScaffold(
     BuildContext context,
     AsyncValue<List<SiteWithDiveCount>> sitesAsync,
@@ -486,132 +489,15 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
   ) {
     final tableContent = _buildTableView(context, sitesAsync, filter);
 
-    if (!widget.showAppBar) {
+    if (_isSelectionMode) {
       return Column(
         children: [
-          _isSelectionMode
-              ? _buildCompactSelectionAppBar(
-                  context,
-                  sitesAsync.valueOrNull ?? [],
-                )
-              : _buildCompactAppBar(context),
+          _buildCompactSelectionAppBar(context, sitesAsync.valueOrNull ?? []),
           Expanded(child: tableContent),
         ],
       );
     }
-
-    return Scaffold(
-      appBar: _isSelectionMode
-          ? _buildSelectionAppBar(sitesAsync.valueOrNull ?? [])
-          : _buildTableAppBar(context, filter),
-      body: tableContent,
-      floatingActionButton: _isSelectionMode
-          ? null
-          : widget.floatingActionButton,
-    );
-  }
-
-  /// Build the AppBar for table mode, adding column picker button before the
-  /// standard actions.
-  AppBar _buildTableAppBar(BuildContext context, SiteFilterState filter) {
-    return AppBar(
-      title: Text(context.l10n.diveSites_list_appBar_title),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.view_column_outlined),
-          tooltip: 'Column settings',
-          onPressed: () {
-            final config = ref.read(siteTableConfigProvider);
-            final notifier = ref.read(siteTableConfigProvider.notifier);
-            showEntityTableColumnPicker<SiteField>(
-              context,
-              config: config,
-              adapter: SiteFieldAdapter.instance,
-              onToggleColumn: notifier.toggleColumn,
-              onReorderColumn: notifier.reorderColumn,
-              onTogglePin: notifier.togglePin,
-            );
-          },
-        ),
-        SizedBox(
-          height: 24,
-          child: VerticalDivider(
-            width: 16,
-            thickness: 1,
-            color: Theme.of(
-              context,
-            ).colorScheme.outlineVariant.withValues(alpha: 0.5),
-          ),
-        ),
-        IconButton(
-          icon: const Icon(Icons.map),
-          tooltip: context.l10n.diveSites_list_tooltip_mapView,
-          onPressed: () => context.push('/sites/map'),
-        ),
-        IconButton(
-          icon: const Icon(Icons.search),
-          tooltip: context.l10n.diveSites_list_tooltip_searchSites,
-          onPressed: () {
-            showSearch(context: context, delegate: SiteSearchDelegate(ref));
-          },
-        ),
-        IconButton(
-          icon: Badge(
-            isLabelVisible: filter.hasActiveFilters,
-            child: const Icon(Icons.filter_list),
-          ),
-          tooltip: context.l10n.diveSites_list_tooltip_filterSites,
-          onPressed: () {
-            showModalBottomSheet(
-              context: context,
-              isScrollControlled: true,
-              builder: (context) => SiteFilterSheet(ref: ref),
-            );
-          },
-        ),
-        IconButton(
-          icon: const Icon(Icons.sort),
-          tooltip: context.l10n.diveSites_list_tooltip_sort,
-          onPressed: () => _showSortSheet(context),
-        ),
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert),
-          onSelected: (value) {
-            if (value == 'import') {
-              context.push('/sites/import');
-            } else if (value.startsWith('view_')) {
-              final mode = ListViewMode.fromName(
-                value.replaceFirst('view_', ''),
-              );
-              ref.read(siteListViewModeProvider.notifier).state = mode;
-            }
-          },
-          itemBuilder: (context) {
-            final currentMode = ref.read(siteListViewModeProvider);
-            return [
-              ...ListViewModeToggle.menuItems(
-                context,
-                currentMode: currentMode,
-                modes: const [
-                  ListViewMode.detailed,
-                  ListViewMode.compact,
-                  ListViewMode.table,
-                ],
-              ),
-              const PopupMenuDivider(),
-              PopupMenuItem(
-                value: 'import',
-                child: ListTile(
-                  leading: const Icon(Icons.download),
-                  title: Text(context.l10n.diveSites_list_menu_import),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-            ];
-          },
-        ),
-      ],
-    );
+    return tableContent;
   }
 
   /// Build the [EntityTableView] for site table mode.
@@ -655,21 +541,19 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
                   if (_isSelectionMode) {
                     _toggleSelection(id);
                   } else {
-                    final match = sites.firstWhere((s) => s.site.id == id);
-                    _handleItemTap(match.site);
+                    ref.read(highlightedSiteIdProvider.notifier).state = id;
                   }
                 },
                 onEntityDoubleTap: (id) {
-                  if (!_isSelectionMode) {
-                    context.go('/sites/$id');
-                  }
+                  if (_isSelectionMode) return;
+                  context.push('/sites/$id');
                 },
                 onEntityLongPress: _isSelectionMode
                     ? null
                     : (id) => _enterSelectionMode(id),
                 selectedIds: _selectedIds,
                 isSelectionMode: _isSelectionMode,
-                highlightedId: widget.selectedId,
+                highlightedId: ref.watch(highlightedSiteIdProvider),
               ),
             ),
           ],
@@ -702,12 +586,14 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
           ),
           const Spacer(),
+          // Map toggle: shown in detailed/compact mode only.
+          // In table mode, TableModeLayout manages the map toggle.
           if (widget.onMapViewToggle != null)
             MapViewToggleButton(
               isActive: widget.isMapViewActive,
               onToggle: widget.onMapViewToggle!,
             )
-          else
+          else if (ref.watch(siteListViewModeProvider) != ListViewMode.table)
             IconButton(
               icon: const Icon(Icons.map, size: 20),
               tooltip: context.l10n.diveSites_list_tooltip_mapView,

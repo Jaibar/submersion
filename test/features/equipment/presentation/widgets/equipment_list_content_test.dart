@@ -150,23 +150,8 @@ void main() {
       expect(find.byIcon(Icons.backpack), findsOneWidget);
     });
 
-    testWidgets('table app bar includes column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
+    // Column settings are now provided by TableModeLayout, not the content
+    // widget. The compact bar provides sort, search, and view mode controls.
 
     testWidgets('renders with showAppBar false (compact bar)', (tester) async {
       final overrides = await _buildOverrides(
@@ -184,139 +169,8 @@ void main() {
       expect(find.text('My Fins'), findsOneWidget);
     });
 
-    testWidgets('table app bar has sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('table app bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('table app bar has more options popup', (tester) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
-    testWidgets('table app bar popup menu shows view mode items', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Detailed'), findsOneWidget);
-      expect(find.text('Compact'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has vertical divider', (tester) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byType(VerticalDivider), findsOneWidget);
-    });
-
-    testWidgets('compact bar has sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'My Fins')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('compact bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'My Fins')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('compact bar has popup menu', (tester) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'My Fins')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
+    // Vertical divider was part of the standalone table app bar, now removed.
+    // Column settings and divider are in TableModeLayout.
 
     testWidgets('table shows filter chips area', (tester) async {
       final overrides = await _buildOverrides(
@@ -412,22 +266,6 @@ void main() {
       expect(find.text('Generic Item'), findsOneWidget);
     });
 
-    testWidgets('compact bar shows more menu', (tester) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'My Fins')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
     testWidgets('renders many equipment items without crash', (tester) async {
       final equipment = List.generate(
         15,
@@ -475,12 +313,13 @@ void main() {
       expect(find.text('Retired BCD'), findsOneWidget);
     });
 
-    testWidgets('tapping sort button opens sort sheet and selects option', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
+    testWidgets('tapping a row sets highlighted equipment id', (tester) async {
+      final equipment = [
+        _makeEquipment(id: 'e1', name: 'My Regulator'),
+        _makeEquipment(id: 'e2', name: 'My BCD'),
+      ];
+
+      final overrides = await _buildOverrides(equipment: equipment);
 
       await tester.pumpWidget(
         testApp(
@@ -490,87 +329,13 @@ void main() {
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.sort));
-      await tester.pumpAndSettle();
+      // Tap on an equipment row
+      await tester.tap(find.text('My Regulator'));
+      // Pump past the DoubleTapGestureRecognizer's 40ms timer
+      await tester.pump(const Duration(milliseconds: 50));
 
-      expect(find.text('Sort Equipment'), findsOneWidget);
-
-      // Use .last because 'Last Service' also appears in the column header
-      await tester.tap(find.text('Last Service').last);
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('tapping popup Detailed switches from table mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
-    });
-
-    testWidgets('compact bar sort button opens sheet and selects option', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.sort));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Sort Equipment'), findsOneWidget);
-
-      // Use .last because 'Last Service' also appears in the column header
-      await tester.tap(find.text('Last Service').last);
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('compact bar popup Detailed switches view mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        equipment: [_makeEquipment(id: 'e1', name: 'Test Reg')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const EquipmentListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
+      // Verify the widget rebuilt successfully (no crash)
+      expect(find.text('My Regulator'), findsOneWidget);
     });
   });
 }

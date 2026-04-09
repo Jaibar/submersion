@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -13,6 +14,8 @@ import 'package:submersion/features/settings/presentation/providers/sync_provide
 import 'package:submersion/features/universal_import/presentation/providers/universal_import_providers.dart';
 import 'package:submersion/shared/services/file_share_handler.dart';
 import 'package:submersion/shared/services/incoming_file_handler.dart';
+import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/local_cache_database_service.dart';
 
 const Locale _defaultFallbackLocale = Locale('en');
 const Set<String> _invalidSystemLocaleLanguageCodes = {'c', 'posix'};
@@ -64,11 +67,13 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
     with WidgetsBindingObserver {
   final _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
   late final FileShareHandler _fileShareHandler;
+  late final AppLifecycleListener _lifecycleListener;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _lifecycleListener = AppLifecycleListener(onExitRequested: _closeDatabases);
     registerUpdateMenuChannel(ref);
     _fileShareHandler = FileShareHandler(
       onFileReceived: _handleIncomingFile,
@@ -94,8 +99,22 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
   @override
   void dispose() {
     _fileShareHandler.dispose();
+    _lifecycleListener.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// Close databases before the app exits. Uses onExitRequested (mapped from
+  /// NSApplicationDelegate.applicationShouldTerminate: on macOS) which is
+  /// async and fires before the Dart VM begins isolate/FFI teardown. Without
+  /// this, the Drift background isolate can outlive the FFI subsystem and
+  /// crash in sqlite3_close_v2 → functionDestroy.
+  Future<AppExitResponse> _closeDatabases() async {
+    await Future.wait([
+      DatabaseService.instance.close(),
+      LocalCacheDatabaseService.instance.close(),
+    ]);
+    return AppExitResponse.exit;
   }
 
   @override

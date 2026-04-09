@@ -15581,4 +15581,25 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get listViewMode_table => 'جدول';
+
+  @override
+  String get settings_appearance_general => 'عام';
+
+  @override
+  String get settings_appearance_sections => 'الأقسام';
+
+  @override
+  String get settings_appearance_showDetailsPane => 'إظهار لوحة التفاصيل';
+
+  @override
+  String get settings_appearance_showDetailsPane_subtitle =>
+      'عرض لوحة التفاصيل بجانب الجدول';
+
+  @override
+  String get settings_appearance_showProfilePanel =>
+      'إظهار لوحة الملف الشخصي في عرض الجدول';
+
+  @override
+  String get settings_appearance_showProfilePanel_subtitle =>
+      'عرض مخطط ملف الغوصة فوق الجدول بشكل افتراضي';
 }

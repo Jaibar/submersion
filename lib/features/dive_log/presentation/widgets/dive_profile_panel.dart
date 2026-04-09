@@ -8,6 +8,7 @@ import 'package:submersion/features/dive_log/presentation/providers/dive_provide
 import 'package:submersion/features/dive_log/presentation/providers/gas_switch_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/highlight_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_tracking_provider.dart';
 import 'package:submersion/features/dive_log/data/services/profile_markers_service.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_chart.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -249,6 +250,9 @@ class _DiveProfilePanelContentState
     final settings = ref.watch(settingsProvider);
     final units = UnitFormatter(settings);
     final colorScheme = Theme.of(context).colorScheme;
+    final trackingIndex = ref.watch(
+      profileTrackingIndexProvider(widget.diveId),
+    );
 
     // Profile markers (same as dive detail page)
     final showMaxDepthMarker = ref.watch(showMaxDepthMarkerProvider);
@@ -341,41 +345,65 @@ class _DiveProfilePanelContentState
             ),
           ),
           // Chart with cursor tracking
-          Listener(
-            key: _chartAreaKey,
-            onPointerHover: (e) => _onPointerUpdate(e.position),
-            onPointerMove: (e) => _onPointerUpdate(e.position),
-            child: Padding(
-              padding: const EdgeInsets.only(left: 4, right: 4),
-              child: DiveProfileChart(
-                profile: dive.profile,
-                diveDuration: dive.effectiveRuntime,
-                maxDepth: dive.maxDepth,
-                ceilingCurve: analysis?.ceilingCurve,
-                ascentRates: analysis?.ascentRates,
-                events: analysis?.events,
-                ndlCurve: analysis?.ndlCurve,
-                sacCurve: analysis?.smoothedSacCurve,
-                ppO2Curve: analysis?.ppO2Curve,
-                ppN2Curve: analysis?.ppN2Curve,
-                ppHeCurve: analysis?.ppHeCurve,
-                modCurve: analysis?.modCurve,
-                densityCurve: analysis?.densityCurve,
-                gfCurve: analysis?.gfCurve,
-                surfaceGfCurve: analysis?.surfaceGfCurve,
-                meanDepthCurve: analysis?.meanDepthCurve,
-                ttsCurve: analysis?.ttsCurve,
-                cnsCurve: analysis?.cnsCurve,
-                otuCurve: analysis?.otuCurve,
-                markers: markers,
-                showMaxDepthMarker: showMaxDepthMarker,
-                showPressureThresholdMarkers: showPressureThresholdMarkers,
-                tanks: dive.tanks,
-                tankPressures: tankPressures,
-                gasSwitches: gasSwitches,
-                tooltipBelow: true,
-                onPointSelected: (_) {},
-                onTooltipData: _onTooltipData,
+          MouseRegion(
+            onExit: (_) {
+              ref
+                      .read(
+                        profileTrackingIndexProvider(widget.diveId).notifier,
+                      )
+                      .state =
+                  null;
+            },
+            child: Listener(
+              key: _chartAreaKey,
+              onPointerHover: (e) => _onPointerUpdate(e.position),
+              onPointerMove: (e) => _onPointerUpdate(e.position),
+              child: Padding(
+                padding: const EdgeInsets.only(left: 4, right: 4),
+                child: DiveProfileChart(
+                  profile: dive.profile,
+                  diveDuration: dive.effectiveRuntime,
+                  maxDepth: dive.maxDepth,
+                  ceilingCurve: analysis?.ceilingCurve,
+                  ascentRates: analysis?.ascentRates,
+                  events: analysis?.events,
+                  ndlCurve: analysis?.ndlCurve,
+                  sacCurve: analysis?.smoothedSacCurve,
+                  ppO2Curve: analysis?.ppO2Curve,
+                  ppN2Curve: analysis?.ppN2Curve,
+                  ppHeCurve: analysis?.ppHeCurve,
+                  modCurve: analysis?.modCurve,
+                  densityCurve: analysis?.densityCurve,
+                  gfCurve: analysis?.gfCurve,
+                  surfaceGfCurve: analysis?.surfaceGfCurve,
+                  meanDepthCurve: analysis?.meanDepthCurve,
+                  ttsCurve: analysis?.ttsCurve,
+                  cnsCurve: analysis?.cnsCurve,
+                  otuCurve: analysis?.otuCurve,
+                  markers: markers,
+                  showMaxDepthMarker: showMaxDepthMarker,
+                  showPressureThresholdMarkers: showPressureThresholdMarkers,
+                  tanks: dive.tanks,
+                  tankPressures: tankPressures,
+                  gasSwitches: gasSwitches,
+                  tooltipBelow: true,
+                  highlightedTimestamp:
+                      trackingIndex != null &&
+                          trackingIndex < dive.profile.length
+                      ? dive.profile[trackingIndex].timestamp
+                      : null,
+                  onPointSelected: (index) {
+                    ref
+                            .read(
+                              profileTrackingIndexProvider(
+                                widget.diveId,
+                              ).notifier,
+                            )
+                            .state =
+                        index;
+                  },
+                  onTooltipData: _onTooltipData,
+                ),
               ),
             ),
           ),

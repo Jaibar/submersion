@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
@@ -11,6 +12,7 @@ import 'package:submersion/features/buddies/presentation/providers/buddy_provide
 import 'package:submersion/features/buddies/presentation/widgets/buddy_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 
@@ -169,24 +171,8 @@ void main() {
       expect(find.byIcon(Icons.people_outline), findsOneWidget);
     });
 
-    testWidgets('table app bar includes column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      // Column settings icon should be in the app bar
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
+    // Column settings are now provided by TableModeLayout, not the content
+    // widget. The compact bar provides sort, search, and view mode controls.
 
     testWidgets('renders with showAppBar false (compact bar)', (tester) async {
       final overrides = await _buildOverrides(
@@ -203,150 +189,6 @@ void main() {
 
       // Should still render the buddy name in the table
       expect(find.text('Test Buddy'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      // Sort button should be in the table app bar
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('table app bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      // Search button should be in the table app bar
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('table app bar has more options button', (tester) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      // More options (vertical dots) button should be present
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
-    testWidgets('table app bar popup menu shows view mode items', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      // Tap the more_vert popup menu button
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-
-      // View mode items should appear in the popup
-      expect(find.text('Detailed'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has vertical divider', (tester) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      // Vertical divider should be present in the table app bar
-      expect(find.byType(VerticalDivider), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode shows sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      // Compact bar should have sort button
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode shows search button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      // Compact bar should have search button
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode shows popup menu', (tester) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      // Compact bar should have more options button
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
     });
 
     testWidgets('table renders cell data for buddy fields', (tester) async {
@@ -438,22 +280,6 @@ void main() {
       expect(find.text('Novice Diver'), findsOneWidget);
     });
 
-    testWidgets('compact bar shows more menu', (tester) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
     testWidgets('renders many buddies without crash', (tester) async {
       final buddies = List.generate(
         15,
@@ -473,124 +299,91 @@ void main() {
       expect(find.text('Buddy 0'), findsOneWidget);
     });
 
-    testWidgets('tapping sort button opens sort sheet and selects option', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
+    testWidgets('tapping a row sets highlighted buddy id', (tester) async {
+      final buddies = [
+        _makeBuddy(id: 'b1', name: 'Alice Smith', diveCount: 10),
+        _makeBuddy(id: 'b2', name: 'Bob Jones', diveCount: 25),
+      ];
 
+      final overrides = await _buildOverrides(buddies: buddies);
+
+      late ProviderContainer container;
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: true),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Consumer(
+              builder: (context, ref, _) {
+                container = ProviderScope.containerOf(context);
+                return const Scaffold(body: BuddyListContent(showAppBar: true));
+              },
+            ),
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.sort));
-      await tester.pumpAndSettle();
+      // Tap on a buddy row (the name cell in the pinned column)
+      await tester.tap(find.text('Alice Smith'));
+      // Pump past the DoubleTapGestureRecognizer's 300ms timeout so the
+      // single-tap callback fires.
+      await tester.pump(const Duration(milliseconds: 350));
 
-      expect(find.text('Sort Buddies'), findsOneWidget);
-
-      // Use .last because 'Dive Count' also appears in the column header
-      await tester.tap(find.text('Dive Count').last);
-      await tester.pumpAndSettle();
+      // The tap should have set the highlighted buddy ID
+      expect(container.read(highlightedBuddyIdProvider), 'b1');
     });
 
-    testWidgets('tapping popup Detailed switches from table mode', (
+    testWidgets('double-tapping a row navigates to buddy detail', (
       tester,
     ) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
+      final buddies = [
+        _makeBuddy(id: 'b1', name: 'Alice Smith', diveCount: 10),
+      ];
+
+      final overrides = await _buildOverrides(buddies: buddies);
+
+      String? pushedPath;
+      final router = GoRouter(
+        initialLocation: '/buddies',
+        routes: [
+          GoRoute(
+            path: '/buddies',
+            builder: (context, state) =>
+                const Scaffold(body: BuddyListContent(showAppBar: true)),
+            routes: [
+              GoRoute(
+                path: ':id',
+                builder: (context, state) {
+                  pushedPath = state.uri.toString();
+                  return const Scaffold(body: SizedBox());
+                },
+              ),
+            ],
+          ),
+        ],
       );
 
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: true),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
-    });
-
-    testWidgets('compact bar sort button opens sheet and selects option', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.sort));
+      // Double-tap on a buddy row
+      await tester.tap(find.text('Alice Smith'));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.text('Alice Smith'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Sort Buddies'), findsOneWidget);
-
-      // Use .last because 'Dive Count' also appears in the column header
-      await tester.tap(find.text('Dive Count').last);
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('compact bar column settings opens picker', (tester) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      // In table mode, column settings should be available
-      final colPickerFinder = find.byIcon(Icons.view_column_outlined);
-      if (colPickerFinder.evaluate().isNotEmpty) {
-        await tester.tap(colPickerFinder);
-        await tester.pumpAndSettle();
-        expect(find.text('Columns'), findsOneWidget);
-      }
-    });
-
-    testWidgets('compact bar popup Detailed switches view mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        buddies: [_makeBuddy(id: 'b1', name: 'Test Buddy')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const BuddyListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
+      expect(pushedPath, '/buddies/b1');
     });
   });
 }

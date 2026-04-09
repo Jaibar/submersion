@@ -15841,4 +15841,26 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get listViewMode_table => 'Táblázat';
+
+  @override
+  String get settings_appearance_general => 'Általános';
+
+  @override
+  String get settings_appearance_sections => 'Szekciók';
+
+  @override
+  String get settings_appearance_showDetailsPane =>
+      'Részletek panel megjelenítése';
+
+  @override
+  String get settings_appearance_showDetailsPane_subtitle =>
+      'Részletek panel megjelenítése a táblázat mellett';
+
+  @override
+  String get settings_appearance_showProfilePanel =>
+      'Profil panel megjelenítése táblázat nézetben';
+
+  @override
+  String get settings_appearance_showProfilePanel_subtitle =>
+      'Merülési profil diagram megjelenítése a táblázat felett alapértelmezetten';
 }

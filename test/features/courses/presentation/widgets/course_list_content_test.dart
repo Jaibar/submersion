@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
@@ -10,6 +11,7 @@ import 'package:submersion/features/courses/presentation/providers/course_provid
 import 'package:submersion/features/courses/presentation/widgets/course_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 
@@ -162,23 +164,8 @@ void main() {
       expect(find.byIcon(Icons.school_outlined), findsOneWidget);
     });
 
-    testWidgets('table app bar includes column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Nitrox')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
+    // Column settings are now provided by TableModeLayout, not the content
+    // widget. The compact bar provides view mode controls only.
 
     testWidgets('renders with showAppBar false (compact bar)', (tester) async {
       final overrides = await _buildOverrides(
@@ -194,93 +181,6 @@ void main() {
       await tester.pump();
 
       expect(find.text('Deep Diver'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has more options popup', (tester) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Nitrox')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
-    testWidgets('table app bar popup menu shows view mode items', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Nitrox')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Detailed'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has vertical divider', (tester) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Nitrox')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byType(VerticalDivider), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode has column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Deep Diver')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode has popup menu', (tester) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Deep Diver')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
     });
 
     testWidgets('table renders course data in cells', (tester) async {
@@ -375,73 +275,90 @@ void main() {
       expect(find.text('Course 0'), findsOneWidget);
     });
 
-    testWidgets('tapping popup menu Detailed switches from table mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Test Course')],
-      );
+    testWidgets('tapping a row sets highlighted course id', (tester) async {
+      final courses = [
+        _makeCourse(id: 'c1', name: 'Rescue Diver'),
+        _makeCourse(id: 'c2', name: 'Nitrox'),
+      ];
 
+      final overrides = await _buildOverrides(courses: courses);
+
+      late ProviderContainer container;
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: true),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Consumer(
+              builder: (context, ref, _) {
+                container = ProviderScope.containerOf(context);
+                return const Scaffold(
+                  body: CourseListContent(showAppBar: true),
+                );
+              },
+            ),
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
+      // Tap on a course row
+      await tester.tap(find.text('Rescue Diver'));
+      // Pump past the DoubleTapGestureRecognizer's 300ms timeout
+      await tester.pump(const Duration(milliseconds: 350));
 
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
+      // The tap should have set the highlighted course ID
+      expect(container.read(highlightedCourseIdProvider), 'c1');
     });
 
-    testWidgets('compact bar column settings opens picker in table mode', (
+    testWidgets('double-tapping a row navigates to course detail', (
       tester,
     ) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Test Course')],
+      final courses = [_makeCourse(id: 'c1', name: 'Rescue Diver')];
+
+      final overrides = await _buildOverrides(courses: courses);
+
+      String? pushedPath;
+      final router = GoRouter(
+        initialLocation: '/courses',
+        routes: [
+          GoRoute(
+            path: '/courses',
+            builder: (context, state) =>
+                const Scaffold(body: CourseListContent(showAppBar: true)),
+            routes: [
+              GoRoute(
+                path: ':id',
+                builder: (context, state) {
+                  pushedPath = state.uri.toString();
+                  return const Scaffold(body: SizedBox());
+                },
+              ),
+            ],
+          ),
+        ],
       );
 
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: false),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.view_column_outlined));
+      // Double-tap on a course row
+      await tester.tap(find.text('Rescue Diver'));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.text('Rescue Diver'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Columns'), findsOneWidget);
-    });
-
-    testWidgets('compact bar popup menu Detailed switches view mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        courses: [_makeCourse(id: 'co1', name: 'Test Course')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CourseListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
+      expect(pushedPath, '/courses/c1');
     });
   });
 }

@@ -9,7 +9,6 @@ import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
-import 'package:submersion/shared/widgets/entity_table/entity_table_column_picker.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
@@ -208,105 +207,22 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
     );
   }
 
-  /// Build the full scaffold/layout for table mode.
+  /// Build the table content for table mode.
+  ///
+  /// When embedded inside [TableModeLayout], provides the filter chips and
+  /// table content. The app bar, map, and column settings are managed by
+  /// [TableModeLayout].
   Widget _buildTableModeScaffold(
     BuildContext context,
     AsyncValue<List<EquipmentItem>> equipmentAsync,
   ) {
     final tableContent = _buildTableView(context, equipmentAsync);
 
-    if (!widget.showAppBar) {
-      return Column(
-        children: [
-          _buildCompactAppBar(context),
-          if (widget.headerExtension != null) widget.headerExtension!,
-          _buildFilterChips(context),
-          Expanded(child: tableContent),
-        ],
-      );
-    }
-
-    return Scaffold(
-      appBar: _buildTableAppBar(context),
-      body: Column(
-        children: [
-          _buildFilterChips(context),
-          Expanded(child: tableContent),
-        ],
-      ),
-      floatingActionButton: widget.floatingActionButton,
-    );
-  }
-
-  /// Build the AppBar for table mode, adding column picker button before the
-  /// standard actions.
-  AppBar _buildTableAppBar(BuildContext context) {
-    return AppBar(
-      title: Text(context.l10n.equipment_appBar_title),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.view_column_outlined),
-          tooltip: 'Column settings',
-          onPressed: () {
-            final config = ref.read(equipmentTableConfigProvider);
-            final notifier = ref.read(equipmentTableConfigProvider.notifier);
-            showEntityTableColumnPicker<EquipmentField>(
-              context,
-              config: config,
-              adapter: EquipmentFieldAdapter.instance,
-              onToggleColumn: notifier.toggleColumn,
-              onReorderColumn: notifier.reorderColumn,
-              onTogglePin: notifier.togglePin,
-            );
-          },
-        ),
-        SizedBox(
-          height: 24,
-          child: VerticalDivider(
-            width: 16,
-            thickness: 1,
-            color: Theme.of(
-              context,
-            ).colorScheme.outlineVariant.withValues(alpha: 0.5),
-          ),
-        ),
-        IconButton(
-          icon: const Icon(Icons.sort),
-          tooltip: context.l10n.equipment_list_sortTooltip,
-          onPressed: () => _showSortSheet(context),
-        ),
-        IconButton(
-          icon: const Icon(Icons.search),
-          tooltip: context.l10n.equipment_list_searchTooltip,
-          onPressed: () {
-            showSearch(context: context, delegate: EquipmentSearchDelegate());
-          },
-        ),
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert),
-          onSelected: (value) {
-            if (value.startsWith('view_')) {
-              final mode = ListViewMode.fromName(
-                value.replaceFirst('view_', ''),
-              );
-              ref.read(equipmentListViewModeProvider.notifier).state = mode;
-            }
-          },
-          itemBuilder: (context) {
-            final currentMode = ref.read(equipmentListViewModeProvider);
-            return [
-              ...ListViewModeToggle.menuItems(
-                context,
-                currentMode: currentMode,
-                modes: const [
-                  ListViewMode.detailed,
-                  ListViewMode.compact,
-                  ListViewMode.table,
-                ],
-              ),
-            ];
-          },
-        ),
+    return Column(
+      children: [
+        if (widget.headerExtension != null) widget.headerExtension!,
+        _buildFilterChips(context),
+        Expanded(child: tableContent),
       ],
     );
   }
@@ -337,13 +253,12 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
           onSortFieldChanged: notifier.setSortField,
           onResizeColumn: notifier.resizeColumn,
           onEntityTap: (id) {
-            final match = equipment.firstWhere((e) => e.id == id);
-            _handleItemTap(match);
+            ref.read(highlightedEquipmentIdProvider.notifier).state = id;
           },
           onEntityDoubleTap: (id) {
-            context.go('/equipment/$id');
+            context.push('/equipment/$id');
           },
-          highlightedId: widget.selectedId,
+          highlightedId: ref.watch(highlightedEquipmentIdProvider),
         );
       },
     );

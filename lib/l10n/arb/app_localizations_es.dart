@@ -15895,4 +15895,25 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get listViewMode_table => 'Tabla';
+
+  @override
+  String get settings_appearance_general => 'General';
+
+  @override
+  String get settings_appearance_sections => 'Secciones';
+
+  @override
+  String get settings_appearance_showDetailsPane => 'Mostrar panel de detalles';
+
+  @override
+  String get settings_appearance_showDetailsPane_subtitle =>
+      'Mostrar panel de detalles junto a la tabla';
+
+  @override
+  String get settings_appearance_showProfilePanel =>
+      'Mostrar panel de perfil en vista de tabla';
+
+  @override
+  String get settings_appearance_showProfilePanel_subtitle =>
+      'Mostrar gráfico de perfil de inmersión sobre la tabla por defecto';
 }

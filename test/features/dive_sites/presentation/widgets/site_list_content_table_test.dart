@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/providers/provider.dart';
@@ -10,6 +11,7 @@ import 'package:submersion/features/dive_sites/presentation/providers/site_provi
 import 'package:submersion/features/dive_sites/presentation/widgets/site_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 
@@ -154,25 +156,6 @@ void main() {
       expect(find.byIcon(Icons.location_on), findsOneWidget);
     });
 
-    testWidgets('table app bar includes column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Test Site')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      // Column settings icon should be in the app bar
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
-
     testWidgets('renders with showAppBar false (compact bar)', (tester) async {
       final overrides = await _buildOverrides(
         sites: [_makeSite(id: 's1', name: 'Manta Point', country: 'Indonesia')],
@@ -215,170 +198,108 @@ void main() {
       expect(find.text('Indonesia'), findsOneWidget);
     });
 
-    testWidgets('table app bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Test Site')],
-      );
+    testWidgets(
+      'compact bar omits map button in table mode (managed by layout)',
+      (tester) async {
+        final overrides = await _buildOverrides(
+          sites: [_makeSite(id: 's1', name: 'Manta Point')],
+        );
 
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const SiteListContent(showAppBar: false),
+          ),
+        );
+        await tester.pump();
+
+        // Map toggle is managed by TableModeLayout, not the compact bar
+        expect(find.byIcon(Icons.map), findsNothing);
+      },
+    );
+
+    testWidgets('tapping a row sets highlighted site id', (tester) async {
+      final sites = [
+        _makeSite(id: 's1', name: 'Blue Hole'),
+        _makeSite(id: 's2', name: 'Coral Garden'),
+      ];
+
+      final overrides = await _buildOverrides(sites: sites);
+
+      late ProviderContainer container;
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: true),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Consumer(
+              builder: (context, ref, _) {
+                container = ProviderScope.containerOf(context);
+                return const Scaffold(body: SiteListContent(showAppBar: true));
+              },
+            ),
+          ),
         ),
       );
       await tester.pump();
 
-      expect(find.byIcon(Icons.search), findsOneWidget);
+      // Tap on a site row
+      await tester.tap(find.text('Blue Hole'));
+      // Pump past the DoubleTapGestureRecognizer's 300ms timeout
+      await tester.pump(const Duration(milliseconds: 350));
+
+      // The tap should have set the highlighted site ID
+      expect(container.read(highlightedSiteIdProvider), 's1');
     });
 
-    testWidgets('table app bar has sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Test Site')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('table app bar has map button', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Test Site')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.map), findsOneWidget);
-    });
-
-    testWidgets('table app bar has more options popup', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Test Site')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
-    testWidgets('table app bar popup menu shows view mode items', (
+    testWidgets('double-tapping a row navigates to site detail', (
       tester,
     ) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Test Site')],
+      final sites = [_makeSite(id: 's1', name: 'Blue Hole')];
+
+      final overrides = await _buildOverrides(sites: sites);
+
+      String? pushedPath;
+      final router = GoRouter(
+        initialLocation: '/sites',
+        routes: [
+          GoRoute(
+            path: '/sites',
+            builder: (context, state) =>
+                const Scaffold(body: SiteListContent(showAppBar: true)),
+            routes: [
+              GoRoute(
+                path: ':id',
+                builder: (context, state) {
+                  pushedPath = state.uri.toString();
+                  return const Scaffold(body: SizedBox());
+                },
+              ),
+            ],
+          ),
+        ],
       );
 
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: true),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.more_vert));
+      // Double-tap on a site row
+      await tester.tap(find.text('Blue Hole'));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.text('Blue Hole'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Detailed'), findsOneWidget);
-      expect(find.text('Compact'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has vertical divider', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Test Site')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byType(VerticalDivider), findsOneWidget);
-    });
-
-    testWidgets('compact bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Manta Point')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('compact bar has sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Manta Point')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('compact bar has popup menu', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Manta Point')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
-    testWidgets('compact bar has map button', (tester) async {
-      final overrides = await _buildOverrides(
-        sites: [_makeSite(id: 's1', name: 'Manta Point')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const SiteListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.map), findsOneWidget);
+      expect(pushedPath, '/sites/s1');
     });
   });
 }

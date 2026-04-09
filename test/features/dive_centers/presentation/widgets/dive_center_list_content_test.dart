@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/providers/provider.dart';
@@ -9,6 +10,7 @@ import 'package:submersion/features/dive_centers/presentation/providers/dive_cen
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 
@@ -164,24 +166,6 @@ void main() {
       expect(find.byIcon(Icons.store_outlined), findsOneWidget);
     });
 
-    testWidgets('table app bar includes column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
-
     testWidgets('renders with showAppBar false (compact bar)', (tester) async {
       final overrides = await _buildOverrides(
         centers: [_makeCenter(id: 'dc1', name: 'Coral Reef Center')],
@@ -198,171 +182,25 @@ void main() {
       expect(find.text('Coral Reef Center'), findsOneWidget);
     });
 
-    testWidgets('table app bar has map button', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
+    testWidgets(
+      'compact bar omits map button in table mode (managed by layout)',
+      (tester) async {
+        final overrides = await _buildOverrides(
+          centers: [_makeCenter(id: 'dc1', name: 'Coral Reef Center')],
+        );
 
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const DiveCenterListContent(showAppBar: false),
+          ),
+        );
+        await tester.pump();
 
-      expect(find.byIcon(Icons.map), findsOneWidget);
-    });
-
-    testWidgets('table app bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('table app bar has sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('table app bar has more options popup', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
-    testWidgets('table app bar popup menu shows view mode items', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Detailed'), findsOneWidget);
-      expect(find.text('Compact'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has vertical divider', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byType(VerticalDivider), findsOneWidget);
-    });
-
-    testWidgets('compact bar shows map button', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Coral Reef Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.map), findsOneWidget);
-    });
-
-    testWidgets('compact bar shows search button', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Coral Reef Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('compact bar shows sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Coral Reef Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('compact bar shows popup menu', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Coral Reef Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
+        // Map toggle is managed by TableModeLayout, not the compact bar
+        expect(find.byIcon(Icons.map), findsNothing);
+      },
+    );
 
     testWidgets('table renders dive center data in cells', (tester) async {
       final centers = [
@@ -415,22 +253,6 @@ void main() {
       expect(find.text('Basic Center'), findsOneWidget);
     });
 
-    testWidgets('compact bar shows more menu', (tester) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Coral Reef Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
     testWidgets('renders many centers without crash', (tester) async {
       final centers = List.generate(
         10,
@@ -478,102 +300,92 @@ void main() {
       expect(find.text('Phone Center'), findsOneWidget);
     });
 
-    testWidgets('tapping sort button opens sort sheet and selects option', (
+    testWidgets('tapping a row sets highlighted dive center id', (
       tester,
     ) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
+      final centers = [
+        _makeCenter(id: 'dc1', name: 'Reef Explorers'),
+        _makeCenter(id: 'dc2', name: 'Blue Planet'),
+      ];
 
+      final overrides = await _buildOverrides(centers: centers);
+
+      late ProviderContainer container;
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Consumer(
+              builder: (context, ref, _) {
+                container = ProviderScope.containerOf(context);
+                return const Scaffold(
+                  body: DiveCenterListContent(showAppBar: true),
+                );
+              },
+            ),
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.sort));
-      await tester.pumpAndSettle();
+      // Tap on a dive center row
+      await tester.tap(find.text('Reef Explorers'));
+      // Pump past the DoubleTapGestureRecognizer's 300ms timeout
+      await tester.pump(const Duration(milliseconds: 350));
 
-      expect(find.text('Sort Dive Centers'), findsOneWidget);
-
-      // Use .last because 'Dive Count' also appears in the column header
-      await tester.tap(find.text('Dive Count').last);
-      await tester.pumpAndSettle();
+      // The tap should have set the highlighted dive center ID
+      expect(container.read(highlightedDiveCenterIdProvider), 'dc1');
     });
 
-    testWidgets('tapping popup Detailed switches from table mode', (
+    testWidgets('double-tapping a row navigates to dive center detail', (
       tester,
     ) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
+      final centers = [_makeCenter(id: 'dc1', name: 'Reef Explorers')];
+
+      final overrides = await _buildOverrides(centers: centers);
+
+      String? pushedPath;
+      final router = GoRouter(
+        initialLocation: '/dive-centers',
+        routes: [
+          GoRoute(
+            path: '/dive-centers',
+            builder: (context, state) =>
+                const Scaffold(body: DiveCenterListContent(showAppBar: true)),
+            routes: [
+              GoRoute(
+                path: ':id',
+                builder: (context, state) {
+                  pushedPath = state.uri.toString();
+                  return const Scaffold(body: SizedBox());
+                },
+              ),
+            ],
+          ),
+        ],
       );
 
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: true),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
-    });
-
-    testWidgets('compact bar sort button opens sheet and selects option', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.sort));
+      // Double-tap on a dive center row
+      await tester.tap(find.text('Reef Explorers'));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.text('Reef Explorers'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Sort Dive Centers'), findsOneWidget);
-
-      // Use .last because 'Dive Count' also appears in the column header
-      await tester.tap(find.text('Dive Count').last);
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('compact bar popup Detailed switches view mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        centers: [_makeCenter(id: 'dc1', name: 'Test Center')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const DiveCenterListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
+      expect(pushedPath, '/dive-centers/dc1');
     });
   });
 }

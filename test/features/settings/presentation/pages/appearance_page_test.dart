@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:submersion/core/constants/dive_detail_sections.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/settings/presentation/pages/appearance_page.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -10,15 +9,6 @@ import 'package:submersion/l10n/arb/app_localizations.dart';
 class _MockSettingsNotifier extends StateNotifier<AppSettings>
     implements SettingsNotifier {
   _MockSettingsNotifier() : super(const AppSettings());
-
-  @override
-  Future<void> setDiveDetailSections(
-    List<DiveDetailSectionConfig> sections,
-  ) async => state = state.copyWith(diveDetailSections: sections);
-
-  @override
-  Future<void> resetDiveDetailSections() async =>
-      state = state.copyWith(clearDiveDetailSections: true);
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -38,39 +28,94 @@ Widget _buildTestWidget() {
 }
 
 void main() {
-  group('AppearancePage dive detail sections', () {
-    testWidgets('shows Dive Details section header', (tester) async {
-      await tester.binding.setSurfaceSize(const Size(400, 4000));
+  group('AppearancePage hub layout', () {
+    testWidgets('shows General section header', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       await tester.pumpWidget(_buildTestWidget());
       await tester.pumpAndSettle();
 
-      expect(find.text('Dive Details'), findsOneWidget);
+      expect(find.text('General'), findsOneWidget);
     });
 
-    testWidgets('shows Section Order & Visibility tile', (tester) async {
-      await tester.binding.setSurfaceSize(const Size(400, 4000));
+    testWidgets('shows theme tile with palette_outlined icon', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       await tester.pumpWidget(_buildTestWidget());
       await tester.pumpAndSettle();
 
-      expect(find.text('Section Order & Visibility'), findsOneWidget);
-      expect(
-        find.text('Choose which sections appear and their order'),
-        findsOneWidget,
-      );
+      expect(find.byIcon(Icons.palette_outlined), findsOneWidget);
     });
 
-    testWidgets('shows reorder icon on dive details tile', (tester) async {
-      await tester.binding.setSurfaceSize(const Size(400, 4000));
+    testWidgets('shows theme mode selector icons', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
       await tester.pumpWidget(_buildTestWidget());
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(Icons.reorder), findsOneWidget);
+      expect(find.byIcon(Icons.brightness_auto), findsOneWidget);
+      expect(find.byIcon(Icons.light_mode), findsOneWidget);
+      expect(find.byIcon(Icons.dark_mode), findsOneWidget);
+    });
+
+    testWidgets('shows language tile with language icon', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget());
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.language), findsOneWidget);
+    });
+
+    testWidgets('shows Sections section header', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget());
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sections'), findsOneWidget);
+    });
+
+    testWidgets('shows all 8 section navigation tiles', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget());
+      await tester.pumpAndSettle();
+
+      for (final label in [
+        'Dives',
+        'Sites',
+        'Buddies',
+        'Trips',
+        'Equipment',
+        'Dive Centers',
+        'Certifications',
+        'Courses',
+      ]) {
+        expect(
+          find.text(label),
+          findsOneWidget,
+          reason: 'Missing tile: $label',
+        );
+      }
+    });
+
+    testWidgets('does NOT show old inline settings', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_buildTestWidget());
+      await tester.pumpAndSettle();
+
+      expect(find.text('Dive List View'), findsNothing);
+      expect(find.text('Show Profile Panel in Table View'), findsNothing);
+      expect(find.text('Show details pane in table mode'), findsNothing);
     });
   });
 }

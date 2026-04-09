@@ -15759,4 +15759,25 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get listViewMode_table => 'Tabel';
+
+  @override
+  String get settings_appearance_general => 'Algemeen';
+
+  @override
+  String get settings_appearance_sections => 'Secties';
+
+  @override
+  String get settings_appearance_showDetailsPane => 'Detailvenster tonen';
+
+  @override
+  String get settings_appearance_showDetailsPane_subtitle =>
+      'Detailvenster naast de tabel weergeven';
+
+  @override
+  String get settings_appearance_showProfilePanel =>
+      'Profielpaneel tonen in tabelweergave';
+
+  @override
+  String get settings_appearance_showProfilePanel_subtitle =>
+      'Duikprofielgrafiek standaard boven de tabel weergeven';
 }

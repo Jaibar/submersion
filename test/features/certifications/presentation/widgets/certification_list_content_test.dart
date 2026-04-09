@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/list_view_mode.dart';
@@ -10,6 +11,7 @@ import 'package:submersion/features/certifications/presentation/providers/certif
 import 'package:submersion/features/certifications/presentation/widgets/certification_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
 
@@ -167,23 +169,9 @@ void main() {
       expect(find.byIcon(Icons.card_membership_outlined), findsOneWidget);
     });
 
-    testWidgets('table app bar includes column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Open Water')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
+    // Column settings are now provided by TableModeLayout, not the content
+    // widget. The compact bar provides wallet, sort, search, and view mode
+    // controls.
 
     testWidgets('renders with showAppBar false (compact bar)', (tester) async {
       final overrides = await _buildOverrides(
@@ -199,178 +187,6 @@ void main() {
       await tester.pump();
 
       expect(find.text('Nitrox Diver'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has wallet button', (tester) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Open Water')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.wallet), findsOneWidget);
-    });
-
-    testWidgets('table app bar has search button', (tester) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Open Water')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('table app bar has more options popup', (tester) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Open Water')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
-    });
-
-    testWidgets('table app bar popup menu shows view mode items', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Open Water')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Detailed'), findsOneWidget);
-    });
-
-    testWidgets('table app bar has vertical divider', (tester) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Open Water')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: true),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byType(VerticalDivider), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode shows column settings button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Nitrox Diver')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      // Compact bar in table mode should also have column settings button
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode shows wallet button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Nitrox Diver')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.wallet), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode shows search button', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Nitrox Diver')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.search), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode shows sort button', (tester) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Nitrox Diver')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-    });
-
-    testWidgets('compact bar in table mode shows popup menu', (tester) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Nitrox Diver')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
     });
 
     testWidgets('table renders certification data in cells', (tester) async {
@@ -458,25 +274,6 @@ void main() {
       expect(find.text('Divemaster'), findsOneWidget);
     });
 
-    testWidgets('compact bar in table mode shows column settings icon', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'cb1', name: 'Nitrox')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.view_column_outlined), findsOneWidget);
-      expect(find.text('Nitrox'), findsOneWidget);
-    });
-
     testWidgets('renders with various agencies', (tester) async {
       final certs = [
         _makeCert(
@@ -507,96 +304,93 @@ void main() {
       expect(find.text('NAUI Cert'), findsOneWidget);
     });
 
-    testWidgets('tapping popup menu Detailed switches from table mode', (
+    testWidgets('tapping a row sets highlighted certification id', (
       tester,
     ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Test Cert')],
-      );
+      final certs = [
+        _makeCert(id: 'c1', name: 'PADI OW'),
+        _makeCert(id: 'c2', name: 'SSI AOW'),
+      ];
 
+      final overrides = await _buildOverrides(certs: certs);
+
+      late ProviderContainer container;
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: true),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Consumer(
+              builder: (context, ref, _) {
+                container = ProviderScope.containerOf(context);
+                return const Scaffold(
+                  body: CertificationListContent(showAppBar: true),
+                );
+              },
+            ),
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
+      // Tap on a certification row
+      await tester.tap(find.text('PADI OW'));
+      // Pump past the DoubleTapGestureRecognizer's 300ms timeout
+      await tester.pump(const Duration(milliseconds: 350));
 
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
+      // The tap should have set the highlighted certification ID
+      expect(container.read(highlightedCertificationIdProvider), 'c1');
     });
 
-    testWidgets('compact bar sort button opens sheet and selects option', (
+    testWidgets('double-tapping a row navigates to certification detail', (
       tester,
     ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Test Cert')],
+      final certs = [_makeCert(id: 'c1', name: 'PADI OW')];
+
+      final overrides = await _buildOverrides(certs: certs);
+
+      String? pushedPath;
+      final router = GoRouter(
+        initialLocation: '/certifications',
+        routes: [
+          GoRoute(
+            path: '/certifications',
+            builder: (context, state) => const Scaffold(
+              body: CertificationListContent(showAppBar: true),
+            ),
+            routes: [
+              GoRoute(
+                path: ':id',
+                builder: (context, state) {
+                  pushedPath = state.uri.toString();
+                  return const Scaffold(body: SizedBox());
+                },
+              ),
+            ],
+          ),
+        ],
       );
 
       await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
+        ProviderScope(
+          overrides: overrides.cast(),
+          child: MaterialApp.router(
+            routerConfig: router,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+          ),
         ),
       );
       await tester.pump();
 
-      await tester.tap(find.byIcon(Icons.sort));
+      // Double-tap on a certification row
+      await tester.tap(find.text('PADI OW'));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.text('PADI OW'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Sort Certifications'), findsOneWidget);
-
-      // Tap a sort option to invoke the onSortChanged callback
-      await tester.tap(find.text('Date Issued'));
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('compact bar column settings opens picker', (tester) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Test Cert')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.view_column_outlined));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Columns'), findsOneWidget);
-    });
-
-    testWidgets('compact bar popup menu Detailed switches view mode', (
-      tester,
-    ) async {
-      final overrides = await _buildOverrides(
-        certs: [_makeCert(id: 'c1', name: 'Test Cert')],
-      );
-
-      await tester.pumpWidget(
-        testApp(
-          overrides: overrides,
-          child: const CertificationListContent(showAppBar: false),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.byIcon(Icons.more_vert));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Detailed'));
-      await tester.pumpAndSettle();
-
-      // View mode was changed from table
-      expect(find.byIcon(Icons.view_column_outlined), findsNothing);
+      expect(pushedPath, '/certifications/c1');
     });
   });
 }
