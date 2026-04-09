@@ -55,16 +55,37 @@ class TableViewConfig extends Equatable {
     this.sortAscending = true,
   });
 
-  /// Default table configuration with 6 standard columns.
+  /// Default table configuration with 22 standard columns.
   factory TableViewConfig.defaultConfig() {
     return TableViewConfig(
       columns: [
+        // Core
         TableColumnConfig(field: DiveField.diveNumber, isPinned: true),
         TableColumnConfig(field: DiveField.siteName, isPinned: true),
         TableColumnConfig(field: DiveField.dateTime),
+        TableColumnConfig(field: DiveField.diveTypeName),
         TableColumnConfig(field: DiveField.maxDepth),
-        TableColumnConfig(field: DiveField.bottomTime),
+        TableColumnConfig(field: DiveField.avgDepth),
+        TableColumnConfig(field: DiveField.runtime),
+        TableColumnConfig(field: DiveField.surfaceInterval),
+        // Gas/Tank
+        TableColumnConfig(field: DiveField.primaryGas),
+        TableColumnConfig(field: DiveField.startPressure),
+        TableColumnConfig(field: DiveField.endPressure),
+        TableColumnConfig(field: DiveField.sacRate),
+        // Environment
         TableColumnConfig(field: DiveField.waterTemp),
+        TableColumnConfig(field: DiveField.visibility),
+        TableColumnConfig(field: DiveField.currentStrength),
+        TableColumnConfig(field: DiveField.entryMethod),
+        // People
+        TableColumnConfig(field: DiveField.buddy),
+        TableColumnConfig(field: DiveField.diveMaster),
+        // Metadata
+        TableColumnConfig(field: DiveField.tripName),
+        TableColumnConfig(field: DiveField.ratingStars),
+        TableColumnConfig(field: DiveField.tags),
+        TableColumnConfig(field: DiveField.notes),
       ],
     );
   }
@@ -258,12 +279,33 @@ class FieldPreset extends Equatable {
   static List<FieldPreset> builtInTablePresets() {
     final standard = TableViewConfig(
       columns: [
+        // Core
         TableColumnConfig(field: DiveField.diveNumber, isPinned: true),
         TableColumnConfig(field: DiveField.siteName, isPinned: true),
         TableColumnConfig(field: DiveField.dateTime),
+        TableColumnConfig(field: DiveField.diveTypeName),
         TableColumnConfig(field: DiveField.maxDepth),
-        TableColumnConfig(field: DiveField.bottomTime),
+        TableColumnConfig(field: DiveField.avgDepth),
+        TableColumnConfig(field: DiveField.runtime),
+        TableColumnConfig(field: DiveField.surfaceInterval),
+        // Gas/Tank
+        TableColumnConfig(field: DiveField.primaryGas),
+        TableColumnConfig(field: DiveField.startPressure),
+        TableColumnConfig(field: DiveField.endPressure),
+        TableColumnConfig(field: DiveField.sacRate),
+        // Environment
         TableColumnConfig(field: DiveField.waterTemp),
+        TableColumnConfig(field: DiveField.visibility),
+        TableColumnConfig(field: DiveField.currentStrength),
+        TableColumnConfig(field: DiveField.entryMethod),
+        // People
+        TableColumnConfig(field: DiveField.buddy),
+        TableColumnConfig(field: DiveField.diveMaster),
+        // Metadata
+        TableColumnConfig(field: DiveField.tripName),
+        TableColumnConfig(field: DiveField.ratingStars),
+        TableColumnConfig(field: DiveField.tags),
+        TableColumnConfig(field: DiveField.notes),
       ],
     );
 

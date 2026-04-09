@@ -78,9 +78,24 @@ void main() {
   group('TableViewConfig', () {
     test('defaultConfig has expected columns', () {
       final config = TableViewConfig.defaultConfig();
-      expect(config.columns.length, greaterThanOrEqualTo(5));
-      expect(config.columns.first.field, equals(DiveField.diveNumber));
-      expect(config.columns.first.isPinned, isTrue);
+      expect(config.columns.length, equals(22));
+      expect(config.columns[0].field, equals(DiveField.diveNumber));
+      expect(config.columns[0].isPinned, isTrue);
+      expect(config.columns[1].field, equals(DiveField.siteName));
+      expect(config.columns[1].isPinned, isTrue);
+      // Core fields
+      expect(config.columns[2].field, equals(DiveField.dateTime));
+      expect(config.columns[3].field, equals(DiveField.diveTypeName));
+      expect(config.columns[6].field, equals(DiveField.runtime));
+      // Gas/Tank fields
+      expect(config.columns[8].field, equals(DiveField.primaryGas));
+      expect(config.columns[11].field, equals(DiveField.sacRate));
+      // Environment fields
+      expect(config.columns[12].field, equals(DiveField.waterTemp));
+      // People fields
+      expect(config.columns[16].field, equals(DiveField.buddy));
+      // Metadata fields
+      expect(config.columns[21].field, equals(DiveField.notes));
       expect(config.sortField, isNull);
       expect(config.sortAscending, isTrue);
     });
@@ -576,12 +591,20 @@ void main() {
       expect(fields, contains(DiveField.notes));
     });
 
-    test('Standard preset has waterTemp column', () {
+    test('Standard preset has 22 columns with category grouping', () {
       final presets = FieldPreset.builtInTablePresets();
       final standard = presets.firstWhere((p) => p.name == 'Standard');
       final config = TableViewConfig.fromJson(standard.configJson);
+      expect(config.columns.length, equals(22));
       final fields = config.columns.map((c) => c.field).toList();
+      // Verify key fields from each category are present
       expect(fields, contains(DiveField.waterTemp));
+      expect(fields, contains(DiveField.primaryGas));
+      expect(fields, contains(DiveField.buddy));
+      expect(fields, contains(DiveField.ratingStars));
+      expect(fields, contains(DiveField.notes));
+      // Verify bottomTime was removed
+      expect(fields, isNot(contains(DiveField.bottomTime)));
     });
 
     test('inequality between different presets', () {
