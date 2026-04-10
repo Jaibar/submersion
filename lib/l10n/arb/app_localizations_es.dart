@@ -15916,4 +15916,20 @@ class AppLocalizationsEs extends AppLocalizations {
   @override
   String get settings_appearance_showProfilePanel_subtitle =>
       'Mostrar gráfico de perfil de inmersión sobre la tabla por defecto';
+
+  @override
+  String get settings_appearance_mapStyle => 'Map Style';
+
+  @override
+  String get settings_appearance_mapStyle_subtitle =>
+      'Choose map tile appearance';
+
+  @override
+  String get settings_appearance_mapStyle_openStreetMap => 'Street Map';
+
+  @override
+  String get settings_appearance_mapStyle_openTopoMap => 'Topographic';
+
+  @override
+  String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
 }

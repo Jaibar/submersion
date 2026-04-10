@@ -15602,4 +15602,20 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get settings_appearance_showProfilePanel_subtitle =>
       'عرض مخطط ملف الغوصة فوق الجدول بشكل افتراضي';
+
+  @override
+  String get settings_appearance_mapStyle => 'Map Style';
+
+  @override
+  String get settings_appearance_mapStyle_subtitle =>
+      'Choose map tile appearance';
+
+  @override
+  String get settings_appearance_mapStyle_openStreetMap => 'Street Map';
+
+  @override
+  String get settings_appearance_mapStyle_openTopoMap => 'Topographic';
+
+  @override
+  String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
 }
