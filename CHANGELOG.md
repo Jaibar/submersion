@@ -3,6 +3,53 @@
 All notable changes to Submersion are documented in this file.
 
 
+## 1.4.3 (2026-04-09)
+
+### Features
+
+- improve table row selection UX and simplify built-in presets
+- replace sine-wave depth model with Perlin noise, micro-events, and workload-driven gas consumption
+- add Perlin noise, diver personality, and micro-events for profile realism
+- change UDDF generator default sample interval from 10s to 5s
+- expand Standard table preset from 6 to 22 columns
+- table mode full-width default, details toggle, and entity settings (#184)
+- add column configuration and field category l10n strings
+- table view with customizable columns and card fields (#56) (#139)
+
+### Bug Fixes
+
+- formatting
+- correct FIT import timezone offset for dive times
+- simplify dive computer stats to only show dives imported and last download
+- handle CertificationLevel enum type in UDDF import display
+- use displayName instead of shortLabel for table column headers
+- correct Report an Issue URL and open browser on tap (#177)
+- handle label overflow caused by new field on dive planner (#181)
+
+### Documentation
+
+- add implementation plan for expanded Standard table preset
+- add implementation plan for UDDF generator improvements
+- add design spec for expanded Standard table preset
+- add design spec for UDDF generator improvements (#186)
+- add implementation plan for startup migration progress (#186)
+- add design spec for startup migration progress indicator (#186)
+- add implementation plan for table mode full-width and details toggle
+- add spec for table mode full-width layout and details toggle
+
+### Chores
+
+- bump version to 1.4.3+88
+- remove orphaned uddf_adapter_test.mocks.dart
+- remove dead UddfAdapter and FitAdapter
+
+### Other
+
+- Add Claude Code GitHub Workflow (#183)
+- Handle average depth imports correctly from computers that do not support it (#180)
+- Fix/additional uddf ssrf properties (#170)
+
+
 ## 1.4.2 (2026-04-05)
 
 ### Bug Fixes
