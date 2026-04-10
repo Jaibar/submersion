@@ -14,6 +14,7 @@ import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.d
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/features/maps/presentation/providers/map_tile_providers.dart';
 
 class DiveCenterDetailPage extends ConsumerStatefulWidget {
   final String centerId;
@@ -603,9 +604,9 @@ class _MapSection extends StatelessWidget {
               ),
               children: [
                 TileLayer(
-                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                  urlTemplate: ref.watch(mapTileUrlProvider),
                   userAgentPackageName: 'app.submersion',
-                  maxZoom: 19,
+                  maxZoom: ref.watch(mapTileMaxZoomProvider),
                   tileProvider: TileCacheService.instance.isInitialized
                       ? TileCacheService.instance.getTileProvider()
                       : null,
@@ -696,9 +697,9 @@ class _MapSection extends StatelessWidget {
             ),
             children: [
               TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                urlTemplate: ref.watch(mapTileUrlProvider),
                 userAgentPackageName: 'app.submersion',
-                maxZoom: 19,
+                maxZoom: ref.watch(mapTileMaxZoomProvider),
                 tileProvider: TileCacheService.instance.isInitialized
                     ? TileCacheService.instance.getTileProvider()
                     : null,
