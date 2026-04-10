@@ -736,6 +736,9 @@ void main() {
     testWidgets('_getSectionDisplayName returns display name for known keys', (
       tester,
     ) async {
+      await tester.binding.setSurfaceSize(const Size(400, 4000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
       await tester.pumpWidget(buildAppearanceWidget(getOverrides()));
       await tester.pumpAndSettle();
 
