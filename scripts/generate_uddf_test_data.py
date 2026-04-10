@@ -926,6 +926,225 @@ def ease_in_out_cubic(t: float) -> float:
         return 1 - pow(-2 * t + 2, 3) / 2
 
 
+class PerlinNoise:
+    """Simple 1D gradient noise for organic, non-repeating variation.
+
+    Uses a permutation table with gradient interpolation to produce
+    smooth, continuous noise that doesn't repeat within typical dive durations.
+    """
+
+    def __init__(self, seed: int = 0, size: int = 256):
+        rng = random.Random(seed)
+        self._perm = list(range(size))
+        rng.shuffle(self._perm)
+        self._perm *= 2  # Double for wrapping
+        self._gradients = [rng.uniform(-1, 1) for _ in range(size)]
+        self._size = size
+
+    def _fade(self, t: float) -> float:
+        """Quintic smoothstep: 6t^5 - 15t^4 + 10t^3."""
+        return t * t * t * (t * (t * 6 - 15) + 10)
+
+    def noise(self, x: float) -> float:
+        """Return noise value at position x, approximately in [-1, 1]."""
+        xi = int(math.floor(x)) % self._size
+        xf = x - math.floor(x)
+
+        g0 = self._gradients[self._perm[xi]]
+        g1 = self._gradients[self._perm[xi + 1]]
+
+        d0 = g0 * xf
+        d1 = g1 * (xf - 1)
+
+        u = self._fade(xf)
+        return d0 + u * (d1 - d0)
+
+
+class DiverPersonality:
+    """Per-dive randomized diver behavior parameters.
+
+    Affects depth-holding stability, descent speed, SAC rate and consistency,
+    and micro-event frequency. Skill trends upward over the diver's career.
+    """
+
+    def __init__(self, skill_level: float, activity_level: float):
+        self.skill_level = max(0.0, min(1.0, skill_level))
+        self.activity_level = max(0.0, min(1.0, activity_level))
+
+    @staticmethod
+    def generate(dive_number: int, total_dives: int) -> "DiverPersonality":
+        """Generate personality with skill trending upward over career."""
+        progress = dive_number / max(1, total_dives)
+        base_skill = 0.2 + progress * 0.7
+        skill = base_skill + random.uniform(-0.1, 0.1)
+        activity = random.uniform(0.2, 0.9)
+        return DiverPersonality(skill_level=skill, activity_level=activity)
+
+    @property
+    def noise_amplitude(self) -> float:
+        """Depth-holding noise amplitude in meters. Less skilled = more wobble."""
+        return 0.4 + (1.0 - self.skill_level) * 1.2
+
+    @property
+    def descent_rate_range(self) -> Tuple[float, float]:
+        """Descent rate range in m/min. Novices descend slower."""
+        min_rate = 6 + self.skill_level * 4
+        max_rate = 10 + self.skill_level * 5
+        return (min_rate, max_rate)
+
+    @property
+    def ascent_rate(self) -> float:
+        """Ascent rate in m/min. Slightly variable, always safe."""
+        return random.uniform(6, 9)
+
+    @property
+    def base_sac(self) -> float:
+        """Base SAC rate in L/min. Experienced divers consume less air."""
+        return 22 - self.skill_level * 10 + random.uniform(-1.0, 1.0)
+
+    @property
+    def sac_consistency(self) -> float:
+        """How consistent SAC is. 0.0 = very variable, 1.0 = rock steady."""
+        return 0.3 + self.skill_level * 0.6
+
+    @property
+    def eq_pause_count(self) -> int:
+        """Number of equalization pauses during descent in first 10m."""
+        max_pauses = max(0, int(3 - self.skill_level * 2.5))
+        return random.randint(0, max(0, max_pauses))
+
+    @property
+    def micro_event_count(self) -> int:
+        """Number of depth excursion events per depth level."""
+        base = 2 + int(self.activity_level * 4)
+        return random.randint(max(1, base - 1), base + 1)
+
+
+def breathing_oscillation(
+    time_seconds: float, skill_level: float, breath_rate: float = None
+) -> float:
+    """Simulate breathing-induced depth oscillation.
+
+    Args:
+        time_seconds: Current time in seconds.
+        skill_level: 0.0 (novice) to 1.0 (expert).
+        breath_rate: Breaths per minute. If None, randomized 12-18.
+
+    Returns:
+        Depth variation in meters from breathing (typically +/- 0.2 to 0.4m).
+    """
+    if breath_rate is None:
+        breath_rate = 18 - skill_level * 6
+    amplitude = 0.4 - skill_level * 0.2
+    return amplitude * math.sin(2 * math.pi * (breath_rate / 60) * time_seconds)
+
+
+# Micro-event types with behavior descriptors
+MICRO_EVENT_TYPES = [
+    {
+        "type": "look_below",
+        "direction": -1,
+        "depth_range": (1, 3),
+        "duration_range": (25, 50),
+    },
+    {
+        "type": "check_above",
+        "direction": 1,
+        "depth_range": (1, 3),
+        "duration_range": (20, 40),
+    },
+    {
+        "type": "buoyancy_adj",
+        "direction": 1,
+        "depth_range": (0.3, 0.8),
+        "duration_range": (10, 25),
+    },
+    {
+        "type": "terrain_feature",
+        "direction": -1,
+        "depth_range": (2, 4),
+        "duration_range": (60, 120),
+    },
+]
+
+
+def generate_micro_events(
+    level_start_time: float,
+    level_duration: float,
+    target_depth: float,
+    activity_level: float,
+    max_depth: float,
+) -> List[Dict]:
+    """Generate randomized depth excursion events for a depth level.
+
+    Args:
+        level_start_time: Seconds from dive start when this level begins.
+        level_duration: Duration of this depth level in seconds.
+        target_depth: Target depth of this level in meters.
+        activity_level: 0.0-1.0, controls event frequency.
+        max_depth: Maximum allowed depth for this dive.
+
+    Returns:
+        List of event dicts with start_time, duration, depth_offset, event_type.
+    """
+    num_events = max(1, int(2 + activity_level * 4 + random.uniform(-1, 1)))
+    num_events = min(num_events, max(1, int(level_duration / 60)))
+
+    events = []
+    slot_size = level_duration / max(1, num_events + 1)
+    for i in range(num_events):
+        slot_start = level_start_time + (i + 0.5) * slot_size
+        jitter = random.uniform(-slot_size * 0.3, slot_size * 0.3)
+        event_time = max(level_start_time, slot_start + jitter)
+
+        template = random.choice(MICRO_EVENT_TYPES)
+        depth_mag = random.uniform(*template["depth_range"])
+        duration = random.uniform(*template["duration_range"])
+
+        direction = template["direction"]
+        depth_offset = direction * depth_mag
+
+        if target_depth + depth_offset > max_depth + 1:
+            depth_offset = max_depth - target_depth
+        if target_depth + depth_offset < 3:
+            depth_offset = 3 - target_depth
+
+        events.append(
+            {
+                "start_time": event_time,
+                "duration": duration,
+                "depth_offset": depth_offset,
+                "event_type": template["type"],
+            }
+        )
+
+    return events
+
+
+def apply_micro_event(event: Dict, current_time: float) -> float:
+    """Calculate depth offset from a micro-event at the given time.
+
+    Uses a smooth bell curve (raised cosine) so the diver eases into
+    and out of the excursion naturally.
+
+    Args:
+        event: Event dict from generate_micro_events.
+        current_time: Current dive time in seconds.
+
+    Returns:
+        Depth offset in meters (negative = deeper, positive = shallower).
+    """
+    start = event["start_time"]
+    end = start + event["duration"]
+
+    if current_time < start or current_time > end:
+        return 0.0
+
+    progress = (current_time - start) / event["duration"]
+    envelope = (1 - math.cos(2 * math.pi * progress)) / 2
+    return event["depth_offset"] * envelope
+
+
 def depth_variation(time_seconds: float, amplitude: float = 2.0, seed: float = 0.0) -> float:
     """
     Generate smooth, natural depth variations simulating terrain following.
