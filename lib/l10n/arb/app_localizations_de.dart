@@ -6260,7 +6260,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogContent(Object name) {
-    return 'Sind Sie sicher, dass Sie $name loeschen moechten? Alle zugeordneten Tauchprotokolle werden freigegeben.';
+    return 'This will permanently delete $name and all associated data including dive logs, dive computers, equipment, certifications, and sites.';
   }
 
   @override
@@ -6574,6 +6574,16 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get divers_summary_totalDiversLabel => 'Taucher gesamt';
+
+  @override
+  String divers_detail_deleteDialogConfirmHint(String name) {
+    return 'Type \"Delete $name\" to confirm';
+  }
+
+  @override
+  String divers_detail_deleteDialogConfirmText(String name) {
+    return 'Delete $name';
+  }
 
   @override
   String get enum_altitudeGroup_extreme => 'Extreme Hoehe';

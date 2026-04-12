@@ -109,9 +109,16 @@ class MockDiveComputerRepository extends _i1.Mock
           as _i7.Future<_i2.DiveComputer?>);
 
   @override
-  _i7.Future<_i2.DiveComputer?> findByBluetoothAddress(String? address) =>
+  _i7.Future<_i2.DiveComputer?> findByBluetoothAddress(
+    String? address, {
+    String? diverId,
+  }) =>
       (super.noSuchMethod(
-            Invocation.method(#findByBluetoothAddress, [address]),
+            Invocation.method(
+              #findByBluetoothAddress,
+              [address],
+              {#diverId: diverId},
+            ),
             returnValue: _i7.Future<_i2.DiveComputer?>.value(),
           )
           as _i7.Future<_i2.DiveComputer?>);
@@ -260,6 +267,7 @@ class MockDiveComputerRepository extends _i1.Mock
     int? durationSeconds,
     double? maxDepth,
     String? fingerprint,
+    String? diverId,
   }) =>
       (super.noSuchMethod(
             Invocation.method(#findMatchingDiveWithScore, [], {
@@ -268,6 +276,7 @@ class MockDiveComputerRepository extends _i1.Mock
               #durationSeconds: durationSeconds,
               #maxDepth: maxDepth,
               #fingerprint: fingerprint,
+              #diverId: diverId,
             }),
             returnValue: _i7.Future<_i6.DiveMatchResult?>.value(),
           )

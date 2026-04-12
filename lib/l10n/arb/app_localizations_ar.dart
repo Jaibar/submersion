@@ -6128,7 +6128,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogContent(Object name) {
-    return 'هل أنت متأكد أنك تريد حذف $name؟ سيتم إلغاء تعيين جميع سجلات الغوص المرتبطة.';
+    return 'This will permanently delete $name and all associated data including dive logs, dive computers, equipment, certifications, and sites.';
   }
 
   @override
@@ -6437,6 +6437,16 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get divers_summary_totalDiversLabel => 'إجمالي الغواصين';
+
+  @override
+  String divers_detail_deleteDialogConfirmHint(String name) {
+    return 'Type \"Delete $name\" to confirm';
+  }
+
+  @override
+  String divers_detail_deleteDialogConfirmText(String name) {
+    return 'Delete $name';
+  }
 
   @override
   String get enum_altitudeGroup_extreme => 'ارتفاع شديد';

@@ -6244,7 +6244,7 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogContent(Object name) {
-    return 'Biztosan torli $name merülot? Az osszes hozzatartozo merülesi naplo hozzarendelese megszunik.';
+    return 'This will permanently delete $name and all associated data including dive logs, dive computers, equipment, certifications, and sites.';
   }
 
   @override
@@ -6557,6 +6557,16 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get divers_summary_totalDiversLabel => 'Osszes merülo';
+
+  @override
+  String divers_detail_deleteDialogConfirmHint(String name) {
+    return 'Type \"Delete $name\" to confirm';
+  }
+
+  @override
+  String divers_detail_deleteDialogConfirmText(String name) {
+    return 'Delete $name';
+  }
 
   @override
   String get enum_altitudeGroup_extreme => 'Extrem magassag';

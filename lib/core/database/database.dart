@@ -1307,7 +1307,7 @@ class AppDatabase extends _$AppDatabase {
 
   /// The current schema version as a static constant so that pre-open checks
   /// (e.g. version-mismatch guard) can reference it without an instance.
-  static const int currentSchemaVersion = 63;
+  static const int currentSchemaVersion = 64;
 
   /// Every schema version that has a migration block in onUpgrade.
   /// Used to calculate progress step counts. When adding a new migration,
@@ -1374,6 +1374,7 @@ class AppDatabase extends _$AppDatabase {
     61,
     62,
     63,
+    64,
   ];
 
   /// Returns the number of migration steps that will execute when upgrading
@@ -2958,6 +2959,55 @@ class AppDatabase extends _$AppDatabase {
           }
         }
         if (from < 63) await reportProgress();
+
+        if (from < 64) {
+          // Delete orphaned records (diver_id = NULL) left by prior diver
+          // deletions that nullified instead of cascade-deleting.
+          // Delete dives first so child tables CASCADE automatically.
+          // Guard: only run on tables that have a diver_id column (older
+          // migration-test databases may not have it).
+          for (final table in [
+            'dives',
+            'trips',
+            'dive_sites',
+            'equipment',
+            'equipment_sets',
+            'buddies',
+            'certifications',
+            'dive_centers',
+            'tags',
+            'dive_computers',
+            'tank_presets',
+          ]) {
+            final cols = await customSelect(
+              "PRAGMA table_info('$table')",
+            ).get();
+            if (cols.any((c) => c.read<String>('name') == 'diver_id')) {
+              await customStatement(
+                'DELETE FROM $table WHERE diver_id IS NULL',
+              );
+            }
+          }
+
+          // Custom dive types may be orphaned too, but built-in types
+          // (is_built_in = 1) intentionally have null diver_id. Only
+          // delete orphaned custom types.
+          final diveTypeCols = await customSelect(
+            "PRAGMA table_info('dive_types')",
+          ).get();
+          final hasDiverId = diveTypeCols.any(
+            (c) => c.read<String>('name') == 'diver_id',
+          );
+          final hasBuiltIn = diveTypeCols.any(
+            (c) => c.read<String>('name') == 'is_built_in',
+          );
+          if (hasDiverId && hasBuiltIn) {
+            await customStatement(
+              'DELETE FROM dive_types WHERE diver_id IS NULL AND is_built_in = 0',
+            );
+          }
+        }
+        if (from < 64) await reportProgress();
       },
       beforeOpen: (details) async {
         // Enable foreign keys
