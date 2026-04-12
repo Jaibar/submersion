@@ -246,7 +246,7 @@ class _DiveCenterEditPageState extends ConsumerState<DiveCenterEditPage> {
         if (widget.embedded) {
           widget.onSaved?.call(savedId);
         } else {
-          context.pop();
+          context.pop(savedId);
         }
       }
     } catch (e) {
