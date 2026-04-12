@@ -65,7 +65,8 @@ class StartupWrapper extends StatefulWidget {
   State<StartupWrapper> createState() => _StartupWrapperState();
 }
 
-class _StartupWrapperState extends State<StartupWrapper> {
+class _StartupWrapperState extends State<StartupWrapper>
+    with SingleTickerProviderStateMixin {
   _StartupState _state = _StartupState.initializing;
   MigrationProgress _progress = const MigrationProgress(
     currentStep: 0,
@@ -76,10 +77,32 @@ class _StartupWrapperState extends State<StartupWrapper> {
   int _dbVersion = 0;
   int _appVersion = 0;
 
+  /// Drives the dissolve of the splash layer over the mounted app beneath.
+  /// Forward-only; starts when _state first reaches ready.
+  late final AnimationController _splashFadeController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+
+  /// True once the fade completes, at which point the splash widget is
+  /// dropped from the tree entirely.
+  bool _splashRemoved = false;
+
   @override
   void initState() {
     super.initState();
+    _splashFadeController.addStatusListener((status) {
+      if (status == AnimationStatus.completed && mounted) {
+        setState(() => _splashRemoved = true);
+      }
+    });
     _runInitialization();
+  }
+
+  @override
+  void dispose() {
+    _splashFadeController.dispose();
+    super.dispose();
   }
 
   Future<void> _runInitialization() async {
@@ -120,6 +143,7 @@ class _StartupWrapperState extends State<StartupWrapper> {
 
       if (mounted) {
         setState(() => _state = _StartupState.ready);
+        _splashFadeController.forward();
       }
     } on DatabaseVersionMismatchException catch (e) {
       if (mounted) {
@@ -206,39 +230,59 @@ class _StartupWrapperState extends State<StartupWrapper> {
     final textColor = isDark ? Colors.white : Colors.black87;
     final subtitleColor = isDark ? Colors.white70 : Colors.black54;
 
-    // Return SubmersionRestart directly when ready to avoid nesting
-    // MaterialApp inside MaterialApp (SubmersionRestart contains its own
-    // MaterialApp.router via SubmersionApp).
-    if (_state == _StartupState.ready) {
-      return SubmersionRestart(
-        prefs: widget.prefs,
-        logFileService: widget.logFileService,
-      );
-    }
+    final isReady = _state == _StartupState.ready;
 
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      home: _state == _StartupState.error
-          ? Scaffold(
-              key: const ValueKey('error'),
-              backgroundColor: backgroundColor,
-              body: SafeArea(
-                child: Center(
-                  child: _buildErrorContent(textColor, subtitleColor),
+    // Splash layer: stays at full opacity while initializing/migrating/error,
+    // then dissolves to reveal SubmersionRestart beneath once state is ready.
+    final Widget? splashLayer = _splashRemoved
+        ? null
+        : IgnorePointer(
+            ignoring: isReady,
+            child: FadeTransition(
+              opacity: Tween<double>(begin: 1, end: 0).animate(
+                CurvedAnimation(
+                  parent: _splashFadeController,
+                  curve: Curves.easeInOut,
                 ),
               ),
-            )
-          : Scaffold(
-              // Use 'splash' key for both initializing and migrating so
-              // AnimatedSize handles the progress bar transition instead of
-              // AnimatedSwitcher triggering a full Scaffold crossfade.
-              key: const ValueKey('splash'),
-              body: OceanBackground(
-                child: SafeArea(
-                  child: Center(child: _buildSplashContent(isDark)),
-                ),
+              child: MaterialApp(
+                debugShowCheckedModeBanner: false,
+                home: _state == _StartupState.error
+                    ? Scaffold(
+                        key: const ValueKey('error'),
+                        backgroundColor: backgroundColor,
+                        body: SafeArea(
+                          child: Center(
+                            child: _buildErrorContent(textColor, subtitleColor),
+                          ),
+                        ),
+                      )
+                    : Scaffold(
+                        // Use 'splash' key for both initializing and migrating
+                        // so AnimatedSize handles the progress bar transition
+                        // instead of AnimatedSwitcher triggering a full
+                        // Scaffold crossfade.
+                        key: const ValueKey('splash'),
+                        body: OceanBackground(
+                          child: SafeArea(
+                            child: Center(child: _buildSplashContent(isDark)),
+                          ),
+                        ),
+                      ),
               ),
             ),
+          );
+
+    return Stack(
+      textDirection: TextDirection.ltr,
+      children: [
+        if (isReady)
+          SubmersionRestart(
+            prefs: widget.prefs,
+            logFileService: widget.logFileService,
+          ),
+        ?splashLayer,
+      ],
     );
   }
 
