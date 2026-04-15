@@ -296,10 +296,12 @@ final courseListViewModeProvider = StateProvider<ListViewMode>((ref) {
 });
 
 // ============================================================================
-// Course Highlighted ID (for table mode detail pane)
+// Course Highlighted ID (table-mode row highlight + phone-mode last-visited)
 // ============================================================================
 
-/// Tracks the currently highlighted course in table mode.
+/// Tracks the currently highlighted course. Used by the table's row highlight
+/// and by the phone-mode list to tint the last-visited course card on return
+/// from the detail page.
 final highlightedCourseIdProvider = StateProvider<String?>((ref) => null);
 
 // ============================================================================

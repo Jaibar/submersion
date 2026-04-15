@@ -8,6 +8,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/courses/domain/constants/course_field.dart';
 import 'package:submersion/features/courses/domain/entities/course.dart';
 import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
+import 'package:submersion/features/courses/presentation/widgets/course_card.dart';
 import 'package:submersion/features/courses/presentation/widgets/course_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -89,6 +90,28 @@ Future<List<Override>> _buildOverrides({required List<Course> courses}) async {
     courseTableConfigProvider.overrideWith(
       (ref) => _TestCourseTableConfigNotifier(_testConfig),
     ),
+  ];
+}
+
+Future<List<Override>> _buildPhoneOverrides({
+  required List<Course> courses,
+  String? highlightedCourseId,
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+
+  return [
+    sharedPreferencesProvider.overrideWithValue(prefs),
+    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
+    courseListNotifierProvider.overrideWith(
+      (ref) => _MockCourseListNotifier(courses),
+    ),
+    courseListViewModeProvider.overrideWith((ref) => ListViewMode.detailed),
+    courseTableConfigProvider.overrideWith(
+      (ref) => _TestCourseTableConfigNotifier(_testConfig),
+    ),
+    highlightedCourseIdProvider.overrideWith((ref) => highlightedCourseId),
   ];
 }
 
@@ -360,5 +383,39 @@ void main() {
 
       expect(pushedPath, '/courses/c1');
     });
+  });
+
+  group('CourseListContent in phone mode', () {
+    testWidgets(
+      'phone view highlights course when highlightedCourseIdProvider is set',
+      (tester) async {
+        final courses = [
+          _makeCourse(id: 'co1', name: 'Alpha Course'),
+          _makeCourse(id: 'co2', name: 'Bravo Course'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          courses: courses,
+          highlightedCourseId: 'co2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const CourseListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<CourseCard>(find.byType(CourseCard))
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.course.id == 'co1');
+        final bravo = tiles.firstWhere((t) => t.course.id == 'co2');
+
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isTrue);
+      },
+    );
   });
 }

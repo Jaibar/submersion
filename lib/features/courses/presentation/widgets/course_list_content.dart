@@ -47,6 +47,7 @@ class _CourseListContentState extends ConsumerState<CourseListContent> {
   }
 
   void _handleItemTap(Course course) {
+    ref.read(highlightedCourseIdProvider.notifier).state = course.id;
     if (widget.onItemSelected != null) {
       widget.onItemSelected!(course.id);
     } else {
@@ -312,7 +313,9 @@ class _CourseListContentState extends ConsumerState<CourseListContent> {
             padding: const EdgeInsets.only(bottom: 8),
             child: CourseCard(
               course: course,
-              isSelected: widget.selectedId == course.id,
+              isSelected:
+                  widget.selectedId == course.id ||
+                  ref.watch(highlightedCourseIdProvider) == course.id,
               onTap: () => _handleItemTap(course),
             ),
           );
