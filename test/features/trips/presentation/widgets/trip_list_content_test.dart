@@ -8,6 +8,7 @@ import 'package:submersion/features/settings/presentation/providers/settings_pro
 import 'package:submersion/features/trips/domain/constants/trip_field.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
+import 'package:submersion/features/trips/presentation/widgets/compact_trip_list_tile.dart';
 import 'package:submersion/features/trips/presentation/widgets/trip_list_content.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
 import 'package:submersion/shared/providers/entity_table_config_providers.dart';
@@ -374,6 +375,39 @@ void main() {
 
         final tiles = tester
             .widgetList<TripListTile>(find.byType(TripListTile))
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.tripWithStats.trip.id == 't1');
+        final bravo = tiles.firstWhere((t) => t.tripWithStats.trip.id == 't2');
+
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isTrue);
+      },
+    );
+
+    testWidgets(
+      'phone compact view highlights trip when highlightedTripIdProvider is set',
+      (tester) async {
+        final trips = [
+          _makeTrip(id: 't1', name: 'Alpha Trip'),
+          _makeTrip(id: 't2', name: 'Bravo Trip'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          trips: trips,
+          viewMode: ListViewMode.compact,
+          highlightedTripId: 't2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const TripListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<CompactTripListTile>(find.byType(CompactTripListTile))
             .toList();
         final alpha = tiles.firstWhere((t) => t.tripWithStats.trip.id == 't1');
         final bravo = tiles.firstWhere((t) => t.tripWithStats.trip.id == 't2');
