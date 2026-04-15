@@ -349,6 +349,16 @@ class CategoryBarChart extends StatelessWidget {
   /// Optional unit label rendered once below the x-axis (e.g. "m").
   final String? xAxisLabel;
 
+  /// Optional callback to shorten x-axis labels when bars are crowded
+  /// (per-bar width below [_compactXThreshold]). Typical use: render a year
+  /// like "2024" as "'24" when there isn't room for all four digits.
+  final String Function(String)? compactXLabelFormatter;
+
+  /// Per-bar width (in logical pixels) below which [compactXLabelFormatter]
+  /// is applied. 50 px comfortably fits 4-digit labels in bodySmall text
+  /// with normal inter-bar spacing.
+  static const double _compactXThreshold = 50;
+
   const CategoryBarChart({
     super.key,
     required this.data,
@@ -357,6 +367,7 @@ class CategoryBarChart extends StatelessWidget {
     this.valueFormatter,
     this.yAxisLabel,
     this.xAxisLabel,
+    this.compactXLabelFormatter,
   });
 
   @override
@@ -398,114 +409,149 @@ class CategoryBarChart extends StatelessWidget {
       label: context.l10n.statistics_chart_barSemanticLabel(data.length),
       child: SizedBox(
         height: height,
-        child: BarChart(
-          BarChartData(
-            alignment: BarChartAlignment.spaceAround,
-            maxY: maxCount + (maxCount * 0.1),
-            barTouchData: BarTouchData(
-              touchTooltipData: BarTouchTooltipData(
-                getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                  final item = data[groupIndex];
-                  final formattedValue =
-                      valueFormatter?.call(item.count) ?? '${item.count}';
-                  return BarTooltipItem(
-                    '${item.label}\n$formattedValue',
-                    TextStyle(
-                      color: Theme.of(context).colorScheme.onPrimary,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  );
-                },
-              ),
-            ),
-            titlesData: FlTitlesData(
-              show: true,
-              bottomTitles: AxisTitles(
-                axisNameWidget: xAxisLabel != null
-                    ? Text(
-                        xAxisLabel!,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      )
-                    : null,
-                axisNameSize: xAxisLabel != null ? 18 : 0,
-                sideTitles: SideTitles(
-                  showTitles: true,
-                  getTitlesWidget: (value, meta) {
-                    final index = value.toInt();
-                    if (index >= 0 && index < data.length) {
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(
-                          data[index].label,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      );
-                    }
-                    return const Text('');
-                  },
-                  reservedSize: 30,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // Subtract left-axis reserved width from available width before
+            // dividing across bars, so the crowding heuristic tracks the
+            // actual space each bar receives.
+            final chartBodyWidth = (constraints.maxWidth - 44).clamp(
+              0.0,
+              double.infinity,
+            );
+            final perBarWidth = data.isEmpty
+                ? double.infinity
+                : chartBodyWidth / data.length;
+            final useCompactXLabels =
+                compactXLabelFormatter != null &&
+                perBarWidth < _compactXThreshold;
+            return _buildBarChart(
+              context,
+              color: color,
+              maxCount: maxCount,
+              useCompactXLabels: useCompactXLabels,
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  BarChart _buildBarChart(
+    BuildContext context, {
+    required Color color,
+    required double maxCount,
+    required bool useCompactXLabels,
+  }) {
+    return BarChart(
+      BarChartData(
+        alignment: BarChartAlignment.spaceAround,
+        maxY: maxCount + (maxCount * 0.1),
+        barTouchData: BarTouchData(
+          touchTooltipData: BarTouchTooltipData(
+            getTooltipItem: (group, groupIndex, rod, rodIndex) {
+              final item = data[groupIndex];
+              final formattedValue =
+                  valueFormatter?.call(item.count) ?? '${item.count}';
+              return BarTooltipItem(
+                '${item.label}\n$formattedValue',
+                TextStyle(
+                  color: Theme.of(context).colorScheme.onPrimary,
+                  fontWeight: FontWeight.bold,
                 ),
-              ),
-              leftTitles: AxisTitles(
-                axisNameWidget: yAxisLabel != null
-                    ? Text(
-                        yAxisLabel!,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      )
-                    : null,
-                axisNameSize: yAxisLabel != null ? 18 : 0,
-                sideTitles: SideTitles(
-                  showTitles: true,
-                  // Room for up to 4-digit right-aligned integers.
-                  reservedSize: 44,
-                  getTitlesWidget: (value, meta) {
-                    if (value != value.roundToDouble()) {
-                      return const Text('');
-                    }
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: Text(
-                        value.toInt().toString(),
-                        textAlign: TextAlign.right,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    );
-                  },
-                ),
-              ),
-              topTitles: const AxisTitles(
-                sideTitles: SideTitles(showTitles: false),
-              ),
-              rightTitles: const AxisTitles(
-                sideTitles: SideTitles(showTitles: false),
-              ),
-            ),
-            borderData: FlBorderData(show: false),
-            gridData: FlGridData(
-              show: true,
-              drawVerticalLine: false,
-              horizontalInterval: maxCount > 0 ? maxCount / 4 : 1,
-              getDrawingHorizontalLine: (value) => FlLine(
-                color: Theme.of(context).colorScheme.outlineVariant,
-                strokeWidth: 1,
-              ),
-            ),
-            barGroups: List.generate(
-              data.length,
-              (index) => BarChartGroupData(
-                x: index,
-                barRods: [
-                  BarChartRodData(
-                    toY: data[index].count.toDouble(),
-                    color: color,
-                    width: data.length > 12 ? 12 : 20,
-                    borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(4),
-                    ),
+              );
+            },
+          ),
+        ),
+        titlesData: FlTitlesData(
+          show: true,
+          bottomTitles: AxisTitles(
+            axisNameWidget: xAxisLabel != null
+                ? Text(
+                    xAxisLabel!,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  )
+                : null,
+            axisNameSize: xAxisLabel != null ? 18 : 0,
+            sideTitles: SideTitles(
+              showTitles: true,
+              getTitlesWidget: (value, meta) {
+                final index = value.toInt();
+                if (index < 0 || index >= data.length) {
+                  return const Text('');
+                }
+                final rawLabel = data[index].label;
+                final label = useCompactXLabels
+                    ? compactXLabelFormatter!(rawLabel)
+                    : rawLabel;
+                return Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    label,
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
-                ],
-              ),
+                );
+              },
+              reservedSize: 30,
             ),
+          ),
+          leftTitles: AxisTitles(
+            axisNameWidget: yAxisLabel != null
+                ? Text(
+                    yAxisLabel!,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  )
+                : null,
+            axisNameSize: yAxisLabel != null ? 18 : 0,
+            sideTitles: SideTitles(
+              showTitles: true,
+              // Room for up to 4-digit right-aligned integers.
+              reservedSize: 44,
+              getTitlesWidget: (value, meta) {
+                if (value != value.roundToDouble()) {
+                  return const Text('');
+                }
+                return Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: Text(
+                    value.toInt().toString(),
+                    textAlign: TextAlign.right,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                );
+              },
+            ),
+          ),
+          topTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: false),
+          ),
+          rightTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: false),
+          ),
+        ),
+        borderData: FlBorderData(show: false),
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: false,
+          horizontalInterval: maxCount > 0 ? maxCount / 4 : 1,
+          getDrawingHorizontalLine: (value) => FlLine(
+            color: Theme.of(context).colorScheme.outlineVariant,
+            strokeWidth: 1,
+          ),
+        ),
+        barGroups: List.generate(
+          data.length,
+          (index) => BarChartGroupData(
+            x: index,
+            barRods: [
+              BarChartRodData(
+                toY: data[index].count.toDouble(),
+                color: color,
+                width: data.length > 12 ? 12 : 20,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(4),
+                ),
+              ),
+            ],
           ),
         ),
       ),
