@@ -94,6 +94,7 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
   }
 
   void _handleItemTap(EquipmentItem equipment) {
+    ref.read(highlightedEquipmentIdProvider.notifier).state = equipment.id;
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
       widget.onItemSelected!(equipment.id);
@@ -440,7 +441,9 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
         itemCount: equipment.length,
         itemBuilder: (context, index) {
           final item = equipment[index];
-          final isSelected = widget.selectedId == item.id;
+          final isSelected =
+              widget.selectedId == item.id ||
+              ref.watch(highlightedEquipmentIdProvider) == item.id;
           final viewMode = ref.watch(equipmentListViewModeProvider);
           return switch (viewMode) {
             ListViewMode.detailed || ListViewMode.compact => EquipmentListTile(

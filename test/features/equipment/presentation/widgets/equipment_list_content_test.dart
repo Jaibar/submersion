@@ -77,6 +77,29 @@ Future<List<Override>> _buildOverrides({
   ];
 }
 
+Future<List<Override>> _buildPhoneOverrides({
+  required List<EquipmentItem> items,
+  ListViewMode viewMode = ListViewMode.detailed,
+  String? highlightedEquipmentId,
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+
+  return [
+    sharedPreferencesProvider.overrideWithValue(prefs),
+    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
+    equipmentByStatusProvider.overrideWith((ref, status) => items),
+    equipmentListViewModeProvider.overrideWith((ref) => viewMode),
+    equipmentTableConfigProvider.overrideWith(
+      (ref) => _TestEquipTableConfigNotifier(_testConfig),
+    ),
+    highlightedEquipmentIdProvider.overrideWith(
+      (ref) => highlightedEquipmentId,
+    ),
+  ];
+}
+
 void main() {
   group('EquipmentListContent in table mode', () {
     testWidgets('renders table with column headers', (tester) async {
@@ -337,5 +360,74 @@ void main() {
       // Verify the widget rebuilt successfully (no crash)
       expect(find.text('My Regulator'), findsOneWidget);
     });
+  });
+
+  group('phone-mode highlight', () {
+    testWidgets(
+      'phone detailed view highlights equipment when highlightedEquipmentIdProvider is set',
+      (tester) async {
+        final items = [
+          _makeEquipment(id: 'e1', name: 'Alpha Reg'),
+          _makeEquipment(id: 'e2', name: 'Bravo BCD'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          items: items,
+          viewMode: ListViewMode.detailed,
+          highlightedEquipmentId: 'e2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const EquipmentListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<EquipmentListTile>(find.byType(EquipmentListTile))
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.item.id == 'e1');
+        final bravo = tiles.firstWhere((t) => t.item.id == 'e2');
+
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isTrue);
+      },
+    );
+
+    testWidgets(
+      'phone compact view highlights equipment when highlightedEquipmentIdProvider is set',
+      (tester) async {
+        final items = [
+          _makeEquipment(id: 'e1', name: 'Alpha Reg'),
+          _makeEquipment(id: 'e2', name: 'Bravo BCD'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          items: items,
+          viewMode: ListViewMode.compact,
+          highlightedEquipmentId: 'e2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const EquipmentListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Detailed and compact both use EquipmentListTile for equipment.
+        final tiles = tester
+            .widgetList<EquipmentListTile>(find.byType(EquipmentListTile))
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.item.id == 'e1');
+        final bravo = tiles.firstWhere((t) => t.item.id == 'e2');
+
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isTrue);
+      },
+    );
   });
 }
