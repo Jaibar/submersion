@@ -3,6 +3,56 @@
 All notable changes to Submersion are documented in this file.
 
 
+## 1.4.4 (2026-04-15)
+
+### Features
+
+- highlight last-visited course on phone-mode list return
+- highlight last-visited certification on phone-mode list return
+- highlight last-visited dive center on phone-mode list return
+- highlight last-visited equipment on phone-mode list return
+- highlight last-visited buddy on phone-mode list return
+- highlight last-visited site on phone-mode list return
+- highlight last-visited trip on phone-mode list return
+- highlight last-visited dive on phone-mode list return
+
+### Bug Fixes
+
+- compact x-axis years when crowded on dives-per-year (#174)
+- move units from ticks to axis labels on Time at Depth chart
+- widen and right-align y-axis labels on CategoryBarChart (#175)
+- accept TLDs longer than 4 chars in email validation (#208)
+- pass raw args to Drift customStatement, unblocks delete/link (#157)
+- use runtime (fallback bottom_time) for total dive time
+- match other lists' highlight via isSelected (full tint, no left-border)
+- route highlight via new isHighlighted tile param to keep checkbox correct
+- route highlight through isHighlighted param, add compact test
+- scope dive numbering to active diver and refresh after delete
+
+### Refactoring
+
+- drop redundant isSelected arg on DenseBuddyListTile
+
+### Documentation
+
+- implementation plan for phone-mode list highlight
+- correct audit findings in highlight spec — 7 tap handlers also need patching
+- spec for highlighting last-visited item in phone-mode lists
+
+### Tests
+
+- add compact-mode highlight test; refresh provider doc comment
+
+### Chores
+
+- bump version to 1.4.4+90
+- regenerate mocks for diver-scoped numbering signature change
+
+### Other
+
+- normalize tile highlight alpha to 0.5 across all list views
+
+
 ## 1.4.4 (2026-04-14)
 
 ### Features
