@@ -343,12 +343,20 @@ class CategoryBarChart extends StatelessWidget {
   final double height;
   final String Function(int)? valueFormatter;
 
+  /// Optional unit label rendered once at the top of the y-axis (e.g. "min").
+  final String? yAxisLabel;
+
+  /// Optional unit label rendered once below the x-axis (e.g. "m").
+  final String? xAxisLabel;
+
   const CategoryBarChart({
     super.key,
     required this.data,
     this.barColor,
     this.height = 200,
     this.valueFormatter,
+    this.yAxisLabel,
+    this.xAxisLabel,
   });
 
   @override
@@ -413,6 +421,13 @@ class CategoryBarChart extends StatelessWidget {
             titlesData: FlTitlesData(
               show: true,
               bottomTitles: AxisTitles(
+                axisNameWidget: xAxisLabel != null
+                    ? Text(
+                        xAxisLabel!,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      )
+                    : null,
+                axisNameSize: xAxisLabel != null ? 18 : 0,
                 sideTitles: SideTitles(
                   showTitles: true,
                   getTitlesWidget: (value, meta) {
@@ -432,23 +447,25 @@ class CategoryBarChart extends StatelessWidget {
                 ),
               ),
               leftTitles: AxisTitles(
+                axisNameWidget: yAxisLabel != null
+                    ? Text(
+                        yAxisLabel!,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      )
+                    : null,
+                axisNameSize: yAxisLabel != null ? 18 : 0,
                 sideTitles: SideTitles(
                   showTitles: true,
-                  // Reserve room for formatted labels like "1200 min" (up to
-                  // ~8 chars). Shorter integer-only labels still right-align
-                  // into the same column.
-                  reservedSize: 52,
+                  // Room for up to 4-digit right-aligned integers.
+                  reservedSize: 44,
                   getTitlesWidget: (value, meta) {
                     if (value != value.roundToDouble()) {
                       return const Text('');
                     }
-                    final label =
-                        valueFormatter?.call(value.toInt()) ??
-                        value.toInt().toString();
                     return Padding(
                       padding: const EdgeInsets.only(right: 6),
                       child: Text(
-                        label,
+                        value.toInt().toString(),
                         textAlign: TextAlign.right,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),

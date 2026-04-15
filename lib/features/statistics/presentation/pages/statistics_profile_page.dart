@@ -155,10 +155,19 @@ class StatisticsProfilePage extends ConsumerWidget {
             );
           }
           return CategoryBarChart(
-            data: data.map((d) => (label: d.range, count: d.minutes)).toList(),
+            // The repository returns ranges like "0-10m"; strip the trailing
+            // "m" so the chart can show the unit once on the x-axis label
+            // instead of on every tick. "40m+" becomes "40+".
+            data: data
+                .map(
+                  (d) => (label: d.range.replaceAll('m', ''), count: d.minutes),
+                )
+                .toList(),
             barColor: Colors.indigo,
             valueFormatter: (value) =>
                 context.l10n.statistics_profile_timeAtDepth_valueFormat(value),
+            xAxisLabel: context.l10n.units_depth_meters,
+            yAxisLabel: context.l10n.units_profileMetric_min,
           );
         },
         loading: () => const SizedBox(
