@@ -514,7 +514,7 @@ class _DiveCenterEditPageState extends ConsumerState<DiveCenterEditPage> {
               if (value != null &&
                   value.isNotEmpty &&
                   !RegExp(
-                    r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
+                    r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
                   ).hasMatch(value)) {
                 return context.l10n.diveCenters_validation_invalidEmail;
               }
