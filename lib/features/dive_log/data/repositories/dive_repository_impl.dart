@@ -1635,7 +1635,7 @@ class DiveRepository {
       final stats = await _db.customSelect('''
       SELECT
         COUNT(*) as total_dives,
-        SUM(bottom_time) as total_time,
+        SUM(COALESCE(runtime, bottom_time)) as total_time,
         MAX(max_depth) as max_depth,
         AVG(max_depth) as avg_max_depth,
         AVG(water_temp) as avg_temp,
