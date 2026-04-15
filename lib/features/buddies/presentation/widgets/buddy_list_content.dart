@@ -782,7 +782,6 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
               child: DenseBuddyListTile(
                 buddy: buddy,
                 diveCount: buddyWithCount.diveCount,
-                isSelected: isChecked,
                 isChecked: isChecked,
                 isHighlighted: !_isSelectionMode && isHighlighted,
                 isSelectionMode: _isSelectionMode,
