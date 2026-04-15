@@ -121,7 +121,19 @@ Providers already exist and do not need to be created or moved.
 
 ### Audit findings for tap-handler writes
 
-A grep across all 8 features confirmed that every one already writes to its `highlighted<X>IdProvider` — either in the list-content widget itself or in the list-page. No tap-handler additions are expected; the fix is purely on the read side in the phone-mode card builder.
+A deeper grep of each feature's `_handleItemTap` method (the phone-mode tap path) found that only **Dives** writes to its `highlighted<X>IdProvider` before navigating ([dive_list_content.dart:808](../../lib/features/dive_log/presentation/widgets/dive_list_content.dart#L808)). The other 7 features write to the provider only in the table view's `onEntityTapDown` callback, which isn't on the phone-mode code path. So each of the 7 needs a one-line addition to its phone tap handler in addition to the read-side change.
+
+Per-feature `_handleItemTap` locations to patch:
+
+- [site_list_content.dart:136-159](../../lib/features/dive_sites/presentation/widgets/site_list_content.dart#L136-L159)
+- [trip_list_content.dart:106-113](../../lib/features/trips/presentation/widgets/trip_list_content.dart#L106-L113)
+- [buddy_list_content.dart:129-141](../../lib/features/buddies/presentation/widgets/buddy_list_content.dart#L129-L141)
+- [equipment_list_content.dart:96-101](../../lib/features/equipment/presentation/widgets/equipment_list_content.dart#L96-L101)
+- [dive_center_list_content.dart:129-147](../../lib/features/dive_centers/presentation/widgets/dive_center_list_content.dart#L129-L147)
+- [certification_list_content.dart:105-109](../../lib/features/certifications/presentation/widgets/certification_list_content.dart#L105-L109)
+- [course_list_content.dart:49-55](../../lib/features/courses/presentation/widgets/course_list_content.dart#L49-L55)
+
+For features with bulk-selection mode (Sites, Buddies, Dives), the provider write must be gated on `!_isSelectionMode` to match the existing pattern. Dives already does this via an early-return path; others should follow suit.
 
 ## Testing
 
