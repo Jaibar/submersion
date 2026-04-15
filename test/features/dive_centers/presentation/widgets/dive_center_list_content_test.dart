@@ -7,6 +7,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_centers/domain/constants/dive_center_field.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/features/dive_centers/presentation/widgets/compact_dive_center_list_tile.dart';
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_list_content.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -91,6 +92,32 @@ Future<List<Override>> _buildOverrides({
     ),
     // Override dive count provider so it returns 0 for any center
     diveCenterDiveCountProvider.overrideWith((ref, centerId) => 0),
+  ];
+}
+
+Future<List<Override>> _buildPhoneOverrides({
+  required List<DiveCenter> centers,
+  ListViewMode viewMode = ListViewMode.detailed,
+  String? highlightedDiveCenterId,
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+
+  return [
+    sharedPreferencesProvider.overrideWithValue(prefs),
+    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
+    diveCenterListNotifierProvider.overrideWith(
+      (ref) => _MockDCListNotifier(centers),
+    ),
+    diveCenterListViewModeProvider.overrideWith((ref) => viewMode),
+    diveCenterTableConfigProvider.overrideWith(
+      (ref) => _TestDCTableConfigNotifier(_testConfig),
+    ),
+    diveCenterDiveCountProvider.overrideWith((ref, centerId) => 0),
+    highlightedDiveCenterIdProvider.overrideWith(
+      (ref) => highlightedDiveCenterId,
+    ),
   ];
 }
 
@@ -387,5 +414,75 @@ void main() {
 
       expect(pushedPath, '/dive-centers/dc1');
     });
+  });
+
+  group('phone-mode highlight', () {
+    testWidgets(
+      'phone detailed view highlights dive center when highlightedDiveCenterIdProvider is set',
+      (tester) async {
+        final centers = [
+          _makeCenter(id: 'c1', name: 'Alpha Dive'),
+          _makeCenter(id: 'c2', name: 'Bravo Dive'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          centers: centers,
+          viewMode: ListViewMode.detailed,
+          highlightedDiveCenterId: 'c2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const DiveCenterListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<DiveCenterListTile>(find.byType(DiveCenterListTile))
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.center.id == 'c1');
+        final bravo = tiles.firstWhere((t) => t.center.id == 'c2');
+
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isTrue);
+      },
+    );
+
+    testWidgets(
+      'phone compact view highlights dive center when highlightedDiveCenterIdProvider is set',
+      (tester) async {
+        final centers = [
+          _makeCenter(id: 'c1', name: 'Alpha Dive'),
+          _makeCenter(id: 'c2', name: 'Bravo Dive'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          centers: centers,
+          viewMode: ListViewMode.compact,
+          highlightedDiveCenterId: 'c2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const DiveCenterListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<CompactDiveCenterListTile>(
+              find.byType(CompactDiveCenterListTile),
+            )
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.center.id == 'c1');
+        final bravo = tiles.firstWhere((t) => t.center.id == 'c2');
+
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isTrue);
+      },
+    );
   });
 }
