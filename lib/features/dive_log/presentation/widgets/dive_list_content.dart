@@ -1356,6 +1356,8 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                 final dive = dives[index];
                 final isSelected = _selectedIds.contains(dive.id);
                 final isMasterSelected = widget.selectedId == dive.id;
+                final isHighlighted =
+                    ref.watch(highlightedDiveIdProvider) == dive.id;
                 final viewMode = ref.watch(diveListViewModeProvider);
                 return switch (viewMode) {
                   ListViewMode.detailed => DiveListTile(
@@ -1373,7 +1375,7 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                     isSelectionMode: _isSelectionMode,
                     isSelected: _isSelectionMode
                         ? isSelected
-                        : (isSelected || isMasterSelected),
+                        : (isSelected || isMasterSelected || isHighlighted),
                     colorValue: getCardColorValue(dive, colorAttribute),
                     minValueInList: minValue,
                     maxValueInList: maxValue,
@@ -1398,7 +1400,7 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                     isSelectionMode: _isSelectionMode,
                     isSelected: _isSelectionMode
                         ? isSelected
-                        : (isSelected || isMasterSelected),
+                        : (isSelected || isMasterSelected || isHighlighted),
                     colorValue: getCardColorValue(dive, colorAttribute),
                     minValueInList: minValue,
                     maxValueInList: maxValue,
@@ -1447,7 +1449,7 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                     isSelectionMode: _isSelectionMode,
                     isSelected: _isSelectionMode
                         ? isSelected
-                        : (isSelected || isMasterSelected),
+                        : (isSelected || isMasterSelected || isHighlighted),
                     colorValue: getCardColorValue(dive, colorAttribute),
                     minValueInList: minValue,
                     maxValueInList: maxValue,

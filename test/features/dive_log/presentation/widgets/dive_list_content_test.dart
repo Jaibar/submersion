@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/dive_field.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
+import 'package:submersion/features/dive_log/presentation/pages/dive_list_page.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/highlight_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/view_config_providers.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_list_content.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_table_view.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
@@ -113,6 +118,39 @@ Widget _buildTableModeLayout({
       ],
     ),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Phone-mode helpers
+// ---------------------------------------------------------------------------
+
+class _MockPaginatedNotifier
+    extends StateNotifier<AsyncValue<PaginatedDiveListState>>
+    implements PaginatedDiveListNotifier {
+  _MockPaginatedNotifier(List<DiveSummary> dives)
+    : super(
+        AsyncValue.data(PaginatedDiveListState(dives: dives, hasMore: false)),
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+Future<List<Override>> _buildPhoneOverrides({
+  required List<Dive> dives,
+  required ListViewMode viewMode,
+  required String? highlightedDiveId,
+}) async {
+  final summaries = dives.map(DiveSummary.fromDive).toList();
+  final base = await getBaseOverrides();
+  return [
+    ...base,
+    diveListViewModeProvider.overrideWith((ref) => viewMode),
+    highlightedDiveIdProvider.overrideWith((ref) => highlightedDiveId),
+    paginatedDiveListProvider.overrideWith(
+      (ref) => _MockPaginatedNotifier(summaries),
+    ),
+  ];
 }
 
 void main() {
@@ -876,5 +914,52 @@ void main() {
       expect(find.text('#7'), findsOneWidget);
       expect(find.text('42.0m'), findsOneWidget);
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Phone-mode highlight
+  // -------------------------------------------------------------------------
+
+  group('phone-mode highlight', () {
+    testWidgets(
+      'phone detailed view highlights dive when highlightedDiveIdProvider is set',
+      (tester) async {
+        final dives = [
+          _makeDive(
+            id: 'd1',
+            diveNumber: 1,
+            site: const DiveSite(id: 's1', name: 'Site One'),
+          ),
+          _makeDive(
+            id: 'd2',
+            diveNumber: 2,
+            site: const DiveSite(id: 's2', name: 'Site Two'),
+          ),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          dives: dives,
+          viewMode: ListViewMode.detailed,
+          highlightedDiveId: 'd2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const DiveListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<DiveListTile>(find.byType(DiveListTile))
+            .toList();
+        final tileOne = tiles.firstWhere((t) => t.diveId == 'd1');
+        final tileTwo = tiles.firstWhere((t) => t.diveId == 'd2');
+
+        expect(tileOne.isSelected, isFalse);
+        expect(tileTwo.isSelected, isTrue);
+      },
+    );
   });
 }
