@@ -98,6 +98,30 @@ Future<List<Override>> _buildOverrides({
   ];
 }
 
+Future<List<Override>> _buildPhoneOverrides({
+  required List<TripWithStats> trips,
+  ListViewMode viewMode = ListViewMode.detailed,
+  String? highlightedTripId,
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+
+  return [
+    sharedPreferencesProvider.overrideWithValue(prefs),
+    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
+    tripListNotifierProvider.overrideWith(
+      (ref) => _MockTripListNotifier(trips),
+    ),
+    tripListViewModeProvider.overrideWith((ref) => viewMode),
+    tripTableConfigProvider.overrideWith(
+      (ref) => _TestTripTableConfigNotifier(_testConfig),
+    ),
+    sortedFilteredTripsProvider.overrideWith((ref) => AsyncValue.data(trips)),
+    highlightedTripIdProvider.overrideWith((ref) => highlightedTripId),
+  ];
+}
+
 void main() {
   group('TripListContent in table mode', () {
     testWidgets('renders table with column headers', (tester) async {
@@ -323,5 +347,40 @@ void main() {
       // Verify the widget rebuilt successfully (no crash)
       expect(find.text('Bali Trip'), findsOneWidget);
     });
+  });
+
+  group('phone-mode highlight', () {
+    testWidgets(
+      'phone detailed view highlights trip when highlightedTripIdProvider is set',
+      (tester) async {
+        final trips = [
+          _makeTrip(id: 't1', name: 'Alpha Trip'),
+          _makeTrip(id: 't2', name: 'Bravo Trip'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          trips: trips,
+          viewMode: ListViewMode.detailed,
+          highlightedTripId: 't2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const TripListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<TripListTile>(find.byType(TripListTile))
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.tripWithStats.trip.id == 't1');
+        final bravo = tiles.firstWhere((t) => t.tripWithStats.trip.id == 't2');
+
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isTrue);
+      },
+    );
   });
 }
