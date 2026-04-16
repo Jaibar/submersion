@@ -7,6 +7,8 @@ import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 
+const _createNewTripSentinel = '__create_new_trip__';
+
 /// A widget for selecting a trip, with optional auto-suggest based on date
 class TripPicker extends ConsumerStatefulWidget {
   final Trip? selectedTrip;
@@ -117,8 +119,8 @@ class _TripPickerState extends ConsumerState<TripPicker> {
     );
   }
 
-  void _showTripPickerSheet(BuildContext context) {
-    showModalBottomSheet(
+  Future<void> _showTripPickerSheet(BuildContext context) async {
+    final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       builder: (sheetContext) => DraggableScrollableSheet(
@@ -133,9 +135,22 @@ class _TripPickerState extends ConsumerState<TripPicker> {
             Navigator.of(sheetContext).pop();
             widget.onTripSelected(trip);
           },
+          onCreateNewTrip: () {
+            Navigator.of(sheetContext).pop(_createNewTripSentinel);
+          },
         ),
       ),
     );
+
+    if (result == _createNewTripSentinel && context.mounted) {
+      final tripId = await context.push<String>('/trips/new');
+      if (tripId != null && mounted) {
+        final trip = await ref.read(tripRepositoryProvider).getTripById(tripId);
+        if (trip != null && mounted) {
+          widget.onTripSelected(trip);
+        }
+      }
+    }
   }
 }
 
@@ -144,12 +159,14 @@ class TripPickerSheet extends ConsumerWidget {
   final ScrollController scrollController;
   final Trip? selectedTrip;
   final ValueChanged<Trip> onTripSelected;
+  final VoidCallback onCreateNewTrip;
 
   const TripPickerSheet({
     super.key,
     required this.scrollController,
     required this.selectedTrip,
     required this.onTripSelected,
+    required this.onCreateNewTrip,
   });
 
   @override
@@ -182,10 +199,7 @@ class TripPickerSheet extends ConsumerWidget {
                 style: Theme.of(context).textTheme.titleLarge,
               ),
               TextButton.icon(
-                onPressed: () {
-                  Navigator.of(context).pop();
-                  context.push('/trips/new');
-                },
+                onPressed: onCreateNewTrip,
                 icon: const Icon(Icons.add),
                 label: Text(context.l10n.trips_picker_newTrip),
               ),
@@ -215,10 +229,7 @@ class TripPickerSheet extends ConsumerWidget {
                       ),
                       const SizedBox(height: 8),
                       TextButton.icon(
-                        onPressed: () {
-                          Navigator.of(context).pop();
-                          context.push('/trips/new');
-                        },
+                        onPressed: onCreateNewTrip,
                         icon: const Icon(Icons.add),
                         label: Text(
                           context.l10n.trips_picker_empty_createButton,

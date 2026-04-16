@@ -397,7 +397,9 @@ final serviceRecordNotifierProvider =
 // Equipment Highlighted ID (for table mode detail pane)
 // ============================================================================
 
-/// Tracks the currently highlighted equipment item in table mode.
+/// Tracks the currently highlighted equipment item. Used by the table's
+/// row highlight and by the phone-mode list to tint the last-visited
+/// equipment card on return from the detail page.
 final highlightedEquipmentIdProvider = StateProvider<String?>((ref) => null);
 
 // ============================================================================

@@ -1,16 +1,20 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/constants/list_view_mode.dart';
+import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/compact_site_list_tile.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_list_content.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_app.dart';
 import '../../../../helpers/test_database.dart';
 
 void _setMobileTestSurfaceSize(WidgetTester tester) {
@@ -21,6 +25,44 @@ void _setMobileTestSurfaceSize(WidgetTester tester) {
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();
   });
+}
+
+SiteWithDiveCount _makeSite({
+  required String id,
+  required String name,
+  int diveCount = 0,
+}) {
+  return SiteWithDiveCount(
+    site: DiveSite(id: id, name: name),
+    diveCount: diveCount,
+  );
+}
+
+Future<List<Override>> _buildPhoneOverrides({
+  required List<SiteWithDiveCount> sites,
+  required ListViewMode viewMode,
+  String? highlightedSiteId,
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+
+  return [
+    sharedPreferencesProvider.overrideWithValue(prefs),
+    settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+    currentDiverIdProvider.overrideWith((ref) => MockCurrentDiverIdNotifier()),
+    sortedSitesWithCountsProvider.overrideWithValue(AsyncValue.data(sites)),
+    siteListNotifierProvider.overrideWith((ref) => _MockSiteListNotifier()),
+    siteListViewModeProvider.overrideWith((ref) => viewMode),
+    highlightedSiteIdProvider.overrideWith((ref) => highlightedSiteId),
+  ];
+}
+
+class _MockSiteListNotifier extends StateNotifier<AsyncValue<List<DiveSite>>>
+    implements SiteListNotifier {
+  _MockSiteListNotifier() : super(const AsyncValue.data(<DiveSite>[]));
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
 }
 
 void main() {
@@ -116,6 +158,80 @@ void main() {
       expect(find.text('Dive Sites'), findsOneWidget);
     },
   );
+
+  // ---------------------------------------------------------------------------
+  // Phone-mode highlight
+  // ---------------------------------------------------------------------------
+
+  group('phone-mode highlight', () {
+    testWidgets(
+      'phone detailed view highlights site when highlightedSiteIdProvider is set',
+      (tester) async {
+        final sites = [
+          _makeSite(id: 's1', name: 'Alpha Site'),
+          _makeSite(id: 's2', name: 'Bravo Site'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          sites: sites,
+          viewMode: ListViewMode.detailed,
+          highlightedSiteId: 's2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const SiteListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<SiteListTile>(find.byType(SiteListTile))
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.name == 'Alpha Site');
+        final bravo = tiles.firstWhere((t) => t.name == 'Bravo Site');
+
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isTrue);
+      },
+    );
+
+    testWidgets(
+      'phone compact view highlights site when highlightedSiteIdProvider is set',
+      (tester) async {
+        final sites = [
+          _makeSite(id: 's1', name: 'Alpha Site'),
+          _makeSite(id: 's2', name: 'Bravo Site'),
+        ];
+
+        final overrides = await _buildPhoneOverrides(
+          sites: sites,
+          viewMode: ListViewMode.compact,
+          highlightedSiteId: 's2',
+        );
+
+        await tester.pumpWidget(
+          testApp(
+            overrides: overrides,
+            child: const SiteListContent(showAppBar: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final tiles = tester
+            .widgetList<CompactSiteListTile>(find.byType(CompactSiteListTile))
+            .toList();
+        final alpha = tiles.firstWhere((t) => t.name == 'Alpha Site');
+        final bravo = tiles.firstWhere((t) => t.name == 'Bravo Site');
+
+        expect(alpha.isHighlighted, isFalse);
+        expect(bravo.isHighlighted, isTrue);
+        expect(alpha.isSelected, isFalse);
+        expect(bravo.isSelected, isFalse);
+      },
+    );
+  });
 }
 
 class _SiteListSelectionHarness extends StatefulWidget {

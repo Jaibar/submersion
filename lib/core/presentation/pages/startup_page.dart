@@ -2,11 +2,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/database/database_version_exception.dart';
 import 'package:submersion/core/domain/entities/migration_progress.dart';
+import 'package:submersion/core/presentation/widgets/backup_status_views.dart';
 import 'package:submersion/core/presentation/widgets/ocean_background.dart';
 import 'package:submersion/core/services/background_service.dart';
 import 'package:submersion/core/services/database_location_service.dart';
@@ -14,6 +16,10 @@ import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/local_cache_database_service.dart';
 import 'package:submersion/core/services/log_file_service.dart';
 import 'package:submersion/core/services/notification_service.dart';
+import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
+import 'package:submersion/features/backup/data/services/backup_service.dart';
+import 'package:submersion/features/backup/data/services/pre_migration_backup_service.dart';
+import 'package:submersion/features/backup/domain/exceptions/backup_failed_exception.dart';
 import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
 import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
 import 'package:submersion/main.dart' show SubmersionRestart;
@@ -32,7 +38,14 @@ typedef ServiceInitializer =
 typedef SchemaVersionProbe =
     ({bool needsMigration, int totalSteps}) Function(String dbPath);
 
-enum _StartupState { initializing, migrating, ready, error }
+enum _StartupState {
+  initializing,
+  backingUp,
+  migrating,
+  backupFailed,
+  ready,
+  error,
+}
 
 class StartupWrapper extends StatefulWidget {
   final SharedPreferences prefs;
@@ -51,6 +64,14 @@ class StartupWrapper extends StatefulWidget {
   @visibleForTesting
   final VoidCallback? closeAppOverride;
 
+  /// Optional override for the pre-migration backup service factory (tests).
+  @visibleForTesting
+  final PreMigrationBackupService Function({
+    required String livePath,
+    required BackupPreferences preferences,
+  })?
+  preMigrationBackupFactory;
+
   const StartupWrapper({
     super.key,
     required this.prefs,
@@ -59,13 +80,15 @@ class StartupWrapper extends StatefulWidget {
     this.initializerOverride,
     this.schemaVersionProbeOverride,
     this.closeAppOverride,
+    this.preMigrationBackupFactory,
   });
 
   @override
   State<StartupWrapper> createState() => _StartupWrapperState();
 }
 
-class _StartupWrapperState extends State<StartupWrapper> {
+class _StartupWrapperState extends State<StartupWrapper>
+    with SingleTickerProviderStateMixin {
   _StartupState _state = _StartupState.initializing;
   MigrationProgress _progress = const MigrationProgress(
     currentStep: 0,
@@ -75,11 +98,34 @@ class _StartupWrapperState extends State<StartupWrapper> {
   bool _isVersionMismatch = false;
   int _dbVersion = 0;
   int _appVersion = 0;
+  BackupFailedException? _backupError;
+
+  /// Drives the dissolve of the splash layer over the mounted app beneath.
+  /// Forward-only; starts when _state first reaches ready.
+  late final AnimationController _splashFadeController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+
+  /// True once the fade completes, at which point the splash widget is
+  /// dropped from the tree entirely.
+  bool _splashRemoved = false;
 
   @override
   void initState() {
     super.initState();
+    _splashFadeController.addStatusListener((status) {
+      if (status == AnimationStatus.completed && mounted) {
+        setState(() => _splashRemoved = true);
+      }
+    });
     _runInitialization();
+  }
+
+  @override
+  void dispose() {
+    _splashFadeController.dispose();
+    super.dispose();
   }
 
   Future<void> _runInitialization() async {
@@ -87,6 +133,7 @@ class _StartupWrapperState extends State<StartupWrapper> {
       // Determine if migration is needed before opening the database
       final dbPath = await widget.locationService.getDatabasePath();
 
+      final int? storedVersion;
       final bool needsMigration;
       final int totalSteps;
 
@@ -94,22 +141,43 @@ class _StartupWrapperState extends State<StartupWrapper> {
         final probe = widget.schemaVersionProbeOverride!(dbPath);
         needsMigration = probe.needsMigration;
         totalSteps = probe.totalSteps;
+        storedVersion =
+            null; // probe path doesn't expose storedVersion; backup uses 0 default
       } else {
-        final storedVersion = DatabaseService.getStoredSchemaVersion(dbPath);
+        storedVersion = DatabaseService.getStoredSchemaVersion(dbPath);
+        final sv = storedVersion;
         needsMigration =
-            storedVersion != null &&
-            storedVersion > 0 &&
-            storedVersion < AppDatabase.currentSchemaVersion;
-        totalSteps = needsMigration
-            ? AppDatabase.migrationStepCount(storedVersion)
-            : 0;
+            sv != null && sv > 0 && sv < AppDatabase.currentSchemaVersion;
+        totalSteps = needsMigration ? AppDatabase.migrationStepCount(sv) : 0;
       }
 
-      if (needsMigration && mounted) {
-        setState(() {
-          _state = _StartupState.migrating;
-          _progress = MigrationProgress(currentStep: 0, totalSteps: totalSteps);
-        });
+      if (needsMigration) {
+        if (mounted) {
+          setState(() => _state = _StartupState.backingUp);
+        }
+        try {
+          await _runPreMigrationBackup(
+            dbPath: dbPath,
+            stored: storedVersion ?? 0,
+          );
+        } on BackupFailedException catch (e) {
+          if (mounted) {
+            setState(() {
+              _state = _StartupState.backupFailed;
+              _backupError = e;
+            });
+          }
+          return;
+        }
+        if (mounted) {
+          setState(() {
+            _state = _StartupState.migrating;
+            _progress = MigrationProgress(
+              currentStep: 0,
+              totalSteps: totalSteps,
+            );
+          });
+        }
       }
 
       // Run DB init and minimum splash duration in parallel
@@ -120,6 +188,7 @@ class _StartupWrapperState extends State<StartupWrapper> {
 
       if (mounted) {
         setState(() => _state = _StartupState.ready);
+        _splashFadeController.forward();
       }
     } on DatabaseVersionMismatchException catch (e) {
       if (mounted) {
@@ -177,6 +246,102 @@ class _StartupWrapperState extends State<StartupWrapper> {
     await speciesRepository.seedBuiltInSpecies();
   }
 
+  Future<void> _runPreMigrationBackup({
+    required String dbPath,
+    required int stored,
+  }) async {
+    assert(
+      widget.schemaVersionProbeOverride == null ||
+          widget.preMigrationBackupFactory != null,
+      'When schemaVersionProbeOverride is set in tests, you must also supply '
+      'preMigrationBackupFactory — otherwise the pre-migration backup will '
+      'run with stored=0 and attempt a real file copy against the production '
+      'database path.',
+    );
+
+    final prefs = BackupPreferences(widget.prefs);
+
+    final PreMigrationBackupService service;
+    final String appVersion;
+    if (widget.preMigrationBackupFactory != null) {
+      service = widget.preMigrationBackupFactory!(
+        livePath: dbPath,
+        preferences: prefs,
+      );
+      appVersion = '0.0.0.0';
+    } else {
+      final info = await PackageInfo.fromPlatform();
+      appVersion = '${info.version}.${info.buildNumber}';
+      service = PreMigrationBackupService(
+        livePathProvider: () async => dbPath,
+        backupsDirProvider: () => BackupService.resolveBackupsDirectory(prefs),
+        preferences: prefs,
+      );
+    }
+
+    await service.backupIfMigrationPending(
+      stored: stored,
+      target: AppDatabase.currentSchemaVersion,
+      appVersion: appVersion,
+    );
+  }
+
+  /// Re-runs backup → services → ready without the 1-second splash delay used
+  /// on first launch; the user is already looking at the splash and tapped Retry
+  /// themselves, so an enforced minimum delay would feel slow.
+  Future<void> _retryPreMigrationBackup() async {
+    if (!mounted) return;
+    if (_state != _StartupState.backupFailed) {
+      // Already retrying or moved on; ignore rapid taps.
+      return;
+    }
+    setState(() {
+      _state = _StartupState.backingUp;
+      _backupError = null;
+    });
+    try {
+      final dbPath = await widget.locationService.getDatabasePath();
+      final stored = DatabaseService.getStoredSchemaVersion(dbPath) ?? 0;
+      await _runPreMigrationBackup(dbPath: dbPath, stored: stored);
+      if (!mounted) return;
+      final totalSteps = AppDatabase.migrationStepCount(stored);
+      setState(() {
+        _state = _StartupState.migrating;
+        _progress = MigrationProgress(currentStep: 0, totalSteps: totalSteps);
+      });
+      await _initializeServices();
+      if (!mounted) return;
+      setState(() => _state = _StartupState.ready);
+      _splashFadeController.forward();
+    } on BackupFailedException catch (e) {
+      if (mounted) {
+        setState(() {
+          _state = _StartupState.backupFailed;
+          _backupError = e;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _state = _StartupState.error;
+          _errorMessage = '$e';
+        });
+      }
+    }
+  }
+
+  void _quitApp() {
+    if (widget.closeAppOverride != null) {
+      widget.closeAppOverride!();
+      return;
+    }
+    if (Platform.isIOS || Platform.isAndroid) {
+      SystemNavigator.pop();
+    } else {
+      exit(0);
+    }
+  }
+
   Future<void> _closeApp() async {
     if (widget.closeAppOverride != null) {
       widget.closeAppOverride!();
@@ -206,43 +371,69 @@ class _StartupWrapperState extends State<StartupWrapper> {
     final textColor = isDark ? Colors.white : Colors.black87;
     final subtitleColor = isDark ? Colors.white70 : Colors.black54;
 
-    // Return SubmersionRestart directly when ready to avoid nesting
-    // MaterialApp inside MaterialApp (SubmersionRestart contains its own
-    // MaterialApp.router via SubmersionApp).
-    if (_state == _StartupState.ready) {
-      return SubmersionRestart(
-        prefs: widget.prefs,
-        logFileService: widget.logFileService,
-      );
-    }
+    final isReady = _state == _StartupState.ready;
 
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      home: _state == _StartupState.error
-          ? Scaffold(
-              key: const ValueKey('error'),
-              backgroundColor: backgroundColor,
-              body: SafeArea(
-                child: Center(
-                  child: _buildErrorContent(textColor, subtitleColor),
+    // Splash layer: stays at full opacity while initializing/migrating/error,
+    // then dissolves to reveal SubmersionRestart beneath once state is ready.
+    final Widget? splashLayer = _splashRemoved
+        ? null
+        : IgnorePointer(
+            ignoring: isReady,
+            child: FadeTransition(
+              opacity: Tween<double>(begin: 1, end: 0).animate(
+                CurvedAnimation(
+                  parent: _splashFadeController,
+                  curve: Curves.easeInOut,
                 ),
               ),
-            )
-          : Scaffold(
-              // Use 'splash' key for both initializing and migrating so
-              // AnimatedSize handles the progress bar transition instead of
-              // AnimatedSwitcher triggering a full Scaffold crossfade.
-              key: const ValueKey('splash'),
-              body: OceanBackground(
-                child: SafeArea(
-                  child: Center(child: _buildSplashContent(isDark)),
-                ),
+              child: MaterialApp(
+                debugShowCheckedModeBanner: false,
+                home:
+                    (_state == _StartupState.error ||
+                        _state == _StartupState.backupFailed)
+                    ? Scaffold(
+                        key: const ValueKey('error'),
+                        backgroundColor: backgroundColor,
+                        body: SafeArea(
+                          child: Center(
+                            child: _buildErrorContent(textColor, subtitleColor),
+                          ),
+                        ),
+                      )
+                    : Scaffold(
+                        // Use 'splash' key for both initializing and migrating
+                        // so AnimatedSize handles the progress bar transition
+                        // instead of AnimatedSwitcher triggering a full
+                        // Scaffold crossfade.
+                        key: const ValueKey('splash'),
+                        body: OceanBackground(
+                          child: SafeArea(
+                            child: Center(child: _buildSplashContent(isDark)),
+                          ),
+                        ),
+                      ),
               ),
             ),
+          );
+
+    return Stack(
+      textDirection: TextDirection.ltr,
+      children: [
+        if (isReady)
+          SubmersionRestart(
+            prefs: widget.prefs,
+            logFileService: widget.logFileService,
+          ),
+        ?splashLayer,
+      ],
     );
   }
 
   Widget _buildSplashContent(bool isDark) {
+    if (_state == _StartupState.backingUp) {
+      return const BackingUpView();
+    }
+
     return SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -298,6 +489,14 @@ class _StartupWrapperState extends State<StartupWrapper> {
   }
 
   Widget _buildErrorContent(Color textColor, Color subtitleColor) {
+    if (_state == _StartupState.backupFailed && _backupError != null) {
+      return BackupFailedView(
+        error: _backupError!,
+        onRetry: _retryPreMigrationBackup,
+        onQuit: _quitApp,
+      );
+    }
+
     if (_isVersionMismatch) {
       return Padding(
         padding: const EdgeInsets.all(24),

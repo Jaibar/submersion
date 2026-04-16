@@ -8,6 +8,7 @@ import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
+import 'package:submersion/features/divers/presentation/widgets/delete_diver_dialog.dart';
 
 class DiverDetailPage extends ConsumerStatefulWidget {
   final String diverId;
@@ -780,29 +781,7 @@ class _DiverDetailContent extends ConsumerWidget {
   }
 
   Future<bool> _showDeleteConfirmation(BuildContext context) async {
-    return await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: Text(context.l10n.divers_detail_deleteDialogTitle),
-            content: Text(
-              context.l10n.divers_detail_deleteDialogContent(diver.name),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: Text(context.l10n.divers_detail_cancelButton),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                style: FilledButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.error,
-                ),
-                child: Text(context.l10n.divers_detail_deleteButton),
-              ),
-            ],
-          ),
-        ) ??
-        false;
+    return DeleteDiverDialog.show(context, diverName: diver.name);
   }
 
   Future<void> _launchEmail(String email) async {

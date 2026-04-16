@@ -151,6 +151,8 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
       return;
     }
 
+    ref.read(highlightedSiteIdProvider.notifier).state = site.id;
+
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
       widget.onItemSelected!(site.id);
@@ -779,7 +781,9 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
         itemBuilder: (context, index) {
           final siteData = sites[index];
           final site = siteData.site;
-          final isSelected = widget.selectedId == site.id;
+          final isSelected =
+              widget.selectedId == site.id ||
+              ref.watch(highlightedSiteIdProvider) == site.id;
           final isChecked = _selectedIds.contains(site.id);
 
           final viewMode = ref.watch(siteListViewModeProvider);
@@ -811,6 +815,7 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
               diveCount: siteData.diveCount,
               isSelectionMode: _isSelectionMode,
               isSelected: isChecked,
+              isHighlighted: !_isSelectionMode && isSelected,
               onTap: () => _handleItemTap(site),
               onLongPress: _isSelectionMode
                   ? null
@@ -822,6 +827,7 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
               diveCount: siteData.diveCount,
               isSelectionMode: _isSelectionMode,
               isSelected: isChecked,
+              isHighlighted: !_isSelectionMode && isSelected,
               onTap: () => _handleItemTap(site),
               onLongPress: _isSelectionMode
                   ? null

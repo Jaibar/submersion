@@ -399,6 +399,7 @@ class _DcAdapterDownloadStepState extends ConsumerState<DcAdapterDownloadStep> {
     return DownloadStepWidget(
       device: device,
       computer: computer,
+      forceFullDownload: widget.adapter.forceFullDownload,
       onComplete: () {
         // Handled by the state watcher above.
       },

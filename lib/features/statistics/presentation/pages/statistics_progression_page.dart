@@ -127,6 +127,10 @@ class StatisticsProgressionPage extends ConsumerWidget {
             child: CategoryBarChart(
               data: chartData,
               barColor: Theme.of(context).colorScheme.primary,
+              // When bars are crowded, compact "2024" → "'24" so 4-digit
+              // years don't overrun each other on narrow screens.
+              compactXLabelFormatter: (year) =>
+                  year.length == 4 ? "'${year.substring(2)}" : year,
             ),
           );
         },

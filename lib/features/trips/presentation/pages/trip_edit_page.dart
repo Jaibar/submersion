@@ -851,7 +851,7 @@ class _TripEditPageState extends ConsumerState<TripEditPage> {
               ),
             ),
           );
-          context.pop();
+          context.pop(savedId);
         }
       }
     } catch (e) {

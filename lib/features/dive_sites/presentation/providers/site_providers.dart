@@ -644,10 +644,9 @@ final externalSiteSearchProvider =
 // Highlighted Site (Table Mode)
 // ============================================================================
 
-/// Currently highlighted site ID in table mode.
-///
-/// Set on single-tap, used by [TableModeLayout] to drive the detail pane and
-/// map selection highlight.
+/// Tracks the currently highlighted site. Used by the table's row highlight,
+/// the map's selection indicator, and the phone-mode list to tint the
+/// last-visited site card on return from the detail page.
 final highlightedSiteIdProvider = StateProvider<String?>((ref) => null);
 
 // ============================================================================

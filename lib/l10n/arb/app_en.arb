@@ -244,6 +244,17 @@
       }
     }
   },
+  "backup_history_pinAction_pin": "Pin backup",
+  "backup_history_pinAction_unpin": "Unpin backup",
+  "backup_history_pinError": "Could not update pin state.",
+  "backup_history_preMigrationSubtitle": "Pre-migration backup - {size}",
+  "@backup_history_preMigrationSubtitle": {
+    "placeholders": {
+      "size": {
+        "type": "String"
+      }
+    }
+  },
   "backup_import_invalidFile": "This file does not appear to be a valid Submersion backup",
   "backup_import_subtitle": "Import a backup from any location",
   "backup_import_title": "Restore from File",
@@ -906,6 +917,7 @@
   "common_action_back": "Back",
   "common_action_cancel": "Cancel",
   "common_action_close": "Close",
+  "common_action_continue": "Continue",
   "common_action_delete": "Delete",
   "common_action_edit": "Edit",
   "common_action_ok": "OK",
@@ -922,6 +934,9 @@
   },
   "@common_action_close": {
     "description": "Generic close action used for dialogs, menus, etc."
+  },
+  "@common_action_continue": {
+    "description": "Continue button used in confirmation dialogs"
   },
   "@common_action_delete": {
     "description": "Generic delete action"
@@ -3483,7 +3498,7 @@
   "divers_detail_contactTitle": "Contact",
   "divers_detail_defaultLabel": "Default",
   "divers_detail_deleteButton": "Delete",
-  "divers_detail_deleteDialogContent": "Are you sure you want to delete {name}? All associated dive logs will be unassigned.",
+  "divers_detail_deleteDialogContent": "This will permanently delete {name} and all associated data including dive logs, dive computers, equipment, certifications, and sites.",
   "divers_detail_deleteDialogTitle": "Delete Diver?",
   "divers_detail_deleteError": "Failed to delete: {error}",
   "divers_detail_deleteMenuItem": "Delete",
@@ -3582,6 +3597,22 @@
     "placeholders": {
       "name": {
         "type": "Object"
+      }
+    }
+  },
+  "divers_detail_deleteDialogConfirmHint": "Type \"Delete {name}\" to confirm",
+  "@divers_detail_deleteDialogConfirmHint": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "divers_detail_deleteDialogConfirmText": "Delete {name}",
+  "@divers_detail_deleteDialogConfirmText": {
+    "placeholders": {
+      "name": {
+        "type": "String"
       }
     }
   },
@@ -6111,6 +6142,14 @@
   "statistics_category_geographic_title": "Geographic",
   "statistics_category_marineLife_subtitle": "Species sightings",
   "statistics_category_marineLife_title": "Marine Life",
+  "statistics_category_overview_title": "Overview",
+  "@statistics_category_overview_title": {
+    "description": "Title for the Overview entry in the Statistics category list"
+  },
+  "statistics_category_overview_subtitle": "Totals, records, and breakdowns at a glance",
+  "@statistics_category_overview_subtitle": {
+    "description": "Subtitle for the Overview entry in the Statistics category list"
+  },
   "statistics_category_profile_subtitle": "Ascent rates & deco",
   "statistics_category_profile_title": "Profile Analysis",
   "statistics_category_progression_subtitle": "Depth & time trends",
@@ -7744,14 +7783,22 @@
   "universalImport_action_selectAll": "Select All",
   "universalImport_action_changeFile": "Change File",
   "universalImport_action_selectFile": "Select File",
+  "universalImport_bulk_consolidateMatched": "Consolidate matched ({count})",
+  "universalImport_bulk_importAll": "Import all ({count})",
+  "universalImport_bulk_importAllAsNew": "Import all as new ({count})",
+  "universalImport_bulk_skipAll": "Skip all ({count})",
+  "universalImport_bulk_replaceSourceAll": "Replace all ({count})",
   "universalImport_description_supportedFormats": "Select a dive log file to import. Supported formats include CSV, UDDF, Subsurface XML, Garmin FIT, and Shearwater Cloud databases.",
+  "universalImport_dive_decideAction": "Decide",
   "universalImport_error_unsupportedFormat": "This format is not yet supported. Please export as UDDF or CSV.",
   "universalImport_label_columnMapping": "Column Mapping",
   "universalImport_label_columnsMapped": "{mapped} of {total} columns mapped",
+  "universalImport_label_consolidate": "Consolidate",
   "universalImport_label_detecting": "Detecting...",
   "universalImport_label_diveNumber": "Dive #{number}",
   "universalImport_label_duplicate": "Duplicate",
   "universalImport_label_duplicatesFound": "{count} duplicates found and auto-deselected.",
+  "universalImport_label_importAsNew": "Import as New",
   "universalImport_label_importComplete": "Import Complete",
   "universalImport_label_importing": "Importing",
   "universalImport_label_importingEllipsis": "Importing...",
@@ -7766,19 +7813,28 @@
   "universalImport_label_unnamed": "Unnamed",
   "universalImport_label_xOfY": "{current} of {total}",
   "universalImport_label_xOfYSelected": "{selected} of {total} selected",
+  "universalImport_pending_chooseAction": "Choose an action",
+  "universalImport_pending_gateHint": "{count} duplicate(s) need a decision",
+  "universalImport_pending_needsDecision": "Needs decision",
+  "universalImport_pending_reviewAction": "Review",
+  "universalImport_rowHint_tapCompareToDecide": "Tap Decide to choose",
   "universalImport_semantics_entitySelection": "{selected} of {total} {entityType} selected",
   "universalImport_semantics_importError": "Import error: {error}",
   "universalImport_semantics_importProgress": "Import progress: {percent} percent",
   "universalImport_semantics_itemsSelected": "{count} items selected for import",
+  "universalImport_semantics_needsDecision": "Suspected duplicate, needs decision",
   "universalImport_semantics_possibleDuplicate": "Possible duplicate",
   "universalImport_semantics_probableDuplicate": "Probable duplicate",
   "universalImport_semantics_sourceDetected": "Source detected: {description}",
   "universalImport_semantics_sourceUncertain": "Source uncertain: {description}",
   "universalImport_semantics_toggleSelection": "Toggle selection for {name}",
+  "universalImport_snackbar_bulkMarkedAs": "{count} marked as {action}",
+  "universalImport_snackbar_markedAs": "Marked as {action}",
   "universalImport_step_import": "Import",
   "universalImport_step_map": "Map",
   "universalImport_step_review": "Review",
   "universalImport_step_select": "Select",
+  "universalImport_summary_decidesRequired": "Each needs a decision before importing.",
   "universalImport_title": "File Import",
   "universalImport_tooltip_closeWizard": "Close import wizard",
   "@universalImport_action_consolidate": {
@@ -7802,8 +7858,51 @@
   "@universalImport_action_selectFile": {
     "description": "Button label for the file picker button"
   },
+  "@universalImport_bulk_consolidateMatched": {
+    "description": "Bulk action button that consolidates all matched pending duplicate dives",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "@universalImport_bulk_importAll": {
+    "description": "Bulk action button that imports all items in the current tab",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "@universalImport_bulk_importAllAsNew": {
+    "description": "Bulk action button that imports all pending duplicate items as new dives",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "@universalImport_bulk_skipAll": {
+    "description": "Bulk action button that skips all items in the current tab",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "@universalImport_bulk_replaceSourceAll": {
+    "description": "Bulk action button to replace source data for all pending duplicates",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "@universalImport_description_supportedFormats": {
     "description": "Description text on the file selection step listing supported formats"
+  },
+  "@universalImport_dive_decideAction": {
+    "description": "Label on the expansion button for a pending duplicate dive row (replaces 'Compare dives')"
   },
   "@universalImport_error_unsupportedFormat": {
     "description": "Error message shown when the detected file format is not supported"
@@ -7823,6 +7922,9 @@
         "example": "12"
       }
     }
+  },
+  "@universalImport_label_consolidate": {
+    "description": "Short action label meaning the incoming duplicate should be merged into the existing record (used on snackbars and bulk buttons)"
   },
   "@universalImport_label_detecting": {
     "description": "Button label shown while detecting the file format"
@@ -7847,6 +7949,9 @@
         "example": "3"
       }
     }
+  },
+  "@universalImport_label_importAsNew": {
+    "description": "Short action label meaning the incoming duplicate should be imported as a brand-new entry (used on snackbars and bulk buttons)"
   },
   "@universalImport_label_importComplete": {
     "description": "Headline text shown on the import summary step"
@@ -7938,6 +8043,26 @@
       }
     }
   },
+  "@universalImport_pending_chooseAction": {
+    "description": "Prompt shown above the action buttons on an expanded pending duplicate row, telling the user to pick an action"
+  },
+  "@universalImport_pending_gateHint": {
+    "description": "Hint text telling the user how many pending duplicates still need a decision before Import can proceed",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "@universalImport_pending_needsDecision": {
+    "description": "Pill/badge shown on a pending duplicate row indicating the user must pick an action"
+  },
+  "@universalImport_pending_reviewAction": {
+    "description": "Action label jumping the user to the pending duplicate that needs review"
+  },
+  "@universalImport_rowHint_tapCompareToDecide": {
+    "description": "Row hint shown under an undecided pending duplicate prompting the user to tap the Decide button"
+  },
   "@universalImport_semantics_entitySelection": {
     "description": "Accessibility label for entity type selection count",
     "placeholders": {
@@ -7982,6 +8107,9 @@
       }
     }
   },
+  "@universalImport_semantics_needsDecision": {
+    "description": "Screen reader label for the 'Needs decision' pill on a pending duplicate row"
+  },
   "@universalImport_semantics_possibleDuplicate": {
     "description": "Accessibility label for the possible duplicate badge"
   },
@@ -8015,6 +8143,27 @@
       }
     }
   },
+  "@universalImport_snackbar_bulkMarkedAs": {
+    "description": "Snackbar shown after a bulk action resolves multiple pending duplicates, confirming the count and action",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "action": {
+        "type": "String",
+        "example": "Skip"
+      }
+    }
+  },
+  "@universalImport_snackbar_markedAs": {
+    "description": "Snackbar shown after a single duplicate is resolved, confirming the chosen action",
+    "placeholders": {
+      "action": {
+        "type": "String",
+        "example": "Import as New"
+      }
+    }
+  },
   "@universalImport_step_import": {
     "description": "Step indicator label for the import step"
   },
@@ -8026,6 +8175,9 @@
   },
   "@universalImport_step_select": {
     "description": "Step indicator label for the file selection step"
+  },
+  "@universalImport_summary_decidesRequired": {
+    "description": "Addendum to the pending duplicates summary banner clarifying that each needs a decision before import"
   },
   "@universalImport_title": {
     "description": "Title for the universal import wizard page and file selection heading"
@@ -8512,6 +8664,47 @@
     }
   },
   "certifications_certificate_thisCertifies": "This certifies that",
+  "diveComputer_connectionType_ble": "Bluetooth LE",
+  "diveComputer_connectionType_bluetooth": "Bluetooth",
+  "diveComputer_connectionType_infrared": "Infrared",
+  "diveComputer_connectionType_unknown": "Unknown",
+  "diveComputer_connectionType_usb": "USB",
+  "diveComputer_connectionType_wifi": "Wi-Fi",
+  "diveComputer_detail_cannotFilterNoSerial": "Cannot filter: no serial number for this computer.",
+  "diveComputer_detail_deleteDialogContent": "Are you sure you want to remove \"{name}\"? This will not delete any dives that were imported from this computer.",
+  "@diveComputer_detail_deleteDialogContent": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "diveComputer_detail_deleteDialogTitle": "Delete Computer?",
+  "diveComputer_detail_divesImported": "Dives Imported",
+  "diveComputer_detail_downloadDivesButton": "Download Dives",
+  "diveComputer_detail_editDialogTitle": "Edit Computer",
+  "diveComputer_detail_editNameHint": "e.g., My Perdix",
+  "diveComputer_detail_editNotesHint": "Optional notes",
+  "diveComputer_detail_labelConnection": "Connection",
+  "diveComputer_detail_labelManufacturer": "Manufacturer",
+  "diveComputer_detail_labelModel": "Model",
+  "diveComputer_detail_labelName": "Name",
+  "diveComputer_detail_lastDownload": "Last Download",
+  "diveComputer_detail_notesTitle": "Notes",
+  "diveComputer_detail_reimportAllButton": "Re-import all dives",
+  "diveComputer_detail_reimportDialogBody": "Download every dive from {computerName} and review them against your log. This may take several minutes.",
+  "@diveComputer_detail_reimportDialogBody": {
+    "placeholders": {
+      "computerName": {
+        "type": "String",
+        "example": "Perdix 2"
+      }
+    }
+  },
+  "diveComputer_detail_reimportDialogTitle": "Re-import all dives?",
+  "diveComputer_detail_statisticsTitle": "Statistics",
+  "diveComputer_detail_unknown": "Unknown",
+  "diveComputer_detail_viewDivesButton": "View Dives from This Computer",
   "diveComputer_discovery_chooseDifferentDevice": "Choose Different Device",
   "diveComputer_discovery_computer": "Computer",
   "diveComputer_discovery_connectAndDownload": "Connect & Download",
@@ -8555,6 +8748,10 @@
     }
   },
   "diveComputer_discovery_usbSearchHint": "Search by manufacturer or model...",
+  "diveComputer_downloadExit_content": "Leaving will cancel the current download from your dive computer. Are you sure?",
+  "diveComputer_downloadExit_leave": "Leave",
+  "diveComputer_downloadExit_stay": "Stay",
+  "diveComputer_downloadExit_title": "Download in Progress",
   "diveComputer_downloadStep_andMoreDives": "... and {count} more",
   "@diveComputer_downloadStep_andMoreDives": {
     "placeholders": {
@@ -8703,6 +8900,7 @@
       }
     }
   },
+  "diveComputer_download_reimportHint": "Looking for older or deleted dives? Re-import all",
   "diveComputer_download_retry": "Retry",
   "diveComputer_download_scanError": "Scan error: {error}",
   "@diveComputer_download_scanError": {
@@ -8761,6 +8959,51 @@
   "diveComputer_list_loadFailed": "Failed to load dive computers",
   "diveComputer_list_retry": "Retry",
   "diveComputer_list_title": "Dive Computers",
+  "diveComputer_pinCode_instructions": "Enter the code displayed on your dive computer.",
+  "diveComputer_pinCode_label": "PIN Code",
+  "diveComputer_pinCode_submit": "Submit",
+  "diveComputer_pinCode_title": "PIN Code Required",
+  "diveComputer_pinEntry_connectButton": "Connect",
+  "diveComputer_pinEntry_helperText": "Enter the 4-6 digit PIN shown on your device",
+  "diveComputer_pinEntry_instructionsGeneric": "Check your dive computer display for the PIN code.",
+  "diveComputer_pinEntry_instructionsWithDevice": "Check your {deviceName} display for the PIN code.",
+  "@diveComputer_pinEntry_instructionsWithDevice": {
+    "placeholders": {
+      "deviceName": {
+        "type": "String"
+      }
+    }
+  },
+  "diveComputer_pinEntry_semanticLabel": "PIN code entry, 4 to 6 digits",
+  "diveComputer_pinEntry_title": "Enter PIN Code",
+  "diveComputer_scan_bluetoothSemanticLabel": "Bluetooth device: {name}",
+  "@diveComputer_scan_bluetoothSemanticLabel": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "diveComputer_scan_emptyStateInstructions": "Make sure your dive computer is:\n• Turned on\n• In Bluetooth pairing mode\n• Close to your device",
+  "diveComputer_scan_knownBadge": "Known",
+  "diveComputer_scan_lookingForDevicesTitle": "Looking for Devices",
+  "diveComputer_scan_noUsbDevicesAvailable": "No USB devices available",
+  "diveComputer_scan_retry": "Retry",
+  "diveComputer_scan_scanAgain": "Scan Again",
+  "diveComputer_scan_scanningStatus": "Scanning for dive computers...",
+  "diveComputer_scan_stopScanning": "Stop Scanning",
+  "diveComputer_scan_supportedBadge": "Supported",
+  "diveComputer_scan_tabBluetooth": "Bluetooth",
+  "diveComputer_scan_tabUsb": "USB Cable",
+  "diveComputer_scan_usbCableLabel": "USB Cable",
+  "diveComputer_scan_usbSemanticLabel": "USB device: {model}",
+  "@diveComputer_scan_usbSemanticLabel": {
+    "placeholders": {
+      "model": {
+        "type": "String"
+      }
+    }
+  },
   "diveComputer_summary_diveComputer": "dive computer",
   "diveComputer_summary_divesDownloaded": "{count} {count, plural, =1{dive} other{dives}} downloaded",
   "@diveComputer_summary_divesDownloaded": {
@@ -9630,5 +9873,152 @@
   "settings_appearance_mapStyle_subtitle": "Choose map tile appearance",
   "settings_appearance_mapStyle_openStreetMap": "Street Map",
   "settings_appearance_mapStyle_openTopoMap": "Topographic",
-  "settings_appearance_mapStyle_esriSatellite": "Satellite"
+  "settings_appearance_mapStyle_esriSatellite": "Satellite",
+  "common_action_reparse": "Re-parse",
+  "@common_action_reparse": {
+    "description": "Generic re-parse action label"
+  },
+  "diveComputer_detail_reparseAllButton": "Re-parse all dives",
+  "@diveComputer_detail_reparseAllButton": {
+    "description": "Button to re-parse all dives from a computer"
+  },
+  "diveComputer_detail_reparseAllTitle": "Re-parse all dives",
+  "@diveComputer_detail_reparseAllTitle": {
+    "description": "Dialog title for batch re-parse confirmation"
+  },
+  "diveComputer_detail_reparseAllMessage": "Re-run the dive parser on {count} dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.",
+  "@diveComputer_detail_reparseAllMessage": {
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "12"
+      }
+    }
+  },
+  "diveComputer_detail_reparseAllProgress": "Re-parsing {count} dives...",
+  "@diveComputer_detail_reparseAllProgress": {
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "12"
+      }
+    }
+  },
+  "diveComputer_detail_reparseAllSuccess": "Re-parsed {count} dives successfully",
+  "@diveComputer_detail_reparseAllSuccess": {
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "12"
+      }
+    }
+  },
+  "diveComputer_detail_reparseAllPartial": "Re-parsed {succeeded} of {total} dives. {failed} failed.",
+  "@diveComputer_detail_reparseAllPartial": {
+    "placeholders": {
+      "succeeded": {
+        "type": "int",
+        "example": "10"
+      },
+      "total": {
+        "type": "int",
+        "example": "12"
+      },
+      "failed": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
+  "diveComputer_detail_reparseRawDataCount": "{count} dives with raw data",
+  "@diveComputer_detail_reparseRawDataCount": {
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "12"
+      }
+    }
+  },
+  "diveComputer_detail_reparseRawDataCountWithout": "{count} dives with raw data ({without} without)",
+  "@diveComputer_detail_reparseRawDataCountWithout": {
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "12"
+      },
+      "without": {
+        "type": "int",
+        "example": "3"
+      }
+    }
+  },
+  "diveLog_detail_menu_reparseRawData": "Re-parse raw data",
+  "@diveLog_detail_menu_reparseRawData": {
+    "description": "Menu item to re-parse raw dive data"
+  },
+  "diveLog_detail_reparseSuccess": "Dive re-parsed successfully",
+  "@diveLog_detail_reparseSuccess": {
+    "description": "Snackbar message after successful re-parse"
+  },
+  "diveLog_detail_reparseFailed": "Re-parse failed: {error}",
+  "@diveLog_detail_reparseFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String",
+        "example": "Parse error"
+      }
+    }
+  },
+  "universalImport_label_replaceSource": "Replace Source",
+  "@universalImport_label_replaceSource": {
+    "description": "Label for the replace source duplicate action"
+  },
+  "universalImport_label_replaceSourceSubtitle": "Update from same computer",
+  "@universalImport_label_replaceSourceSubtitle": {
+    "description": "Subtitle for the replace source button in the duplicate review step"
+  },
+  "universalImport_title_importOptions": "Import Options",
+  "@universalImport_title_importOptions": {
+    "description": "Title for the import options bottom sheet"
+  },
+  "universalImport_label_options": "Options",
+  "@universalImport_label_options": {
+    "description": "Label for the import options button"
+  },
+  "universalImport_label_retainDiveNumbers": "Retain source dive numbers",
+  "@universalImport_label_retainDiveNumbers": {
+    "description": "Switch title for retaining dive numbers from source"
+  },
+  "universalImport_label_retainDiveNumbersSubtitle": "Use dive numbers from the imported file instead of auto-assigning",
+  "@universalImport_label_retainDiveNumbersSubtitle": {
+    "description": "Switch subtitle for retaining dive numbers"
+  },
+  "universalImport_title_successImported": "Successfully Imported",
+  "@universalImport_title_successImported": {
+    "description": "Title shown when dives are successfully imported"
+  },
+  "universalImport_title_successUpdated": "Successfully Updated",
+  "@universalImport_title_successUpdated": {
+    "description": "Title shown when existing dives are successfully updated"
+  },
+  "universalImport_title_successConsolidated": "Successfully Consolidated",
+  "@universalImport_title_successConsolidated": {
+    "description": "Title shown when dives are successfully consolidated"
+  },
+  "universalImport_title_noDivesImported": "No Dives Imported",
+  "@universalImport_title_noDivesImported": {
+    "description": "Title shown when no dives were imported"
+  },
+  "universalImport_label_allDivesSkipped": "All dives were skipped.",
+  "@universalImport_label_allDivesSkipped": {
+    "description": "Message shown when all dives were skipped during import"
+  },
+  "universalImport_label_replacedSourceData": "Replaced source data",
+  "@universalImport_label_replacedSourceData": {
+    "description": "Label for the count of dives whose source data was replaced"
+  },
+  "universalImport_label_consolidated": "Consolidated",
+  "@universalImport_label_consolidated": {
+    "description": "Label for the count of consolidated dives in summary"
+  }
 }

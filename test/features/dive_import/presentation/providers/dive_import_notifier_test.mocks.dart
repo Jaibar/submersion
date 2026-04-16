@@ -495,18 +495,23 @@ class MockDiveRepository extends _i1.Mock implements _i3.DiveRepository {
           as _i5.Future<_i3.DiveNumberingInfo>);
 
   @override
-  _i5.Future<void> renumberAllDives({int? startFrom = 1}) =>
+  _i5.Future<void> renumberAllDives({int? startFrom = 1, String? diverId}) =>
       (super.noSuchMethod(
-            Invocation.method(#renumberAllDives, [], {#startFrom: startFrom}),
+            Invocation.method(#renumberAllDives, [], {
+              #startFrom: startFrom,
+              #diverId: diverId,
+            }),
             returnValue: _i5.Future<void>.value(),
             returnValueForMissingStub: _i5.Future<void>.value(),
           )
           as _i5.Future<void>);
 
   @override
-  _i5.Future<void> assignMissingDiveNumbers() =>
+  _i5.Future<void> assignMissingDiveNumbers({String? diverId}) =>
       (super.noSuchMethod(
-            Invocation.method(#assignMissingDiveNumbers, []),
+            Invocation.method(#assignMissingDiveNumbers, [], {
+              #diverId: diverId,
+            }),
             returnValue: _i5.Future<void>.value(),
             returnValueForMissingStub: _i5.Future<void>.value(),
           )

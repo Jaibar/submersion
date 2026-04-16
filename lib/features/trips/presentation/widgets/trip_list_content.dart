@@ -104,6 +104,7 @@ class _TripListContentState extends ConsumerState<TripListContent> {
   }
 
   void _handleItemTap(Trip trip) {
+    ref.read(highlightedTripIdProvider.notifier).state = trip.id;
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
       widget.onItemSelected!(trip.id);
@@ -404,7 +405,10 @@ class _TripListContentState extends ConsumerState<TripListContent> {
               itemCount: trips.length,
               itemBuilder: (context, index) {
                 final tripWithStats = trips[index];
-                final isSelected = widget.selectedId == tripWithStats.trip.id;
+                final isSelected =
+                    widget.selectedId == tripWithStats.trip.id ||
+                    ref.watch(highlightedTripIdProvider) ==
+                        tripWithStats.trip.id;
                 final viewMode = ref.watch(tripListViewModeProvider);
                 return switch (viewMode) {
                   ListViewMode.detailed => TripListTile(

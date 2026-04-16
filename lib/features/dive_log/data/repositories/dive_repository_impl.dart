@@ -1635,11 +1635,12 @@ class DiveRepository {
       final stats = await _db.customSelect('''
       SELECT
         COUNT(*) as total_dives,
-        SUM(bottom_time) as total_time,
+        SUM(COALESCE(runtime, bottom_time)) as total_time,
         MAX(max_depth) as max_depth,
         AVG(max_depth) as avg_max_depth,
         AVG(water_temp) as avg_temp,
-        COUNT(DISTINCT site_id) as total_sites
+        COUNT(DISTINCT site_id) as total_sites,
+        MIN(dive_date_time) as first_dive_date
       FROM dives
       $whereClause
     ''', variables: vars).getSingle();
@@ -1741,6 +1742,11 @@ class DiveRepository {
           )
           .toList();
 
+      final firstDiveEpochMs = stats.data['first_dive_date'] as int?;
+      final firstDiveDate = firstDiveEpochMs == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(firstDiveEpochMs, isUtc: true);
+
       return DiveStatistics(
         totalDives: stats.data['total_dives'] as int? ?? 0,
         totalTimeSeconds: stats.data['total_time'] as int? ?? 0,
@@ -1748,6 +1754,7 @@ class DiveRepository {
         avgMaxDepth: stats.data['avg_max_depth'] as double? ?? 0,
         avgTemperature: stats.data['avg_temp'] as double?,
         totalSites: stats.data['total_sites'] as int? ?? 0,
+        firstDiveDate: firstDiveDate,
         divesByMonth: divesByMonth,
         depthDistribution: depthDistribution,
         topSites: topSites,
@@ -3175,15 +3182,26 @@ class DiveRepository {
 
   /// Renumber all dives sequentially based on entry time
   /// [startFrom] - The starting dive number (default 1)
-  Future<void> renumberAllDives({int startFrom = 1}) async {
+  /// [diverId] - If non-null, only renumbers dives belonging to this diver.
+  /// Dive numbers are a per-diver lifetime counter, so callers editing a
+  /// single diver's numbering must pass their ID or the other diver's
+  /// sequence will be overwritten.
+  Future<void> renumberAllDives({int startFrom = 1, String? diverId}) async {
     try {
-      _log.info('Renumbering all dives starting from $startFrom');
+      _log.info(
+        'Renumbering dives starting from $startFrom'
+        '${diverId != null ? ' for diver $diverId' : ''}',
+      );
 
       final query = _db.select(_db.dives)
         ..orderBy([
           (t) => OrderingTerm.asc(t.entryTime),
           (t) => OrderingTerm.asc(t.diveDateTime),
         ]);
+
+      if (diverId != null) {
+        query.where((t) => t.diverId.equals(diverId));
+      }
 
       final rows = await query.get();
 
@@ -3211,24 +3229,36 @@ class DiveRepository {
 
   /// Fill gaps in dive numbers by renumbering all dives chronologically
   /// This ensures dive numbers match chronological order
-  Future<void> assignMissingDiveNumbers() async {
+  /// [diverId] - If non-null, only operates on that diver's dives. The
+  /// MIN(dive_number) used as the starting point is also scoped, so each
+  /// diver preserves their own numbering baseline.
+  Future<void> assignMissingDiveNumbers({String? diverId}) async {
     try {
       _log.info(
-        'Assigning missing dive numbers by renumbering chronologically',
+        'Assigning missing dive numbers by renumbering chronologically'
+        '${diverId != null ? ' for diver $diverId' : ''}',
       );
 
-      // Find the minimum existing dive number to preserve as the starting point
-      // This respects the user's existing numbering scheme
-      final minResult = await _db
-          .customSelect(
-            'SELECT MIN(dive_number) as min_num FROM dives WHERE dive_number IS NOT NULL',
-          )
-          .getSingleOrNull();
+      // Find the minimum existing dive number to preserve as the starting point.
+      // Scope by diverId so one diver's baseline doesn't override another's.
+      final minResult = diverId != null
+          ? await _db
+                .customSelect(
+                  'SELECT MIN(dive_number) as min_num FROM dives '
+                  'WHERE dive_number IS NOT NULL AND diver_id = ?',
+                  variables: [Variable<String>(diverId)],
+                )
+                .getSingleOrNull()
+          : await _db
+                .customSelect(
+                  'SELECT MIN(dive_number) as min_num FROM dives '
+                  'WHERE dive_number IS NOT NULL',
+                )
+                .getSingleOrNull();
 
       final startFrom = (minResult?.data['min_num'] as int?) ?? 1;
 
-      // Renumber all dives chronologically starting from the minimum existing number
-      await renumberAllDives(startFrom: startFrom);
+      await renumberAllDives(startFrom: startFrom, diverId: diverId);
 
       _log.info(
         'Dive numbers assigned chronologically starting from $startFrom',
@@ -3922,6 +3952,7 @@ class DiveStatistics {
   final double avgMaxDepth;
   final double? avgTemperature;
   final int totalSites;
+  final DateTime? firstDiveDate;
   final List<MonthlyDiveCount> divesByMonth;
   final List<DepthRangeStat> depthDistribution;
   final List<TopSiteStat> topSites;
@@ -3933,6 +3964,7 @@ class DiveStatistics {
     required this.avgMaxDepth,
     this.avgTemperature,
     required this.totalSites,
+    this.firstDiveDate,
     this.divesByMonth = const [],
     this.depthDistribution = const [],
     this.topSites = const [],
@@ -3944,6 +3976,32 @@ class DiveStatistics {
     final hours = totalTime.inHours;
     final minutes = totalTime.inMinutes % 60;
     return '${hours}h ${minutes}m';
+  }
+
+  // Gregorian average days per month (365.25 / 12).
+  static const double _daysPerMonth = 30.44;
+
+  /// Lifetime tenure in months since the diver's first dive.
+  /// Returns null if no dives, firstDiveDate is in the future, or tenure < 1 month.
+  double? get monthsSinceFirstDive {
+    final first = firstDiveDate;
+    if (first == null) return null;
+    final now = DateTime.now();
+    if (first.isAfter(now)) return null;
+    final months = now.difference(first).inDays / _daysPerMonth;
+    return months < 1 ? null : months;
+  }
+
+  /// Lifetime average dives per month. Returns null when tenure is unavailable.
+  double? get divesPerMonth {
+    final months = monthsSinceFirstDive;
+    return months == null ? null : totalDives / months;
+  }
+
+  /// Lifetime average dives per year. Returns null when tenure is unavailable.
+  double? get divesPerYear {
+    final months = monthsSinceFirstDive;
+    return months == null ? null : totalDives / (months / 12);
   }
 }
 

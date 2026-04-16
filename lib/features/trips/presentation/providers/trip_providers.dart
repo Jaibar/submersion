@@ -376,10 +376,12 @@ final tripSitesWithLocationsProvider =
     });
 
 // ============================================================================
-// Trip Highlighted ID (for table mode detail pane)
+// Trip Highlighted ID (table-mode row highlight + phone-mode last-visited)
 // ============================================================================
 
-/// Tracks the currently highlighted trip in table mode.
+/// Tracks the currently highlighted trip. Used by the table view's row
+/// highlight and by the phone-mode list to tint the last-visited trip
+/// card on return from the detail page.
 final highlightedTripIdProvider = StateProvider<String?>((ref) => null);
 
 // ============================================================================

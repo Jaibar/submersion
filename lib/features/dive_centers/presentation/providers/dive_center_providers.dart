@@ -340,13 +340,19 @@ final externalCenterSearchProvider =
     });
 
 // =============================================================================
-// Highlighted Dive Center (Table Mode)
+// Highlighted Dive Center
 // =============================================================================
 
-/// Currently highlighted dive center ID in table mode.
+/// Currently highlighted dive center ID.
 ///
-/// Set on single-tap, used by [TableModeLayout] to drive the detail pane and
-/// map selection highlight.
+/// Used in three contexts:
+/// 1. Table row highlight — set on single-tap in table mode; drives the detail
+///    pane via [TableModeLayout].
+/// 2. Map selection highlight — consumed by the map overlay to tint the
+///    selected marker when the user picks a center from the list.
+/// 3. Phone-mode last-visited list tint — set when the user taps a center in
+///    detailed or compact phone view so the item remains visually highlighted
+///    on back-navigation.
 final highlightedDiveCenterIdProvider = StateProvider<String?>((ref) => null);
 
 // =============================================================================

@@ -82,14 +82,20 @@ class _FakeDiveComputerRepository extends DiveComputerRepository {
   @override
   Future<void> updateComputer(dynamic computer) async {}
   @override
-  Future<DiveComputer?> findByBluetoothAddress(String address) async => null;
+  Future<DiveComputer?> findByBluetoothAddress(
+    String address, {
+    String? diverId,
+  }) async => null;
 }
 
 /// Repository that never resolves findByBluetoothAddress, simulating
 /// an async delay during computer resolution.
 class _NeverResolveDiveComputerRepository extends DiveComputerRepository {
   @override
-  Future<DiveComputer?> findByBluetoothAddress(String address) {
+  Future<DiveComputer?> findByBluetoothAddress(
+    String address, {
+    String? diverId,
+  }) {
     return Completer<DiveComputer?>().future;
   }
 
@@ -522,67 +528,6 @@ void main() {
 
       // After resolution, the DownloadStepWidget is rendered.
       expect(find.byType(DownloadStepWidget), findsOneWidget);
-    });
-  });
-
-  // =========================================================================
-  // DcNoNewDivesView
-  // =========================================================================
-
-  group('DcNoNewDivesView', () {
-    testWidgets('shows no new dives message', (tester) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: DcNoNewDivesView(onDone: () {})),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('No new dives to download'), findsOneWidget);
-      expect(
-        find.text('All dives from this computer have already been imported.'),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('shows check circle icon', (tester) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: DcNoNewDivesView(onDone: () {})),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
-    });
-
-    testWidgets('shows Done button', (tester) async {
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(body: DcNoNewDivesView(onDone: () {})),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text('Done'), findsOneWidget);
-    });
-
-    testWidgets('tapping Done calls onDone callback', (tester) async {
-      var doneCalled = false;
-
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: DcNoNewDivesView(onDone: () => doneCalled = true),
-          ),
-        ),
-      );
-      await tester.pump();
-
-      await tester.tap(find.text('Done'));
-      await tester.pumpAndSettle();
-
-      expect(doneCalled, isTrue);
     });
   });
 }

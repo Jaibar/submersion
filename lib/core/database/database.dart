@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 
 part 'database.g.dart';
@@ -950,8 +952,11 @@ class DiveDataSources extends Table {
   TextColumn get id => text()();
   TextColumn get diveId =>
       text().references(Dives, #id, onDelete: KeyAction.cascade)();
-  TextColumn get computerId =>
-      text().nullable().references(DiveComputers, #id)();
+  TextColumn get computerId => text().nullable().references(
+    DiveComputers,
+    #id,
+    onDelete: KeyAction.setNull,
+  )();
   BoolColumn get isPrimary => boolean().withDefault(const Constant(false))();
   TextColumn get computerModel => text().nullable()();
   TextColumn get computerSerial => text().nullable()();
@@ -974,6 +979,13 @@ class DiveDataSources extends Table {
   IntColumn get gradientFactorHigh => integer().nullable()();
   DateTimeColumn get importedAt => dateTime()();
   DateTimeColumn get createdAt => dateTime()();
+  BlobColumn get rawData => blob().nullable()();
+  BlobColumn get rawFingerprint => blob().nullable()();
+  TextColumn get descriptorVendor => text().nullable()();
+  TextColumn get descriptorProduct => text().nullable()();
+  IntColumn get descriptorModel => integer().nullable()();
+  TextColumn get libdivecomputerVersion => text().nullable()();
+  DateTimeColumn get lastParsedAt => dateTime().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -1310,7 +1322,7 @@ class AppDatabase extends _$AppDatabase {
 
   /// The current schema version as a static constant so that pre-open checks
   /// (e.g. version-mismatch guard) can reference it without an instance.
-  static const int currentSchemaVersion = 64;
+  static const int currentSchemaVersion = 67;
 
   /// Every schema version that has a migration block in onUpgrade.
   /// Used to calculate progress step counts. When adding a new migration,
@@ -1378,6 +1390,9 @@ class AppDatabase extends _$AppDatabase {
     62,
     63,
     64,
+    65,
+    66,
+    67,
   ];
 
   /// Returns the number of migration steps that will execute when upgrading
@@ -2964,6 +2979,203 @@ class AppDatabase extends _$AppDatabase {
         if (from < 63) await reportProgress();
 
         if (from < 64) {
+          // Delete orphaned records (diver_id = NULL) left by prior diver
+          // deletions that nullified instead of cascade-deleting.
+          // Delete dives first so child tables CASCADE automatically.
+          // Guard: only run on tables that have a diver_id column (older
+          // migration-test databases may not have it).
+          for (final table in [
+            'dives',
+            'trips',
+            'dive_sites',
+            'equipment',
+            'equipment_sets',
+            'buddies',
+            'certifications',
+            'dive_centers',
+            'tags',
+            'dive_computers',
+            'tank_presets',
+          ]) {
+            final cols = await customSelect(
+              "PRAGMA table_info('$table')",
+            ).get();
+            if (cols.any((c) => c.read<String>('name') == 'diver_id')) {
+              await customStatement(
+                'DELETE FROM $table WHERE diver_id IS NULL',
+              );
+            }
+          }
+
+          // Custom dive types may be orphaned too, but built-in types
+          // (is_built_in = 1) intentionally have null diver_id. Only
+          // delete orphaned custom types.
+          final diveTypeCols = await customSelect(
+            "PRAGMA table_info('dive_types')",
+          ).get();
+          final hasDiverId = diveTypeCols.any(
+            (c) => c.read<String>('name') == 'diver_id',
+          );
+          final hasBuiltIn = diveTypeCols.any(
+            (c) => c.read<String>('name') == 'is_built_in',
+          );
+          if (hasDiverId && hasBuiltIn) {
+            await customStatement(
+              'DELETE FROM dive_types WHERE diver_id IS NULL AND is_built_in = 0',
+            );
+          }
+        }
+        if (from < 64) await reportProgress();
+
+        if (from < 65) {
+          // Flip legacy detailed-card stat2 default from bottomTime to runtime.
+          // Preserves deliberate customizations (e.g. waterTemp) by only
+          // rewriting rows that still carry the old default.
+          final rows = await customSelect(
+            "SELECT id, config_json FROM view_configs WHERE view_mode = 'detailed'",
+          ).get();
+          final now = DateTime.now().millisecondsSinceEpoch;
+          for (final row in rows) {
+            final configJson = row.read<String>('config_json');
+            Map<String, dynamic> parsed;
+            try {
+              parsed = jsonDecode(configJson) as Map<String, dynamic>;
+            } catch (_) {
+              continue;
+            }
+            final slots = parsed['slots'];
+            if (slots is! List) continue;
+            var modified = false;
+            for (final slot in slots) {
+              if (slot is Map<String, dynamic> &&
+                  slot['slotId'] == 'stat2' &&
+                  slot['field'] == 'bottomTime') {
+                slot['field'] = 'runtime';
+                modified = true;
+              }
+            }
+            if (!modified) continue;
+            await customStatement(
+              'UPDATE view_configs SET config_json = ?, updated_at = ? WHERE id = ?',
+              [jsonEncode(parsed), now, row.read<String>('id')],
+            );
+          }
+        }
+        if (from < 65) await reportProgress();
+        if (from < 66) {
+          // Guard: dive_data_sources may not exist in older migration tests.
+          final ddsColumns = await customSelect(
+            "PRAGMA table_info('dive_data_sources')",
+          ).get();
+          if (ddsColumns.isNotEmpty) {
+            final existing = ddsColumns
+                .map((c) => c.read<String>('name'))
+                .toSet();
+            if (!existing.contains('raw_data')) {
+              await customStatement(
+                'ALTER TABLE dive_data_sources ADD COLUMN raw_data BLOB',
+              );
+            }
+            if (!existing.contains('raw_fingerprint')) {
+              await customStatement(
+                'ALTER TABLE dive_data_sources ADD COLUMN raw_fingerprint BLOB',
+              );
+            }
+            if (!existing.contains('descriptor_vendor')) {
+              await customStatement(
+                'ALTER TABLE dive_data_sources ADD COLUMN descriptor_vendor TEXT',
+              );
+            }
+            if (!existing.contains('descriptor_product')) {
+              await customStatement(
+                'ALTER TABLE dive_data_sources ADD COLUMN descriptor_product TEXT',
+              );
+            }
+            if (!existing.contains('descriptor_model')) {
+              await customStatement(
+                'ALTER TABLE dive_data_sources ADD COLUMN descriptor_model INTEGER',
+              );
+            }
+            if (!existing.contains('libdivecomputer_version')) {
+              await customStatement(
+                'ALTER TABLE dive_data_sources ADD COLUMN libdivecomputer_version TEXT',
+              );
+            }
+            if (!existing.contains('last_parsed_at')) {
+              await customStatement(
+                'ALTER TABLE dive_data_sources ADD COLUMN last_parsed_at INTEGER',
+              );
+            }
+
+            // Rebuild the table to update the computer_id FK from the
+            // original NO ACTION to ON DELETE SET NULL. SQLite cannot
+            // alter constraints in place, so we create → copy → swap.
+            await customStatement('PRAGMA foreign_keys = OFF');
+            await customStatement('''
+              CREATE TABLE dive_data_sources_new (
+                id TEXT NOT NULL PRIMARY KEY,
+                dive_id TEXT NOT NULL REFERENCES dives(id) ON DELETE CASCADE,
+                computer_id TEXT REFERENCES dive_computers(id) ON DELETE SET NULL,
+                is_primary INTEGER NOT NULL DEFAULT 0,
+                computer_model TEXT,
+                computer_serial TEXT,
+                source_format TEXT,
+                source_file_name TEXT,
+                source_file_format TEXT,
+                max_depth REAL,
+                avg_depth REAL,
+                duration INTEGER,
+                water_temp REAL,
+                entry_time INTEGER,
+                exit_time INTEGER,
+                max_ascent_rate REAL,
+                max_descent_rate REAL,
+                surface_interval INTEGER,
+                cns REAL,
+                otu REAL,
+                deco_algorithm TEXT,
+                gradient_factor_low INTEGER,
+                gradient_factor_high INTEGER,
+                imported_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                raw_data BLOB,
+                raw_fingerprint BLOB,
+                descriptor_vendor TEXT,
+                descriptor_product TEXT,
+                descriptor_model INTEGER,
+                libdivecomputer_version TEXT,
+                last_parsed_at INTEGER
+              )
+            ''');
+            await customStatement('''
+              INSERT INTO dive_data_sources_new
+              SELECT id, dive_id, computer_id, is_primary,
+                     computer_model, computer_serial, source_format,
+                     source_file_name, source_file_format,
+                     max_depth, avg_depth, duration, water_temp,
+                     entry_time, exit_time, max_ascent_rate, max_descent_rate,
+                     surface_interval, cns, otu, deco_algorithm,
+                     gradient_factor_low, gradient_factor_high,
+                     imported_at, created_at,
+                     raw_data, raw_fingerprint,
+                     descriptor_vendor, descriptor_product, descriptor_model,
+                     libdivecomputer_version, last_parsed_at
+              FROM dive_data_sources
+            ''');
+            await customStatement('DROP TABLE dive_data_sources');
+            await customStatement(
+              'ALTER TABLE dive_data_sources_new RENAME TO dive_data_sources',
+            );
+            await customStatement('''
+              CREATE INDEX IF NOT EXISTS idx_dive_data_sources_dive_id
+              ON dive_data_sources(dive_id)
+            ''');
+            await customStatement('PRAGMA foreign_keys = ON');
+          }
+        }
+        if (from < 66) await reportProgress();
+
+        if (from < 67) {
           final cols = await customSelect(
             "PRAGMA table_info('diver_settings')",
           ).get();
@@ -2976,7 +3188,7 @@ class AppDatabase extends _$AppDatabase {
             }
           }
         }
-        if (from < 64) await reportProgress();
+        if (from < 67) await reportProgress();
       },
       beforeOpen: (details) async {
         // Enable foreign keys

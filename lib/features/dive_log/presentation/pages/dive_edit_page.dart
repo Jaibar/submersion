@@ -21,6 +21,7 @@ import 'package:submersion/features/equipment/presentation/providers/equipment_s
 import 'package:submersion/features/marine_life/domain/entities/species.dart';
 import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
+import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_picker.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/tags/presentation/widgets/tag_input_widget.dart';
@@ -57,6 +58,8 @@ import 'package:submersion/features/tank_presets/domain/services/default_tank_pr
 import 'package:submersion/features/tank_presets/presentation/providers/tank_preset_providers.dart';
 
 const _createNewSiteSentinel = '__create_new__';
+const _createNewDiveCenterSentinel = '__create_new_dive_center__';
+const _createNewTripSentinel = '__create_new_trip__';
 
 class DiveEditPage extends ConsumerStatefulWidget {
   final String? diveId;
@@ -1286,8 +1289,8 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     );
   }
 
-  void _showTripPicker() {
-    showModalBottomSheet(
+  Future<void> _showTripPicker() async {
+    final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       builder: (sheetContext) => DraggableScrollableSheet(
@@ -1302,9 +1305,22 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
             Navigator.of(sheetContext).pop();
             setState(() => _selectedTrip = trip);
           },
+          onCreateNewTrip: () {
+            Navigator.of(sheetContext).pop(_createNewTripSentinel);
+          },
         ),
       ),
     );
+
+    if (result == _createNewTripSentinel && mounted) {
+      final tripId = await context.push<String>('/trips/new');
+      if (tripId != null && mounted) {
+        final trip = await ref.read(tripRepositoryProvider).getTripById(tripId);
+        if (trip != null && mounted) {
+          setState(() => _selectedTrip = trip);
+        }
+      }
+    }
   }
 
   Widget _buildDiveCenterSection() {
@@ -1361,8 +1377,8 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     );
   }
 
-  void _showDiveCenterPicker() {
-    showModalBottomSheet(
+  Future<void> _showDiveCenterPicker() async {
+    final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       builder: (sheetContext) => DraggableScrollableSheet(
@@ -1377,9 +1393,23 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
             Navigator.of(sheetContext).pop();
             setState(() => _selectedDiveCenter = center);
           },
+          onCreateNewCenter: () {
+            Navigator.of(sheetContext).pop(_createNewDiveCenterSentinel);
+          },
         ),
       ),
     );
+
+    if (result == _createNewDiveCenterSentinel && mounted) {
+      final centerId = await context.push<String>('/dive-centers/new');
+      if (centerId != null && mounted) {
+        final repo = ref.read(diveCenterRepositoryProvider);
+        final center = await repo.getDiveCenterById(centerId);
+        if (center != null && mounted) {
+          setState(() => _selectedDiveCenter = center);
+        }
+      }
+    }
   }
 
   Widget _buildCourseSection() {
@@ -1551,9 +1581,8 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
         'editProfile',
         pathParameters: {'diveId': diveId},
         queryParameters: {
-          if (initialMode != null) 'mode': initialMode,
-          if (selected.computerId != null)
-            'sourceComputerId': selected.computerId!,
+          'mode': ?initialMode,
+          'sourceComputerId': ?selected.computerId,
         },
       );
     } else {
@@ -1562,7 +1591,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       context.pushNamed(
         'editProfile',
         pathParameters: {'diveId': diveId},
-        queryParameters: {if (initialMode != null) 'mode': initialMode},
+        queryParameters: {'mode': ?initialMode},
       );
     }
   }

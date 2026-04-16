@@ -2,14 +2,15 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/backup/domain/entities/backup_record.dart';
 import 'package:submersion/features/backup/domain/entities/backup_settings.dart';
 import 'package:submersion/features/backup/presentation/pages/restore_complete_page.dart';
 import 'package:submersion/features/backup/presentation/providers/backup_providers.dart';
+import 'package:submersion/features/backup/presentation/widgets/backup_history_tile.dart';
 import 'package:submersion/features/backup/presentation/widgets/export_bottom_sheet.dart';
 import 'package:submersion/features/backup/presentation/widgets/restore_confirmation_dialog.dart';
 import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
@@ -167,7 +168,7 @@ class BackupSettingsPage extends ConsumerWidget {
     ExportBottomSheet.show(
       context,
       onSaveToFile: () async {
-        final result = await FilePicker.platform.saveFile(
+        final result = await FilePicker.saveFile(
           dialogTitle: context.l10n.backup_export_title,
           fileName: _generateDefaultFilename(),
           allowedExtensions: ['db', 'sqlite'],
@@ -204,7 +205,7 @@ class BackupSettingsPage extends ConsumerWidget {
   Future<void> _handleImport(BuildContext context, WidgetRef ref) async {
     final FilePickerResult? result;
     try {
-      result = await FilePicker.platform.pickFiles(type: FileType.any);
+      result = await FilePicker.pickFiles(type: FileType.any);
     } on Exception catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -236,7 +237,11 @@ class BackupSettingsPage extends ConsumerWidget {
 
     if (!context.mounted) return;
 
-    final confirmed = await RestoreConfirmationDialog.show(context, record);
+    final confirmed = await RestoreConfirmationDialog.show(
+      context,
+      record,
+      currentSchemaVersion: AppDatabase.currentSchemaVersion,
+    );
     if (confirmed) {
       ref.read(backupOperationProvider.notifier).restoreFromFilePath(filePath);
     }
@@ -305,49 +310,40 @@ class BackupSettingsPage extends ConsumerWidget {
     WidgetRef ref,
     BackupRecord record,
   ) {
-    final theme = Theme.of(context);
-    final dateFormat = DateFormat.yMMMd().add_jm();
-
-    return ListTile(
-      leading: Icon(_locationIcon(record.location)),
-      title: Text(dateFormat.format(record.timestamp)),
-      subtitle: Text(
-        '${record.diveCount} dives, ${record.siteCount} sites - ${record.formattedSize}'
-        '${record.isAutomatic ? ' (auto)' : ''}',
-      ),
-      trailing: PopupMenuButton<String>(
-        onSelected: (action) =>
-            _handleHistoryAction(context, ref, action, record),
-        itemBuilder: (context) => [
-          PopupMenuItem(
-            value: 'restore',
-            child: ListTile(
-              leading: const Icon(Icons.restore),
-              title: Text(context.l10n.backup_history_action_restore),
-              contentPadding: EdgeInsets.zero,
-              dense: true,
-            ),
-          ),
-          PopupMenuItem(
-            value: 'delete',
-            child: ListTile(
-              leading: Icon(Icons.delete, color: theme.colorScheme.error),
-              title: Text(
-                context.l10n.backup_history_action_delete,
-                style: TextStyle(color: theme.colorScheme.error),
-              ),
-              contentPadding: EdgeInsets.zero,
-              dense: true,
-            ),
-          ),
-        ],
-      ),
+    return BackupHistoryTile(
+      record: record,
+      leadingIcon: _locationIcon(record.location),
+      onPinToggle: () => _togglePin(context, ref, record),
+      onRestore: () => _handleHistoryAction(context, ref, 'restore', record),
+      onDelete: () => _handleHistoryAction(context, ref, 'delete', record),
     );
   }
 
   // ===========================================================================
   // History Actions
   // ===========================================================================
+
+  Future<void> _togglePin(
+    BuildContext context,
+    WidgetRef ref,
+    BackupRecord record,
+  ) async {
+    final service = ref.read(backupServiceProvider);
+    try {
+      if (record.pinned) {
+        await service.unpinBackup(record.id);
+      } else {
+        await service.pinBackup(record.id);
+      }
+      ref.invalidate(backupHistoryProvider);
+    } catch (e, stackTrace) {
+      debugPrint('Failed to update pin state: $e\n$stackTrace');
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.backup_history_pinError)),
+      );
+    }
+  }
 
   Future<void> _handleHistoryAction(
     BuildContext context,
@@ -357,7 +353,11 @@ class BackupSettingsPage extends ConsumerWidget {
   ) async {
     switch (action) {
       case 'restore':
-        final confirmed = await RestoreConfirmationDialog.show(context, record);
+        final confirmed = await RestoreConfirmationDialog.show(
+          context,
+          record,
+          currentSchemaVersion: AppDatabase.currentSchemaVersion,
+        );
         if (confirmed) {
           ref.read(backupOperationProvider.notifier).restoreFromBackup(record);
         }
@@ -431,7 +431,7 @@ class BackupSettingsPage extends ConsumerWidget {
           ),
           trailing: TextButton(
             onPressed: () async {
-              final path = await FilePicker.platform.getDirectoryPath(
+              final path = await FilePicker.getDirectoryPath(
                 dialogTitle: context.l10n.backup_location_title,
               );
               if (path != null) {

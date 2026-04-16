@@ -3,6 +3,101 @@
 All notable changes to Submersion are documented in this file.
 
 
+## 1.4.4 (2026-04-15)
+
+### Features
+
+- highlight last-visited course on phone-mode list return
+- highlight last-visited certification on phone-mode list return
+- highlight last-visited dive center on phone-mode list return
+- highlight last-visited equipment on phone-mode list return
+- highlight last-visited buddy on phone-mode list return
+- highlight last-visited site on phone-mode list return
+- highlight last-visited trip on phone-mode list return
+- highlight last-visited dive on phone-mode list return
+
+### Bug Fixes
+
+- compact x-axis years when crowded on dives-per-year (#174)
+- move units from ticks to axis labels on Time at Depth chart
+- widen and right-align y-axis labels on CategoryBarChart (#175)
+- accept TLDs longer than 4 chars in email validation (#208)
+- pass raw args to Drift customStatement, unblocks delete/link (#157)
+- use runtime (fallback bottom_time) for total dive time
+- match other lists' highlight via isSelected (full tint, no left-border)
+- route highlight via new isHighlighted tile param to keep checkbox correct
+- route highlight through isHighlighted param, add compact test
+- scope dive numbering to active diver and refresh after delete
+
+### Refactoring
+
+- drop redundant isSelected arg on DenseBuddyListTile
+
+### Documentation
+
+- implementation plan for phone-mode list highlight
+- correct audit findings in highlight spec — 7 tap handlers also need patching
+- spec for highlighting last-visited item in phone-mode lists
+
+### Tests
+
+- add compact-mode highlight test; refresh provider doc comment
+
+### Chores
+
+- bump version to 1.4.4+90
+- regenerate mocks for diver-scoped numbering signature change
+
+### Other
+
+- normalize tile highlight alpha to 0.5 across all list views
+
+
+## 1.4.4 (2026-04-14)
+
+### Features
+
+- re-import all dives from dive computer (#206) (#216)
+- default detailed-card stat2 to runtime
+- pre-migration database backup (#210)
+- localize dive computer section
+- require explicit selection for import duplicates (#200) (#209)
+- show/hide tags toggle on detailed dive cards
+
+### Bug Fixes
+
+- dissolve splash into app UI instead of hard swap
+- Mares Puck 4 descriptor match + import-duplicates design spec (#204)
+- new dive center and trip now stick when created from dive form (#201)
+- per-diver computer records and cascade diver deletion (#199)
+- wrap release workflow expression in ${{ }} to avoid YAML tag parse error
+- clean stale native asset state before iOS/macOS CI builds
+- exclude appcast from beta releases
+- skip Claude Code Review on fork PRs
+
+### Documentation
+
+- spec for re-import all dives (#206)
+- added plans
+- spec for issue #200 - require explicit selection on duplicate imports
+- added plan
+
+### CI/CD
+
+- bump softprops/action-gh-release from 2 to 3 (#213)
+- bump actions/checkout from 4 to 6 (#212)
+
+### Chores
+
+- bump version to 1.4.4+89
+- upgrade 7 major dependencies with API migrations (#194)
+- upgrade 66 package dependencies (#192)
+
+### Other
+
+- i18n: translate 71 missing strings across 10 locales
+
+
 ## 1.4.3 (2026-04-09)
 
 ### Features

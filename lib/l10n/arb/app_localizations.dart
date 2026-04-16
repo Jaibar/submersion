@@ -518,6 +518,30 @@ abstract class AppLocalizations {
   /// **'Failed to load history: {error}'**
   String backup_history_error(Object error);
 
+  /// No description provided for @backup_history_pinAction_pin.
+  ///
+  /// In en, this message translates to:
+  /// **'Pin backup'**
+  String get backup_history_pinAction_pin;
+
+  /// No description provided for @backup_history_pinAction_unpin.
+  ///
+  /// In en, this message translates to:
+  /// **'Unpin backup'**
+  String get backup_history_pinAction_unpin;
+
+  /// No description provided for @backup_history_pinError.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not update pin state.'**
+  String get backup_history_pinError;
+
+  /// No description provided for @backup_history_preMigrationSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Pre-migration backup - {size}'**
+  String backup_history_preMigrationSubtitle(String size);
+
   /// No description provided for @backup_import_invalidFile.
   ///
   /// In en, this message translates to:
@@ -2393,6 +2417,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Close'**
   String get common_action_close;
+
+  /// Continue button used in confirmation dialogs
+  ///
+  /// In en, this message translates to:
+  /// **'Continue'**
+  String get common_action_continue;
 
   /// Generic delete action
   ///
@@ -10659,7 +10689,7 @@ abstract class AppLocalizations {
   /// No description provided for @divers_detail_deleteDialogContent.
   ///
   /// In en, this message translates to:
-  /// **'Are you sure you want to delete {name}? All associated dive logs will be unassigned.'**
+  /// **'This will permanently delete {name} and all associated data including dive logs, dive computers, equipment, certifications, and sites.'**
   String divers_detail_deleteDialogContent(Object name);
 
   /// No description provided for @divers_detail_deleteDialogTitle.
@@ -11225,6 +11255,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Total Divers'**
   String get divers_summary_totalDiversLabel;
+
+  /// No description provided for @divers_detail_deleteDialogConfirmHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Type \"Delete {name}\" to confirm'**
+  String divers_detail_deleteDialogConfirmHint(String name);
+
+  /// No description provided for @divers_detail_deleteDialogConfirmText.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete {name}'**
+  String divers_detail_deleteDialogConfirmText(String name);
 
   /// No description provided for @enum_altitudeGroup_extreme.
   ///
@@ -19371,6 +19413,18 @@ abstract class AppLocalizations {
   /// **'Marine Life'**
   String get statistics_category_marineLife_title;
 
+  /// Title for the Overview entry in the Statistics category list
+  ///
+  /// In en, this message translates to:
+  /// **'Overview'**
+  String get statistics_category_overview_title;
+
+  /// Subtitle for the Overview entry in the Statistics category list
+  ///
+  /// In en, this message translates to:
+  /// **'Totals, records, and breakdowns at a glance'**
+  String get statistics_category_overview_subtitle;
+
   /// No description provided for @statistics_category_profile_subtitle.
   ///
   /// In en, this message translates to:
@@ -23657,11 +23711,47 @@ abstract class AppLocalizations {
   /// **'Select File'**
   String get universalImport_action_selectFile;
 
+  /// Bulk action button that consolidates all matched pending duplicate dives
+  ///
+  /// In en, this message translates to:
+  /// **'Consolidate matched ({count})'**
+  String universalImport_bulk_consolidateMatched(int count);
+
+  /// Bulk action button that imports all items in the current tab
+  ///
+  /// In en, this message translates to:
+  /// **'Import all ({count})'**
+  String universalImport_bulk_importAll(int count);
+
+  /// Bulk action button that imports all pending duplicate items as new dives
+  ///
+  /// In en, this message translates to:
+  /// **'Import all as new ({count})'**
+  String universalImport_bulk_importAllAsNew(int count);
+
+  /// Bulk action button that skips all items in the current tab
+  ///
+  /// In en, this message translates to:
+  /// **'Skip all ({count})'**
+  String universalImport_bulk_skipAll(int count);
+
+  /// Bulk action button to replace source data for all pending duplicates
+  ///
+  /// In en, this message translates to:
+  /// **'Replace all ({count})'**
+  String universalImport_bulk_replaceSourceAll(int count);
+
   /// Description text on the file selection step listing supported formats
   ///
   /// In en, this message translates to:
   /// **'Select a dive log file to import. Supported formats include CSV, UDDF, Subsurface XML, Garmin FIT, and Shearwater Cloud databases.'**
   String get universalImport_description_supportedFormats;
+
+  /// Label on the expansion button for a pending duplicate dive row (replaces 'Compare dives')
+  ///
+  /// In en, this message translates to:
+  /// **'Decide'**
+  String get universalImport_dive_decideAction;
 
   /// Error message shown when the detected file format is not supported
   ///
@@ -23680,6 +23770,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{mapped} of {total} columns mapped'**
   String universalImport_label_columnsMapped(Object mapped, Object total);
+
+  /// Short action label meaning the incoming duplicate should be merged into the existing record (used on snackbars and bulk buttons)
+  ///
+  /// In en, this message translates to:
+  /// **'Consolidate'**
+  String get universalImport_label_consolidate;
 
   /// Button label shown while detecting the file format
   ///
@@ -23704,6 +23800,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{count} duplicates found and auto-deselected.'**
   String universalImport_label_duplicatesFound(Object count);
+
+  /// Short action label meaning the incoming duplicate should be imported as a brand-new entry (used on snackbars and bulk buttons)
+  ///
+  /// In en, this message translates to:
+  /// **'Import as New'**
+  String get universalImport_label_importAsNew;
 
   /// Headline text shown on the import summary step
   ///
@@ -23789,6 +23891,36 @@ abstract class AppLocalizations {
   /// **'{selected} of {total} selected'**
   String universalImport_label_xOfYSelected(Object selected, Object total);
 
+  /// Prompt shown above the action buttons on an expanded pending duplicate row, telling the user to pick an action
+  ///
+  /// In en, this message translates to:
+  /// **'Choose an action'**
+  String get universalImport_pending_chooseAction;
+
+  /// Hint text telling the user how many pending duplicates still need a decision before Import can proceed
+  ///
+  /// In en, this message translates to:
+  /// **'{count} duplicate(s) need a decision'**
+  String universalImport_pending_gateHint(int count);
+
+  /// Pill/badge shown on a pending duplicate row indicating the user must pick an action
+  ///
+  /// In en, this message translates to:
+  /// **'Needs decision'**
+  String get universalImport_pending_needsDecision;
+
+  /// Action label jumping the user to the pending duplicate that needs review
+  ///
+  /// In en, this message translates to:
+  /// **'Review'**
+  String get universalImport_pending_reviewAction;
+
+  /// Row hint shown under an undecided pending duplicate prompting the user to tap the Decide button
+  ///
+  /// In en, this message translates to:
+  /// **'Tap Decide to choose'**
+  String get universalImport_rowHint_tapCompareToDecide;
+
   /// Accessibility label for entity type selection count
   ///
   /// In en, this message translates to:
@@ -23816,6 +23948,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{count} items selected for import'**
   String universalImport_semantics_itemsSelected(Object count);
+
+  /// Screen reader label for the 'Needs decision' pill on a pending duplicate row
+  ///
+  /// In en, this message translates to:
+  /// **'Suspected duplicate, needs decision'**
+  String get universalImport_semantics_needsDecision;
 
   /// Accessibility label for the possible duplicate badge
   ///
@@ -23847,6 +23985,18 @@ abstract class AppLocalizations {
   /// **'Toggle selection for {name}'**
   String universalImport_semantics_toggleSelection(Object name);
 
+  /// Snackbar shown after a bulk action resolves multiple pending duplicates, confirming the count and action
+  ///
+  /// In en, this message translates to:
+  /// **'{count} marked as {action}'**
+  String universalImport_snackbar_bulkMarkedAs(int count, String action);
+
+  /// Snackbar shown after a single duplicate is resolved, confirming the chosen action
+  ///
+  /// In en, this message translates to:
+  /// **'Marked as {action}'**
+  String universalImport_snackbar_markedAs(String action);
+
   /// Step indicator label for the import step
   ///
   /// In en, this message translates to:
@@ -23870,6 +24020,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Select'**
   String get universalImport_step_select;
+
+  /// Addendum to the pending duplicates summary banner clarifying that each needs a decision before import
+  ///
+  /// In en, this message translates to:
+  /// **'Each needs a decision before importing.'**
+  String get universalImport_summary_decidesRequired;
 
   /// Title for the universal import wizard page and file selection heading
   ///
@@ -24032,6 +24188,162 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'This certifies that'**
   String get certifications_certificate_thisCertifies;
+
+  /// No description provided for @diveComputer_connectionType_ble.
+  ///
+  /// In en, this message translates to:
+  /// **'Bluetooth LE'**
+  String get diveComputer_connectionType_ble;
+
+  /// No description provided for @diveComputer_connectionType_bluetooth.
+  ///
+  /// In en, this message translates to:
+  /// **'Bluetooth'**
+  String get diveComputer_connectionType_bluetooth;
+
+  /// No description provided for @diveComputer_connectionType_infrared.
+  ///
+  /// In en, this message translates to:
+  /// **'Infrared'**
+  String get diveComputer_connectionType_infrared;
+
+  /// No description provided for @diveComputer_connectionType_unknown.
+  ///
+  /// In en, this message translates to:
+  /// **'Unknown'**
+  String get diveComputer_connectionType_unknown;
+
+  /// No description provided for @diveComputer_connectionType_usb.
+  ///
+  /// In en, this message translates to:
+  /// **'USB'**
+  String get diveComputer_connectionType_usb;
+
+  /// No description provided for @diveComputer_connectionType_wifi.
+  ///
+  /// In en, this message translates to:
+  /// **'Wi-Fi'**
+  String get diveComputer_connectionType_wifi;
+
+  /// No description provided for @diveComputer_detail_cannotFilterNoSerial.
+  ///
+  /// In en, this message translates to:
+  /// **'Cannot filter: no serial number for this computer.'**
+  String get diveComputer_detail_cannotFilterNoSerial;
+
+  /// No description provided for @diveComputer_detail_deleteDialogContent.
+  ///
+  /// In en, this message translates to:
+  /// **'Are you sure you want to remove \"{name}\"? This will not delete any dives that were imported from this computer.'**
+  String diveComputer_detail_deleteDialogContent(String name);
+
+  /// No description provided for @diveComputer_detail_deleteDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete Computer?'**
+  String get diveComputer_detail_deleteDialogTitle;
+
+  /// No description provided for @diveComputer_detail_divesImported.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives Imported'**
+  String get diveComputer_detail_divesImported;
+
+  /// No description provided for @diveComputer_detail_downloadDivesButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Download Dives'**
+  String get diveComputer_detail_downloadDivesButton;
+
+  /// No description provided for @diveComputer_detail_editDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit Computer'**
+  String get diveComputer_detail_editDialogTitle;
+
+  /// No description provided for @diveComputer_detail_editNameHint.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g., My Perdix'**
+  String get diveComputer_detail_editNameHint;
+
+  /// No description provided for @diveComputer_detail_editNotesHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Optional notes'**
+  String get diveComputer_detail_editNotesHint;
+
+  /// No description provided for @diveComputer_detail_labelConnection.
+  ///
+  /// In en, this message translates to:
+  /// **'Connection'**
+  String get diveComputer_detail_labelConnection;
+
+  /// No description provided for @diveComputer_detail_labelManufacturer.
+  ///
+  /// In en, this message translates to:
+  /// **'Manufacturer'**
+  String get diveComputer_detail_labelManufacturer;
+
+  /// No description provided for @diveComputer_detail_labelModel.
+  ///
+  /// In en, this message translates to:
+  /// **'Model'**
+  String get diveComputer_detail_labelModel;
+
+  /// No description provided for @diveComputer_detail_labelName.
+  ///
+  /// In en, this message translates to:
+  /// **'Name'**
+  String get diveComputer_detail_labelName;
+
+  /// No description provided for @diveComputer_detail_lastDownload.
+  ///
+  /// In en, this message translates to:
+  /// **'Last Download'**
+  String get diveComputer_detail_lastDownload;
+
+  /// No description provided for @diveComputer_detail_notesTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Notes'**
+  String get diveComputer_detail_notesTitle;
+
+  /// No description provided for @diveComputer_detail_reimportAllButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-import all dives'**
+  String get diveComputer_detail_reimportAllButton;
+
+  /// No description provided for @diveComputer_detail_reimportDialogBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Download every dive from {computerName} and review them against your log. This may take several minutes.'**
+  String diveComputer_detail_reimportDialogBody(String computerName);
+
+  /// No description provided for @diveComputer_detail_reimportDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-import all dives?'**
+  String get diveComputer_detail_reimportDialogTitle;
+
+  /// No description provided for @diveComputer_detail_statisticsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Statistics'**
+  String get diveComputer_detail_statisticsTitle;
+
+  /// No description provided for @diveComputer_detail_unknown.
+  ///
+  /// In en, this message translates to:
+  /// **'Unknown'**
+  String get diveComputer_detail_unknown;
+
+  /// No description provided for @diveComputer_detail_viewDivesButton.
+  ///
+  /// In en, this message translates to:
+  /// **'View Dives from This Computer'**
+  String get diveComputer_detail_viewDivesButton;
 
   /// No description provided for @diveComputer_discovery_chooseDifferentDevice.
   ///
@@ -24206,6 +24518,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Search by manufacturer or model...'**
   String get diveComputer_discovery_usbSearchHint;
+
+  /// No description provided for @diveComputer_downloadExit_content.
+  ///
+  /// In en, this message translates to:
+  /// **'Leaving will cancel the current download from your dive computer. Are you sure?'**
+  String get diveComputer_downloadExit_content;
+
+  /// No description provided for @diveComputer_downloadExit_leave.
+  ///
+  /// In en, this message translates to:
+  /// **'Leave'**
+  String get diveComputer_downloadExit_leave;
+
+  /// No description provided for @diveComputer_downloadExit_stay.
+  ///
+  /// In en, this message translates to:
+  /// **'Stay'**
+  String get diveComputer_downloadExit_stay;
+
+  /// No description provided for @diveComputer_downloadExit_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Download in Progress'**
+  String get diveComputer_downloadExit_title;
 
   /// No description provided for @diveComputer_downloadStep_andMoreDives.
   ///
@@ -24450,6 +24786,12 @@ abstract class AppLocalizations {
   /// **'{percent}%'**
   String diveComputer_download_progressPercent(Object percent);
 
+  /// No description provided for @diveComputer_download_reimportHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Looking for older or deleted dives? Re-import all'**
+  String get diveComputer_download_reimportHint;
+
   /// No description provided for @diveComputer_download_retry.
   ///
   /// In en, this message translates to:
@@ -24629,6 +24971,150 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Dive Computers'**
   String get diveComputer_list_title;
+
+  /// No description provided for @diveComputer_pinCode_instructions.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the code displayed on your dive computer.'**
+  String get diveComputer_pinCode_instructions;
+
+  /// No description provided for @diveComputer_pinCode_label.
+  ///
+  /// In en, this message translates to:
+  /// **'PIN Code'**
+  String get diveComputer_pinCode_label;
+
+  /// No description provided for @diveComputer_pinCode_submit.
+  ///
+  /// In en, this message translates to:
+  /// **'Submit'**
+  String get diveComputer_pinCode_submit;
+
+  /// No description provided for @diveComputer_pinCode_title.
+  ///
+  /// In en, this message translates to:
+  /// **'PIN Code Required'**
+  String get diveComputer_pinCode_title;
+
+  /// No description provided for @diveComputer_pinEntry_connectButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Connect'**
+  String get diveComputer_pinEntry_connectButton;
+
+  /// No description provided for @diveComputer_pinEntry_helperText.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the 4-6 digit PIN shown on your device'**
+  String get diveComputer_pinEntry_helperText;
+
+  /// No description provided for @diveComputer_pinEntry_instructionsGeneric.
+  ///
+  /// In en, this message translates to:
+  /// **'Check your dive computer display for the PIN code.'**
+  String get diveComputer_pinEntry_instructionsGeneric;
+
+  /// No description provided for @diveComputer_pinEntry_instructionsWithDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Check your {deviceName} display for the PIN code.'**
+  String diveComputer_pinEntry_instructionsWithDevice(String deviceName);
+
+  /// No description provided for @diveComputer_pinEntry_semanticLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'PIN code entry, 4 to 6 digits'**
+  String get diveComputer_pinEntry_semanticLabel;
+
+  /// No description provided for @diveComputer_pinEntry_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter PIN Code'**
+  String get diveComputer_pinEntry_title;
+
+  /// No description provided for @diveComputer_scan_bluetoothSemanticLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Bluetooth device: {name}'**
+  String diveComputer_scan_bluetoothSemanticLabel(String name);
+
+  /// No description provided for @diveComputer_scan_emptyStateInstructions.
+  ///
+  /// In en, this message translates to:
+  /// **'Make sure your dive computer is:\n• Turned on\n• In Bluetooth pairing mode\n• Close to your device'**
+  String get diveComputer_scan_emptyStateInstructions;
+
+  /// No description provided for @diveComputer_scan_knownBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'Known'**
+  String get diveComputer_scan_knownBadge;
+
+  /// No description provided for @diveComputer_scan_lookingForDevicesTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Looking for Devices'**
+  String get diveComputer_scan_lookingForDevicesTitle;
+
+  /// No description provided for @diveComputer_scan_noUsbDevicesAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'No USB devices available'**
+  String get diveComputer_scan_noUsbDevicesAvailable;
+
+  /// No description provided for @diveComputer_scan_retry.
+  ///
+  /// In en, this message translates to:
+  /// **'Retry'**
+  String get diveComputer_scan_retry;
+
+  /// No description provided for @diveComputer_scan_scanAgain.
+  ///
+  /// In en, this message translates to:
+  /// **'Scan Again'**
+  String get diveComputer_scan_scanAgain;
+
+  /// No description provided for @diveComputer_scan_scanningStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Scanning for dive computers...'**
+  String get diveComputer_scan_scanningStatus;
+
+  /// No description provided for @diveComputer_scan_stopScanning.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop Scanning'**
+  String get diveComputer_scan_stopScanning;
+
+  /// No description provided for @diveComputer_scan_supportedBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'Supported'**
+  String get diveComputer_scan_supportedBadge;
+
+  /// No description provided for @diveComputer_scan_tabBluetooth.
+  ///
+  /// In en, this message translates to:
+  /// **'Bluetooth'**
+  String get diveComputer_scan_tabBluetooth;
+
+  /// No description provided for @diveComputer_scan_tabUsb.
+  ///
+  /// In en, this message translates to:
+  /// **'USB Cable'**
+  String get diveComputer_scan_tabUsb;
+
+  /// No description provided for @diveComputer_scan_usbCableLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'USB Cable'**
+  String get diveComputer_scan_usbCableLabel;
+
+  /// No description provided for @diveComputer_scan_usbSemanticLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'USB device: {model}'**
+  String diveComputer_scan_usbSemanticLabel(String model);
 
   /// No description provided for @diveComputer_summary_diveComputer.
   ///
@@ -26923,6 +27409,160 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Satellite'**
   String get settings_appearance_mapStyle_esriSatellite;
+
+  /// Generic re-parse action label
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse'**
+  String get common_action_reparse;
+
+  /// Button to re-parse all dives from a computer
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse all dives'**
+  String get diveComputer_detail_reparseAllButton;
+
+  /// Dialog title for batch re-parse confirmation
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse all dives'**
+  String get diveComputer_detail_reparseAllTitle;
+
+  /// No description provided for @diveComputer_detail_reparseAllMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-run the dive parser on {count} dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.'**
+  String diveComputer_detail_reparseAllMessage(int count);
+
+  /// No description provided for @diveComputer_detail_reparseAllProgress.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parsing {count} dives...'**
+  String diveComputer_detail_reparseAllProgress(int count);
+
+  /// No description provided for @diveComputer_detail_reparseAllSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parsed {count} dives successfully'**
+  String diveComputer_detail_reparseAllSuccess(int count);
+
+  /// No description provided for @diveComputer_detail_reparseAllPartial.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parsed {succeeded} of {total} dives. {failed} failed.'**
+  String diveComputer_detail_reparseAllPartial(
+    int succeeded,
+    int total,
+    int failed,
+  );
+
+  /// No description provided for @diveComputer_detail_reparseRawDataCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} dives with raw data'**
+  String diveComputer_detail_reparseRawDataCount(int count);
+
+  /// No description provided for @diveComputer_detail_reparseRawDataCountWithout.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} dives with raw data ({without} without)'**
+  String diveComputer_detail_reparseRawDataCountWithout(int count, int without);
+
+  /// Menu item to re-parse raw dive data
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse raw data'**
+  String get diveLog_detail_menu_reparseRawData;
+
+  /// Snackbar message after successful re-parse
+  ///
+  /// In en, this message translates to:
+  /// **'Dive re-parsed successfully'**
+  String get diveLog_detail_reparseSuccess;
+
+  /// No description provided for @diveLog_detail_reparseFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse failed: {error}'**
+  String diveLog_detail_reparseFailed(String error);
+
+  /// Label for the replace source duplicate action
+  ///
+  /// In en, this message translates to:
+  /// **'Replace Source'**
+  String get universalImport_label_replaceSource;
+
+  /// Subtitle for the replace source button in the duplicate review step
+  ///
+  /// In en, this message translates to:
+  /// **'Update from same computer'**
+  String get universalImport_label_replaceSourceSubtitle;
+
+  /// Title for the import options bottom sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Import Options'**
+  String get universalImport_title_importOptions;
+
+  /// Label for the import options button
+  ///
+  /// In en, this message translates to:
+  /// **'Options'**
+  String get universalImport_label_options;
+
+  /// Switch title for retaining dive numbers from source
+  ///
+  /// In en, this message translates to:
+  /// **'Retain source dive numbers'**
+  String get universalImport_label_retainDiveNumbers;
+
+  /// Switch subtitle for retaining dive numbers
+  ///
+  /// In en, this message translates to:
+  /// **'Use dive numbers from the imported file instead of auto-assigning'**
+  String get universalImport_label_retainDiveNumbersSubtitle;
+
+  /// Title shown when dives are successfully imported
+  ///
+  /// In en, this message translates to:
+  /// **'Successfully Imported'**
+  String get universalImport_title_successImported;
+
+  /// Title shown when existing dives are successfully updated
+  ///
+  /// In en, this message translates to:
+  /// **'Successfully Updated'**
+  String get universalImport_title_successUpdated;
+
+  /// Title shown when dives are successfully consolidated
+  ///
+  /// In en, this message translates to:
+  /// **'Successfully Consolidated'**
+  String get universalImport_title_successConsolidated;
+
+  /// Title shown when no dives were imported
+  ///
+  /// In en, this message translates to:
+  /// **'No Dives Imported'**
+  String get universalImport_title_noDivesImported;
+
+  /// Message shown when all dives were skipped during import
+  ///
+  /// In en, this message translates to:
+  /// **'All dives were skipped.'**
+  String get universalImport_label_allDivesSkipped;
+
+  /// Label for the count of dives whose source data was replaced
+  ///
+  /// In en, this message translates to:
+  /// **'Replaced source data'**
+  String get universalImport_label_replacedSourceData;
+
+  /// Label for the count of consolidated dives in summary
+  ///
+  /// In en, this message translates to:
+  /// **'Consolidated'**
+  String get universalImport_label_consolidated;
 }
 
 class _AppLocalizationsDelegate

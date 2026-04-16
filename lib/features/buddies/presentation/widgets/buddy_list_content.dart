@@ -132,6 +132,8 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
       return;
     }
 
+    ref.read(highlightedBuddyIdProvider.notifier).state = buddy.id;
+
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
       widget.onItemSelected!(buddy.id);
@@ -299,23 +301,26 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
     }
 
     try {
-      if (!await FlutterContacts.requestPermission(readonly: true)) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                context.l10n.buddies_message_contactPermissionRequired,
+      if (!await FlutterContacts.permissions.has(PermissionType.read)) {
+        await FlutterContacts.permissions.request(PermissionType.read);
+        if (!await FlutterContacts.permissions.has(PermissionType.read)) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  context.l10n.buddies_message_contactPermissionRequired,
+                ),
               ),
-            ),
-          );
+            );
+          }
+          return;
         }
-        return;
       }
 
-      final contact = await FlutterContacts.openExternalPick();
-      if (contact == null) return;
+      final contactId = await FlutterContacts.native.showPicker();
+      if (contactId == null) return;
 
-      final fullContact = await FlutterContacts.getContact(contact.id);
+      final fullContact = await FlutterContacts.get(contactId);
       if (fullContact == null) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -751,7 +756,9 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
         itemBuilder: (context, index) {
           final buddyWithCount = buddies[index];
           final buddy = buddyWithCount.buddy;
-          final isSelected = widget.selectedId == buddy.id;
+          final highlightedId = ref.watch(highlightedBuddyIdProvider);
+          final isHighlighted = highlightedId == buddy.id;
+          final isSelected = widget.selectedId == buddy.id || isHighlighted;
           final isChecked = _selectedIds.contains(buddy.id);
           final viewMode = ref.watch(buddyListViewModeProvider);
           return switch (viewMode) {
@@ -775,8 +782,8 @@ class _BuddyListContentState extends ConsumerState<BuddyListContent> {
               child: DenseBuddyListTile(
                 buddy: buddy,
                 diveCount: buddyWithCount.diveCount,
-                isSelected: isSelected,
                 isChecked: isChecked,
+                isHighlighted: !_isSelectionMode && isHighlighted,
                 isSelectionMode: _isSelectionMode,
                 onTap: () => _handleItemTap(buddy),
               ),

@@ -234,6 +234,21 @@ class AppLocalizationsIt extends AppLocalizations {
   }
 
   @override
+  String get backup_history_pinAction_pin => 'Fissa backup';
+
+  @override
+  String get backup_history_pinAction_unpin => 'Rimuovi fissaggio backup';
+
+  @override
+  String get backup_history_pinError =>
+      'Impossibile aggiornare lo stato di fissaggio.';
+
+  @override
+  String backup_history_preMigrationSubtitle(String size) {
+    return 'Backup pre-migrazione - $size';
+  }
+
+  @override
   String get backup_import_invalidFile =>
       'Questo file non sembra essere un backup Submersion valido';
 
@@ -1367,6 +1382,9 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get common_action_close => 'Chiudi';
+
+  @override
+  String get common_action_continue => 'Continue';
 
   @override
   String get common_action_delete => 'Elimina';
@@ -6262,7 +6280,7 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogContent(Object name) {
-    return 'Sei sicuro di voler eliminare $name? Tutti i registri immersione associati saranno disassociati.';
+    return 'This will permanently delete $name and all associated data including dive logs, dive computers, equipment, certifications, and sites.';
   }
 
   @override
@@ -6574,6 +6592,16 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get divers_summary_totalDiversLabel => 'Subacquei totali';
+
+  @override
+  String divers_detail_deleteDialogConfirmHint(String name) {
+    return 'Type \"Delete $name\" to confirm';
+  }
+
+  @override
+  String divers_detail_deleteDialogConfirmText(String name) {
+    return 'Delete $name';
+  }
 
   @override
   String get enum_altitudeGroup_extreme => 'Altitudine estrema';
@@ -11328,6 +11356,13 @@ class AppLocalizationsIt extends AppLocalizations {
   String get statistics_category_marineLife_title => 'Vita marina';
 
   @override
+  String get statistics_category_overview_title => 'Overview';
+
+  @override
+  String get statistics_category_overview_subtitle =>
+      'Totals, records, and breakdowns at a glance';
+
+  @override
   String get statistics_category_profile_subtitle =>
       'Velocita di risalita e deco';
 
@@ -13909,8 +13944,36 @@ class AppLocalizationsIt extends AppLocalizations {
   String get universalImport_action_selectFile => 'Seleziona File';
 
   @override
+  String universalImport_bulk_consolidateMatched(int count) {
+    return 'Consolida corrispondenti ($count)';
+  }
+
+  @override
+  String universalImport_bulk_importAll(int count) {
+    return 'Importa tutto ($count)';
+  }
+
+  @override
+  String universalImport_bulk_importAllAsNew(int count) {
+    return 'Importa tutto come nuovo ($count)';
+  }
+
+  @override
+  String universalImport_bulk_skipAll(int count) {
+    return 'Salta tutto ($count)';
+  }
+
+  @override
+  String universalImport_bulk_replaceSourceAll(int count) {
+    return 'Replace all ($count)';
+  }
+
+  @override
   String get universalImport_description_supportedFormats =>
       'Seleziona un file di registro immersioni da importare. I formati supportati includono CSV, UDDF, Subsurface XML e Garmin FIT.';
+
+  @override
+  String get universalImport_dive_decideAction => 'Decidi';
 
   @override
   String get universalImport_error_unsupportedFormat =>
@@ -13923,6 +13986,9 @@ class AppLocalizationsIt extends AppLocalizations {
   String universalImport_label_columnsMapped(Object mapped, Object total) {
     return '$mapped di $total colonne mappate';
   }
+
+  @override
+  String get universalImport_label_consolidate => 'Consolida';
 
   @override
   String get universalImport_label_detecting => 'Rilevamento...';
@@ -13939,6 +14005,9 @@ class AppLocalizationsIt extends AppLocalizations {
   String universalImport_label_duplicatesFound(Object count) {
     return '$count duplicati trovati e deselezionati automaticamente.';
   }
+
+  @override
+  String get universalImport_label_importAsNew => 'Importa come nuovo';
 
   @override
   String get universalImport_label_importComplete => 'Importazione Completata';
@@ -13996,6 +14065,24 @@ class AppLocalizationsIt extends AppLocalizations {
   }
 
   @override
+  String get universalImport_pending_chooseAction => 'Scegli un\'azione';
+
+  @override
+  String universalImport_pending_gateHint(int count) {
+    return '$count duplicato/i richiedono una decisione';
+  }
+
+  @override
+  String get universalImport_pending_needsDecision => 'Decisione richiesta';
+
+  @override
+  String get universalImport_pending_reviewAction => 'Rivedi';
+
+  @override
+  String get universalImport_rowHint_tapCompareToDecide =>
+      'Tocca Decidi per scegliere';
+
+  @override
   String universalImport_semantics_entitySelection(
     Object selected,
     Object total,
@@ -14018,6 +14105,10 @@ class AppLocalizationsIt extends AppLocalizations {
   String universalImport_semantics_itemsSelected(Object count) {
     return '$count elementi selezionati per l\'importazione';
   }
+
+  @override
+  String get universalImport_semantics_needsDecision =>
+      'Probabile duplicato, decisione richiesta';
 
   @override
   String get universalImport_semantics_possibleDuplicate =>
@@ -14043,6 +14134,16 @@ class AppLocalizationsIt extends AppLocalizations {
   }
 
   @override
+  String universalImport_snackbar_bulkMarkedAs(int count, String action) {
+    return '$count contrassegnati come $action';
+  }
+
+  @override
+  String universalImport_snackbar_markedAs(String action) {
+    return 'Contrassegnato come $action';
+  }
+
+  @override
   String get universalImport_step_import => 'Importa';
 
   @override
@@ -14053,6 +14154,10 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get universalImport_step_select => 'Seleziona';
+
+  @override
+  String get universalImport_summary_decidesRequired =>
+      'Ognuno richiede una decisione prima dell\'importazione.';
 
   @override
   String get universalImport_title => 'Importa Dati';
@@ -14159,6 +14264,90 @@ class AppLocalizationsIt extends AppLocalizations {
   String get certifications_certificate_thisCertifies => 'Si certifica che';
 
   @override
+  String get diveComputer_connectionType_ble => 'Bluetooth LE';
+
+  @override
+  String get diveComputer_connectionType_bluetooth => 'Bluetooth';
+
+  @override
+  String get diveComputer_connectionType_infrared => 'Infrarossi';
+
+  @override
+  String get diveComputer_connectionType_unknown => 'Sconosciuto';
+
+  @override
+  String get diveComputer_connectionType_usb => 'USB';
+
+  @override
+  String get diveComputer_connectionType_wifi => 'Wi-Fi';
+
+  @override
+  String get diveComputer_detail_cannotFilterNoSerial =>
+      'Impossibile filtrare: nessun numero di serie per questo computer.';
+
+  @override
+  String diveComputer_detail_deleteDialogContent(String name) {
+    return 'Vuoi davvero rimuovere \"$name\"? Le immersioni importate da questo computer non verranno eliminate.';
+  }
+
+  @override
+  String get diveComputer_detail_deleteDialogTitle => 'Eliminare il computer?';
+
+  @override
+  String get diveComputer_detail_divesImported => 'Immersioni importate';
+
+  @override
+  String get diveComputer_detail_downloadDivesButton => 'Scarica immersioni';
+
+  @override
+  String get diveComputer_detail_editDialogTitle => 'Modifica computer';
+
+  @override
+  String get diveComputer_detail_editNameHint => 'Ad esempio, Il mio Perdix';
+
+  @override
+  String get diveComputer_detail_editNotesHint => 'Note facoltative';
+
+  @override
+  String get diveComputer_detail_labelConnection => 'Connessione';
+
+  @override
+  String get diveComputer_detail_labelManufacturer => 'Produttore';
+
+  @override
+  String get diveComputer_detail_labelModel => 'Modello';
+
+  @override
+  String get diveComputer_detail_labelName => 'Nome';
+
+  @override
+  String get diveComputer_detail_lastDownload => 'Ultimo download';
+
+  @override
+  String get diveComputer_detail_notesTitle => 'Note';
+
+  @override
+  String get diveComputer_detail_reimportAllButton => 'Re-import all dives';
+
+  @override
+  String diveComputer_detail_reimportDialogBody(String computerName) {
+    return 'Download every dive from $computerName and review them against your log. This may take several minutes.';
+  }
+
+  @override
+  String get diveComputer_detail_reimportDialogTitle => 'Re-import all dives?';
+
+  @override
+  String get diveComputer_detail_statisticsTitle => 'Statistiche';
+
+  @override
+  String get diveComputer_detail_unknown => 'Sconosciuto';
+
+  @override
+  String get diveComputer_detail_viewDivesButton =>
+      'Visualizza immersioni da questo computer';
+
+  @override
   String get diveComputer_discovery_chooseDifferentDevice =>
       'Scegli un altro dispositivo';
 
@@ -14260,6 +14449,19 @@ class AppLocalizationsIt extends AppLocalizations {
   @override
   String get diveComputer_discovery_usbSearchHint =>
       'Cerca per produttore o modello...';
+
+  @override
+  String get diveComputer_downloadExit_content =>
+      'Uscendo verra annullato il download in corso dal computer da sub. Sei sicuro?';
+
+  @override
+  String get diveComputer_downloadExit_leave => 'Esci';
+
+  @override
+  String get diveComputer_downloadExit_stay => 'Rimani';
+
+  @override
+  String get diveComputer_downloadExit_title => 'Download in corso';
 
   @override
   String diveComputer_downloadStep_andMoreDives(Object count) {
@@ -14422,6 +14624,10 @@ class AppLocalizationsIt extends AppLocalizations {
   }
 
   @override
+  String get diveComputer_download_reimportHint =>
+      'Looking for older or deleted dives? Re-import all';
+
+  @override
   String get diveComputer_download_retry => 'Riprova';
 
   @override
@@ -14528,6 +14734,91 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get diveComputer_list_title => 'Computer subacquei';
+
+  @override
+  String get diveComputer_pinCode_instructions =>
+      'Inserisci il codice mostrato sul tuo computer da sub.';
+
+  @override
+  String get diveComputer_pinCode_label => 'Codice PIN';
+
+  @override
+  String get diveComputer_pinCode_submit => 'Invia';
+
+  @override
+  String get diveComputer_pinCode_title => 'Codice PIN richiesto';
+
+  @override
+  String get diveComputer_pinEntry_connectButton => 'Connetti';
+
+  @override
+  String get diveComputer_pinEntry_helperText =>
+      'Inserisci il PIN di 4-6 cifre mostrato sul tuo dispositivo';
+
+  @override
+  String get diveComputer_pinEntry_instructionsGeneric =>
+      'Controlla il display del tuo computer da sub per il codice PIN.';
+
+  @override
+  String diveComputer_pinEntry_instructionsWithDevice(String deviceName) {
+    return 'Controlla il display del tuo $deviceName per il codice PIN.';
+  }
+
+  @override
+  String get diveComputer_pinEntry_semanticLabel =>
+      'Inserimento codice PIN, da 4 a 6 cifre';
+
+  @override
+  String get diveComputer_pinEntry_title => 'Inserisci codice PIN';
+
+  @override
+  String diveComputer_scan_bluetoothSemanticLabel(String name) {
+    return 'Dispositivo Bluetooth: $name';
+  }
+
+  @override
+  String get diveComputer_scan_emptyStateInstructions =>
+      'Assicurati che il tuo computer da sub sia:\n• Acceso\n• In modalita di abbinamento Bluetooth\n• Vicino al tuo dispositivo';
+
+  @override
+  String get diveComputer_scan_knownBadge => 'Conosciuto';
+
+  @override
+  String get diveComputer_scan_lookingForDevicesTitle => 'Ricerca dispositivi';
+
+  @override
+  String get diveComputer_scan_noUsbDevicesAvailable =>
+      'Nessun dispositivo USB disponibile';
+
+  @override
+  String get diveComputer_scan_retry => 'Riprova';
+
+  @override
+  String get diveComputer_scan_scanAgain => 'Ricerca di nuovo';
+
+  @override
+  String get diveComputer_scan_scanningStatus =>
+      'Ricerca di computer da sub...';
+
+  @override
+  String get diveComputer_scan_stopScanning => 'Interrompi ricerca';
+
+  @override
+  String get diveComputer_scan_supportedBadge => 'Supportato';
+
+  @override
+  String get diveComputer_scan_tabBluetooth => 'Bluetooth';
+
+  @override
+  String get diveComputer_scan_tabUsb => 'Cavo USB';
+
+  @override
+  String get diveComputer_scan_usbCableLabel => 'Cavo USB';
+
+  @override
+  String diveComputer_scan_usbSemanticLabel(String model) {
+    return 'Dispositivo USB: $model';
+  }
 
   @override
   String get diveComputer_summary_diveComputer => 'computer subacqueo';
@@ -15926,4 +16217,102 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
+  String get common_action_reparse => 'Re-parse';
+
+  @override
+  String get diveComputer_detail_reparseAllButton => 'Re-parse all dives';
+
+  @override
+  String get diveComputer_detail_reparseAllTitle => 'Re-parse all dives';
+
+  @override
+  String diveComputer_detail_reparseAllMessage(int count) {
+    return 'Re-run the dive parser on $count dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.';
+  }
+
+  @override
+  String diveComputer_detail_reparseAllProgress(int count) {
+    return 'Re-parsing $count dives...';
+  }
+
+  @override
+  String diveComputer_detail_reparseAllSuccess(int count) {
+    return 'Re-parsed $count dives successfully';
+  }
+
+  @override
+  String diveComputer_detail_reparseAllPartial(
+    int succeeded,
+    int total,
+    int failed,
+  ) {
+    return 'Re-parsed $succeeded of $total dives. $failed failed.';
+  }
+
+  @override
+  String diveComputer_detail_reparseRawDataCount(int count) {
+    return '$count dives with raw data';
+  }
+
+  @override
+  String diveComputer_detail_reparseRawDataCountWithout(
+    int count,
+    int without,
+  ) {
+    return '$count dives with raw data ($without without)';
+  }
+
+  @override
+  String get diveLog_detail_menu_reparseRawData => 'Re-parse raw data';
+
+  @override
+  String get diveLog_detail_reparseSuccess => 'Dive re-parsed successfully';
+
+  @override
+  String diveLog_detail_reparseFailed(String error) {
+    return 'Re-parse failed: $error';
+  }
+
+  @override
+  String get universalImport_label_replaceSource => 'Replace Source';
+
+  @override
+  String get universalImport_label_replaceSourceSubtitle =>
+      'Update from same computer';
+
+  @override
+  String get universalImport_title_importOptions => 'Import Options';
+
+  @override
+  String get universalImport_label_options => 'Options';
+
+  @override
+  String get universalImport_label_retainDiveNumbers =>
+      'Retain source dive numbers';
+
+  @override
+  String get universalImport_label_retainDiveNumbersSubtitle =>
+      'Use dive numbers from the imported file instead of auto-assigning';
+
+  @override
+  String get universalImport_title_successImported => 'Successfully Imported';
+
+  @override
+  String get universalImport_title_successUpdated => 'Successfully Updated';
+
+  @override
+  String get universalImport_title_successConsolidated =>
+      'Successfully Consolidated';
+
+  @override
+  String get universalImport_title_noDivesImported => 'No Dives Imported';
+
+  @override
+  String get universalImport_label_allDivesSkipped => 'All dives were skipped.';
+
+  @override
+  String get universalImport_label_replacedSourceData => 'Replaced source data';
+
+  @override
+  String get universalImport_label_consolidated => 'Consolidated';
 }

@@ -58,6 +58,7 @@ import 'package:submersion/features/trips/presentation/pages/trip_list_page.dart
 import 'package:submersion/features/trips/presentation/pages/trip_detail_page.dart';
 import 'package:submersion/features/trips/presentation/pages/trip_edit_page.dart';
 import 'package:submersion/features/trips/presentation/pages/trip_gallery_page.dart';
+import 'package:submersion/features/statistics/presentation/pages/statistics_overview_page.dart';
 import 'package:submersion/features/statistics/presentation/pages/statistics_page.dart';
 import 'package:submersion/features/statistics/presentation/pages/records_page.dart';
 import 'package:submersion/features/statistics/presentation/pages/statistics_gas_page.dart';
@@ -644,6 +645,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             ),
             routes: [
               GoRoute(
+                path: 'overview',
+                name: 'statisticsOverview',
+                builder: (context, state) => const StatisticsOverviewPage(),
+              ),
+              GoRoute(
                 path: 'gas',
                 name: 'statisticsGas',
                 builder: (context, state) => const StatisticsGasPage(),
@@ -972,6 +978,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                     builder: (context, state) =>
                         _DiveComputerDownloadWizardRoute(
                           computerId: state.pathParameters['computerId']!,
+                          forceFullDownload: parseForceFullQueryParam(
+                            state.uri.queryParameters['forceFull'],
+                          ),
                         ),
                   ),
                 ],
@@ -1096,9 +1105,13 @@ class _DiveComputerDiscoveryWizardRoute extends ConsumerWidget {
 /// Wrapper that creates a [DiveComputerAdapter] for quick download
 /// from a known (previously paired) computer.
 class _DiveComputerDownloadWizardRoute extends ConsumerWidget {
-  const _DiveComputerDownloadWizardRoute({required this.computerId});
+  const _DiveComputerDownloadWizardRoute({
+    required this.computerId,
+    this.forceFullDownload = false,
+  });
 
   final String computerId;
+  final bool forceFullDownload;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1124,6 +1137,7 @@ class _DiveComputerDownloadWizardRoute extends ConsumerWidget {
             diverId: diverId,
             knownComputer: computer,
             ref: ref,
+            forceFullDownload: forceFullDownload,
           ),
         );
       },
@@ -1146,3 +1160,10 @@ class _UniversalImportWizardRoute extends ConsumerWidget {
     return UnifiedImportWizard(adapter: UniversalAdapter(ref: ref));
   }
 }
+
+/// Parses the `forceFull` URL query parameter for the DC download route.
+///
+/// Strict equality against `'true'` — any other value (null, empty, `'1'`,
+/// case variants, arbitrary strings) returns false. This conservative rule
+/// keeps the URL contract unambiguous for shareability and logging.
+bool parseForceFullQueryParam(String? value) => value == 'true';

@@ -138,6 +138,8 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
       return;
     }
 
+    ref.read(highlightedDiveCenterIdProvider.notifier).state = center.id;
+
     if (widget.onItemSelected != null) {
       _selectionFromList = true;
       widget.onItemSelected!(center.id);
@@ -434,7 +436,9 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
         itemCount: centers.length,
         itemBuilder: (context, index) {
           final center = centers[index];
-          final isSelected = widget.selectedId == center.id;
+          final isSelected =
+              widget.selectedId == center.id ||
+              ref.watch(highlightedDiveCenterIdProvider) == center.id;
           final diveCountAsync = ref.watch(
             diveCenterDiveCountProvider(center.id),
           );

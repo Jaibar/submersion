@@ -10,6 +10,7 @@ import desktop_drop
 import device_info_plus
 import file_picker
 import file_selector_macos
+import flutter_contacts
 import flutter_local_notifications
 import flutter_secure_storage_darwin
 import gal
@@ -18,7 +19,6 @@ import google_sign_in_ios
 import libdivecomputer_plugin
 import objectbox_flutter_libs
 import package_info_plus
-import path_provider_foundation
 import photo_manager
 import printing
 import share_plus
@@ -34,6 +34,7 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   DeviceInfoPlusMacosPlugin.register(with: registry.registrar(forPlugin: "DeviceInfoPlusMacosPlugin"))
   FilePickerPlugin.register(with: registry.registrar(forPlugin: "FilePickerPlugin"))
   FileSelectorPlugin.register(with: registry.registrar(forPlugin: "FileSelectorPlugin"))
+  FlutterContactsPlugin.register(with: registry.registrar(forPlugin: "FlutterContactsPlugin"))
   FlutterLocalNotificationsPlugin.register(with: registry.registrar(forPlugin: "FlutterLocalNotificationsPlugin"))
   FlutterSecureStorageDarwinPlugin.register(with: registry.registrar(forPlugin: "FlutterSecureStorageDarwinPlugin"))
   GalPlugin.register(with: registry.registrar(forPlugin: "GalPlugin"))
@@ -42,7 +43,6 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   LibdivecomputerPlugin.register(with: registry.registrar(forPlugin: "LibdivecomputerPlugin"))
   ObjectboxFlutterLibsPlugin.register(with: registry.registrar(forPlugin: "ObjectboxFlutterLibsPlugin"))
   FPPPackageInfoPlusPlugin.register(with: registry.registrar(forPlugin: "FPPPackageInfoPlusPlugin"))
-  PathProviderPlugin.register(with: registry.registrar(forPlugin: "PathProviderPlugin"))
   PhotoManagerPlugin.register(with: registry.registrar(forPlugin: "PhotoManagerPlugin"))
   PrintingPlugin.register(with: registry.registrar(forPlugin: "PrintingPlugin"))
   SharePlusMacosPlugin.register(with: registry.registrar(forPlugin: "SharePlusMacosPlugin"))
