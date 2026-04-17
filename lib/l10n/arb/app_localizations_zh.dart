@@ -1308,7 +1308,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get common_action_close => '关闭';
 
   @override
-  String get common_action_continue => 'Continue';
+  String get common_action_continue => '继续';
 
   @override
   String get common_action_delete => '删除';
@@ -13272,7 +13272,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String universalImport_bulk_replaceSourceAll(int count) {
-    return 'Replace all ($count)';
+    return '全部替换（$count）';
   }
 
   @override
@@ -13624,15 +13624,15 @@ class AppLocalizationsZh extends AppLocalizations {
   String get diveComputer_detail_notesTitle => '备注';
 
   @override
-  String get diveComputer_detail_reimportAllButton => 'Re-import all dives';
+  String get diveComputer_detail_reimportAllButton => '重新导入所有潜水';
 
   @override
   String diveComputer_detail_reimportDialogBody(String computerName) {
-    return 'Download every dive from $computerName and review them against your log. This may take several minutes.';
+    return '从 $computerName 下载每一次潜水并与您的日志进行比对。此过程可能需要几分钟。';
   }
 
   @override
-  String get diveComputer_detail_reimportDialogTitle => 'Re-import all dives?';
+  String get diveComputer_detail_reimportDialogTitle => '重新导入所有潜水？';
 
   @override
   String get diveComputer_detail_statisticsTitle => '统计';
@@ -13904,8 +13904,7 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get diveComputer_download_reimportHint =>
-      'Looking for older or deleted dives? Re-import all';
+  String get diveComputer_download_reimportHint => '寻找较旧的或已删除的潜水？重新导入全部';
 
   @override
   String get diveComputer_download_retry => '重试';
@@ -15424,39 +15423,39 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings_appearance_showProfilePanel_subtitle => '默认在表格上方显示潜水剖面图';
 
   @override
-  String get settings_appearance_mapStyle => 'Map Style';
+  String get settings_appearance_mapStyle => '地图样式';
 
   @override
-  String get settings_appearance_mapStyle_openStreetMap => 'Street Map';
+  String get settings_appearance_mapStyle_openStreetMap => '街道地图';
 
   @override
-  String get settings_appearance_mapStyle_openTopoMap => 'Topographic';
+  String get settings_appearance_mapStyle_openTopoMap => '地形图';
 
   @override
-  String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
+  String get settings_appearance_mapStyle_esriSatellite => '卫星';
 
   @override
-  String get common_action_reparse => 'Re-parse';
+  String get common_action_reparse => '重新解析';
 
   @override
-  String get diveComputer_detail_reparseAllButton => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllButton => '重新解析所有潜水';
 
   @override
-  String get diveComputer_detail_reparseAllTitle => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllTitle => '重新解析所有潜水';
 
   @override
   String diveComputer_detail_reparseAllMessage(int count) {
-    return 'Re-run the dive parser on $count dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.';
+    return '对 $count 次已存储原始数据的潜水重新运行潜水解析器。这将更新剖面图和传感器数据,但会保留您的笔记、地点、潜伴和其他编辑内容。';
   }
 
   @override
   String diveComputer_detail_reparseAllProgress(int count) {
-    return 'Re-parsing $count dives...';
+    return '正在重新解析 $count 次潜水...';
   }
 
   @override
   String diveComputer_detail_reparseAllSuccess(int count) {
-    return 'Re-parsed $count dives successfully';
+    return '已成功重新解析 $count 次潜水';
   }
 
   @override
@@ -15465,12 +15464,12 @@ class AppLocalizationsZh extends AppLocalizations {
     int total,
     int failed,
   ) {
-    return 'Re-parsed $succeeded of $total dives. $failed failed.';
+    return '已重新解析 $total 次潜水中的 $succeeded 次。$failed 次失败。';
   }
 
   @override
   String diveComputer_detail_reparseRawDataCount(int count) {
-    return '$count dives with raw data';
+    return '$count 次潜水有原始数据';
   }
 
   @override
@@ -15478,60 +15477,57 @@ class AppLocalizationsZh extends AppLocalizations {
     int count,
     int without,
   ) {
-    return '$count dives with raw data ($without without)';
+    return '$count 次潜水有原始数据（$without 次没有）';
   }
 
   @override
-  String get diveLog_detail_menu_reparseRawData => 'Re-parse raw data';
+  String get diveLog_detail_menu_reparseRawData => '重新解析原始数据';
 
   @override
-  String get diveLog_detail_reparseSuccess => 'Dive re-parsed successfully';
+  String get diveLog_detail_reparseSuccess => '潜水已成功重新解析';
 
   @override
   String diveLog_detail_reparseFailed(String error) {
-    return 'Re-parse failed: $error';
+    return '重新解析失败：$error';
   }
 
   @override
-  String get universalImport_label_replaceSource => 'Replace Source';
+  String get universalImport_label_replaceSource => '替换源数据';
 
   @override
-  String get universalImport_label_replaceSourceSubtitle =>
-      'Update from same computer';
+  String get universalImport_label_replaceSourceSubtitle => '从同一台计算机更新';
 
   @override
-  String get universalImport_title_importOptions => 'Import Options';
+  String get universalImport_title_importOptions => '导入选项';
 
   @override
-  String get universalImport_label_options => 'Options';
+  String get universalImport_label_options => '选项';
 
   @override
-  String get universalImport_label_retainDiveNumbers =>
-      'Retain source dive numbers';
+  String get universalImport_label_retainDiveNumbers => '保留源潜水编号';
 
   @override
   String get universalImport_label_retainDiveNumbersSubtitle =>
-      'Use dive numbers from the imported file instead of auto-assigning';
+      '使用导入文件中的潜水编号而不是自动分配';
 
   @override
-  String get universalImport_title_successImported => 'Successfully Imported';
+  String get universalImport_title_successImported => '导入成功';
 
   @override
-  String get universalImport_title_successUpdated => 'Successfully Updated';
+  String get universalImport_title_successUpdated => '更新成功';
 
   @override
-  String get universalImport_title_successConsolidated =>
-      'Successfully Consolidated';
+  String get universalImport_title_successConsolidated => '合并成功';
 
   @override
-  String get universalImport_title_noDivesImported => 'No Dives Imported';
+  String get universalImport_title_noDivesImported => '未导入潜水';
 
   @override
-  String get universalImport_label_allDivesSkipped => 'All dives were skipped.';
+  String get universalImport_label_allDivesSkipped => '所有潜水均已跳过。';
 
   @override
-  String get universalImport_label_replacedSourceData => 'Replaced source data';
+  String get universalImport_label_replacedSourceData => '已替换源数据';
 
   @override
-  String get universalImport_label_consolidated => 'Consolidated';
+  String get universalImport_label_consolidated => '已合并';
 }

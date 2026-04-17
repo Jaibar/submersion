@@ -1383,7 +1383,7 @@ class AppLocalizationsEs extends AppLocalizations {
   String get common_action_close => 'Cerrar';
 
   @override
-  String get common_action_continue => 'Continue';
+  String get common_action_continue => 'Continuar';
 
   @override
   String get common_action_delete => 'Eliminar';
@@ -13967,7 +13967,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String universalImport_bulk_replaceSourceAll(int count) {
-    return 'Replace all ($count)';
+    return 'Reemplazar todas ($count)';
   }
 
   @override
@@ -14328,15 +14328,17 @@ class AppLocalizationsEs extends AppLocalizations {
   String get diveComputer_detail_notesTitle => 'Notas';
 
   @override
-  String get diveComputer_detail_reimportAllButton => 'Re-import all dives';
+  String get diveComputer_detail_reimportAllButton =>
+      'Reimportar todas las inmersiones';
 
   @override
   String diveComputer_detail_reimportDialogBody(String computerName) {
-    return 'Download every dive from $computerName and review them against your log. This may take several minutes.';
+    return 'Descarga todas las inmersiones de $computerName y compáralas con tu registro. Esto puede tardar varios minutos.';
   }
 
   @override
-  String get diveComputer_detail_reimportDialogTitle => 'Re-import all dives?';
+  String get diveComputer_detail_reimportDialogTitle =>
+      '¿Reimportar todas las inmersiones?';
 
   @override
   String get diveComputer_detail_statisticsTitle => 'Estadisticas';
@@ -14627,7 +14629,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get diveComputer_download_reimportHint =>
-      'Looking for older or deleted dives? Re-import all';
+      '¿Buscas inmersiones antiguas o eliminadas? Reimportar todas';
 
   @override
   String get diveComputer_download_retry => 'Reintentar';
@@ -16213,39 +16215,41 @@ class AppLocalizationsEs extends AppLocalizations {
       'Mostrar gráfico de perfil de inmersión sobre la tabla por defecto';
 
   @override
-  String get settings_appearance_mapStyle => 'Map Style';
+  String get settings_appearance_mapStyle => 'Estilo del Mapa';
 
   @override
-  String get settings_appearance_mapStyle_openStreetMap => 'Street Map';
+  String get settings_appearance_mapStyle_openStreetMap => 'Mapa de Calles';
 
   @override
-  String get settings_appearance_mapStyle_openTopoMap => 'Topographic';
+  String get settings_appearance_mapStyle_openTopoMap => 'Topográfico';
 
   @override
-  String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
+  String get settings_appearance_mapStyle_esriSatellite => 'Satélite';
 
   @override
-  String get common_action_reparse => 'Re-parse';
+  String get common_action_reparse => 'Reanalizar';
 
   @override
-  String get diveComputer_detail_reparseAllButton => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllButton =>
+      'Reanalizar todas las inmersiones';
 
   @override
-  String get diveComputer_detail_reparseAllTitle => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllTitle =>
+      'Reanalizar todas las inmersiones';
 
   @override
   String diveComputer_detail_reparseAllMessage(int count) {
-    return 'Re-run the dive parser on $count dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.';
+    return 'Volver a ejecutar el analizador de inmersiones para $count inmersiones con datos sin procesar almacenados. Esto actualiza los datos de perfil y sensores, pero conserva tus notas, sitios, compañeros y otras ediciones.';
   }
 
   @override
   String diveComputer_detail_reparseAllProgress(int count) {
-    return 'Re-parsing $count dives...';
+    return 'Reanalizando $count inmersiones...';
   }
 
   @override
   String diveComputer_detail_reparseAllSuccess(int count) {
-    return 'Re-parsed $count dives successfully';
+    return 'Se reanalizaron $count inmersiones correctamente';
   }
 
   @override
@@ -16254,12 +16258,12 @@ class AppLocalizationsEs extends AppLocalizations {
     int total,
     int failed,
   ) {
-    return 'Re-parsed $succeeded of $total dives. $failed failed.';
+    return 'Se reanalizaron $succeeded de $total inmersiones. $failed fallaron.';
   }
 
   @override
   String diveComputer_detail_reparseRawDataCount(int count) {
-    return '$count dives with raw data';
+    return '$count inmersiones con datos sin procesar';
   }
 
   @override
@@ -16267,60 +16271,65 @@ class AppLocalizationsEs extends AppLocalizations {
     int count,
     int without,
   ) {
-    return '$count dives with raw data ($without without)';
+    return '$count inmersiones con datos sin procesar ($without sin)';
   }
 
   @override
-  String get diveLog_detail_menu_reparseRawData => 'Re-parse raw data';
+  String get diveLog_detail_menu_reparseRawData =>
+      'Reanalizar datos sin procesar';
 
   @override
-  String get diveLog_detail_reparseSuccess => 'Dive re-parsed successfully';
+  String get diveLog_detail_reparseSuccess =>
+      'Inmersión reanalizada correctamente';
 
   @override
   String diveLog_detail_reparseFailed(String error) {
-    return 'Re-parse failed: $error';
+    return 'Error al reanalizar: $error';
   }
 
   @override
-  String get universalImport_label_replaceSource => 'Replace Source';
+  String get universalImport_label_replaceSource => 'Reemplazar Fuente';
 
   @override
   String get universalImport_label_replaceSourceSubtitle =>
-      'Update from same computer';
+      'Actualizar desde el mismo computador';
 
   @override
-  String get universalImport_title_importOptions => 'Import Options';
+  String get universalImport_title_importOptions => 'Opciones de Importación';
 
   @override
-  String get universalImport_label_options => 'Options';
+  String get universalImport_label_options => 'Opciones';
 
   @override
   String get universalImport_label_retainDiveNumbers =>
-      'Retain source dive numbers';
+      'Conservar números de inmersión de origen';
 
   @override
   String get universalImport_label_retainDiveNumbersSubtitle =>
-      'Use dive numbers from the imported file instead of auto-assigning';
+      'Usar los números de inmersión del archivo importado en lugar de asignarlos automáticamente';
 
   @override
-  String get universalImport_title_successImported => 'Successfully Imported';
+  String get universalImport_title_successImported => 'Importación Exitosa';
 
   @override
-  String get universalImport_title_successUpdated => 'Successfully Updated';
+  String get universalImport_title_successUpdated => 'Actualización Exitosa';
 
   @override
   String get universalImport_title_successConsolidated =>
-      'Successfully Consolidated';
+      'Consolidación Exitosa';
 
   @override
-  String get universalImport_title_noDivesImported => 'No Dives Imported';
+  String get universalImport_title_noDivesImported =>
+      'No se Importaron Inmersiones';
 
   @override
-  String get universalImport_label_allDivesSkipped => 'All dives were skipped.';
+  String get universalImport_label_allDivesSkipped =>
+      'Todas las inmersiones fueron omitidas.';
 
   @override
-  String get universalImport_label_replacedSourceData => 'Replaced source data';
+  String get universalImport_label_replacedSourceData =>
+      'Datos de origen reemplazados';
 
   @override
-  String get universalImport_label_consolidated => 'Consolidated';
+  String get universalImport_label_consolidated => 'Consolidadas';
 }

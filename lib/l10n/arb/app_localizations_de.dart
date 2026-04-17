@@ -1392,7 +1392,7 @@ class AppLocalizationsDe extends AppLocalizations {
   String get common_action_close => 'Schliessen';
 
   @override
-  String get common_action_continue => 'Continue';
+  String get common_action_continue => 'Fortfahren';
 
   @override
   String get common_action_delete => 'Loeschen';
@@ -13949,7 +13949,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String universalImport_bulk_replaceSourceAll(int count) {
-    return 'Replace all ($count)';
+    return 'Alle ersetzen ($count)';
   }
 
   @override
@@ -14314,15 +14314,17 @@ class AppLocalizationsDe extends AppLocalizations {
   String get diveComputer_detail_notesTitle => 'Notizen';
 
   @override
-  String get diveComputer_detail_reimportAllButton => 'Re-import all dives';
+  String get diveComputer_detail_reimportAllButton =>
+      'Alle Tauchgänge neu importieren';
 
   @override
   String diveComputer_detail_reimportDialogBody(String computerName) {
-    return 'Download every dive from $computerName and review them against your log. This may take several minutes.';
+    return 'Lädt jeden Tauchgang von $computerName herunter und gleicht sie mit deinem Logbuch ab. Dies kann mehrere Minuten dauern.';
   }
 
   @override
-  String get diveComputer_detail_reimportDialogTitle => 'Re-import all dives?';
+  String get diveComputer_detail_reimportDialogTitle =>
+      'Alle Tauchgänge neu importieren?';
 
   @override
   String get diveComputer_detail_statisticsTitle => 'Statistiken';
@@ -14616,7 +14618,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get diveComputer_download_reimportHint =>
-      'Looking for older or deleted dives? Re-import all';
+      'Suchst du ältere oder gelöschte Tauchgänge? Alle neu importieren';
 
   @override
   String get diveComputer_download_retry => 'Erneut versuchen';
@@ -16195,39 +16197,41 @@ class AppLocalizationsDe extends AppLocalizations {
       'Tauchprofildiagramm standardmäßig über der Tabelle anzeigen';
 
   @override
-  String get settings_appearance_mapStyle => 'Map Style';
+  String get settings_appearance_mapStyle => 'Kartenstil';
 
   @override
-  String get settings_appearance_mapStyle_openStreetMap => 'Street Map';
+  String get settings_appearance_mapStyle_openStreetMap => 'Straßenkarte';
 
   @override
-  String get settings_appearance_mapStyle_openTopoMap => 'Topographic';
+  String get settings_appearance_mapStyle_openTopoMap => 'Topografisch';
 
   @override
-  String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
+  String get settings_appearance_mapStyle_esriSatellite => 'Satellit';
 
   @override
-  String get common_action_reparse => 'Re-parse';
+  String get common_action_reparse => 'Neu auswerten';
 
   @override
-  String get diveComputer_detail_reparseAllButton => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllButton =>
+      'Alle Tauchgänge neu auswerten';
 
   @override
-  String get diveComputer_detail_reparseAllTitle => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllTitle =>
+      'Alle Tauchgänge neu auswerten';
 
   @override
   String diveComputer_detail_reparseAllMessage(int count) {
-    return 'Re-run the dive parser on $count dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.';
+    return 'Den Tauchgang-Parser für $count Tauchgänge mit gespeicherten Rohdaten erneut ausführen. Dies aktualisiert Profil- und Sensordaten, behält aber Notizen, Tauchplätze, Tauchpartner und andere Bearbeitungen bei.';
   }
 
   @override
   String diveComputer_detail_reparseAllProgress(int count) {
-    return 'Re-parsing $count dives...';
+    return '$count Tauchgänge werden neu ausgewertet...';
   }
 
   @override
   String diveComputer_detail_reparseAllSuccess(int count) {
-    return 'Re-parsed $count dives successfully';
+    return '$count Tauchgänge erfolgreich neu ausgewertet';
   }
 
   @override
@@ -16236,12 +16240,12 @@ class AppLocalizationsDe extends AppLocalizations {
     int total,
     int failed,
   ) {
-    return 'Re-parsed $succeeded of $total dives. $failed failed.';
+    return '$succeeded von $total Tauchgängen neu ausgewertet. $failed fehlgeschlagen.';
   }
 
   @override
   String diveComputer_detail_reparseRawDataCount(int count) {
-    return '$count dives with raw data';
+    return '$count Tauchgänge mit Rohdaten';
   }
 
   @override
@@ -16249,60 +16253,63 @@ class AppLocalizationsDe extends AppLocalizations {
     int count,
     int without,
   ) {
-    return '$count dives with raw data ($without without)';
+    return '$count Tauchgänge mit Rohdaten ($without ohne)';
   }
 
   @override
-  String get diveLog_detail_menu_reparseRawData => 'Re-parse raw data';
+  String get diveLog_detail_menu_reparseRawData => 'Rohdaten neu auswerten';
 
   @override
-  String get diveLog_detail_reparseSuccess => 'Dive re-parsed successfully';
+  String get diveLog_detail_reparseSuccess =>
+      'Tauchgang erfolgreich neu ausgewertet';
 
   @override
   String diveLog_detail_reparseFailed(String error) {
-    return 'Re-parse failed: $error';
+    return 'Neu-Auswertung fehlgeschlagen: $error';
   }
 
   @override
-  String get universalImport_label_replaceSource => 'Replace Source';
+  String get universalImport_label_replaceSource => 'Quelle ersetzen';
 
   @override
   String get universalImport_label_replaceSourceSubtitle =>
-      'Update from same computer';
+      'Vom selben Computer aktualisieren';
 
   @override
-  String get universalImport_title_importOptions => 'Import Options';
+  String get universalImport_title_importOptions => 'Importoptionen';
 
   @override
-  String get universalImport_label_options => 'Options';
+  String get universalImport_label_options => 'Optionen';
 
   @override
   String get universalImport_label_retainDiveNumbers =>
-      'Retain source dive numbers';
+      'Tauchgangsnummern aus Quelle beibehalten';
 
   @override
   String get universalImport_label_retainDiveNumbersSubtitle =>
-      'Use dive numbers from the imported file instead of auto-assigning';
+      'Tauchgangsnummern aus der importierten Datei verwenden, statt automatisch zuzuweisen';
 
   @override
-  String get universalImport_title_successImported => 'Successfully Imported';
+  String get universalImport_title_successImported => 'Erfolgreich importiert';
 
   @override
-  String get universalImport_title_successUpdated => 'Successfully Updated';
+  String get universalImport_title_successUpdated => 'Erfolgreich aktualisiert';
 
   @override
   String get universalImport_title_successConsolidated =>
-      'Successfully Consolidated';
+      'Erfolgreich konsolidiert';
 
   @override
-  String get universalImport_title_noDivesImported => 'No Dives Imported';
+  String get universalImport_title_noDivesImported =>
+      'Keine Tauchgänge importiert';
 
   @override
-  String get universalImport_label_allDivesSkipped => 'All dives were skipped.';
+  String get universalImport_label_allDivesSkipped =>
+      'Alle Tauchgänge wurden übersprungen.';
 
   @override
-  String get universalImport_label_replacedSourceData => 'Replaced source data';
+  String get universalImport_label_replacedSourceData => 'Quelldaten ersetzt';
 
   @override
-  String get universalImport_label_consolidated => 'Consolidated';
+  String get universalImport_label_consolidated => 'Konsolidiert';
 }

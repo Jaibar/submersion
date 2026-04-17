@@ -1375,7 +1375,7 @@ class AppLocalizationsNl extends AppLocalizations {
   String get common_action_close => 'Sluiten';
 
   @override
-  String get common_action_continue => 'Continue';
+  String get common_action_continue => 'Doorgaan';
 
   @override
   String get common_action_delete => 'Verwijderen';
@@ -13845,7 +13845,7 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String universalImport_bulk_replaceSourceAll(int count) {
-    return 'Replace all ($count)';
+    return 'Alles vervangen ($count)';
   }
 
   @override
@@ -14206,15 +14206,17 @@ class AppLocalizationsNl extends AppLocalizations {
   String get diveComputer_detail_notesTitle => 'Notities';
 
   @override
-  String get diveComputer_detail_reimportAllButton => 'Re-import all dives';
+  String get diveComputer_detail_reimportAllButton =>
+      'Alle duiken opnieuw importeren';
 
   @override
   String diveComputer_detail_reimportDialogBody(String computerName) {
-    return 'Download every dive from $computerName and review them against your log. This may take several minutes.';
+    return 'Download elke duik van $computerName en vergelijk ze met je logboek. Dit kan enkele minuten duren.';
   }
 
   @override
-  String get diveComputer_detail_reimportDialogTitle => 'Re-import all dives?';
+  String get diveComputer_detail_reimportDialogTitle =>
+      'Alle duiken opnieuw importeren?';
 
   @override
   String get diveComputer_detail_statisticsTitle => 'Statistieken';
@@ -14502,7 +14504,7 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get diveComputer_download_reimportHint =>
-      'Looking for older or deleted dives? Re-import all';
+      'Op zoek naar oudere of verwijderde duiken? Alles opnieuw importeren';
 
   @override
   String get diveComputer_download_retry => 'Opnieuw proberen';
@@ -16074,39 +16076,41 @@ class AppLocalizationsNl extends AppLocalizations {
       'Duikprofielgrafiek standaard boven de tabel weergeven';
 
   @override
-  String get settings_appearance_mapStyle => 'Map Style';
+  String get settings_appearance_mapStyle => 'Kaartstijl';
 
   @override
-  String get settings_appearance_mapStyle_openStreetMap => 'Street Map';
+  String get settings_appearance_mapStyle_openStreetMap => 'Stratenkaart';
 
   @override
-  String get settings_appearance_mapStyle_openTopoMap => 'Topographic';
+  String get settings_appearance_mapStyle_openTopoMap => 'Topografisch';
 
   @override
-  String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
+  String get settings_appearance_mapStyle_esriSatellite => 'Satelliet';
 
   @override
-  String get common_action_reparse => 'Re-parse';
+  String get common_action_reparse => 'Opnieuw verwerken';
 
   @override
-  String get diveComputer_detail_reparseAllButton => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllButton =>
+      'Alle duiken opnieuw verwerken';
 
   @override
-  String get diveComputer_detail_reparseAllTitle => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllTitle =>
+      'Alle duiken opnieuw verwerken';
 
   @override
   String diveComputer_detail_reparseAllMessage(int count) {
-    return 'Re-run the dive parser on $count dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.';
+    return 'Voer de duikparser opnieuw uit voor $count duiken met opgeslagen ruwe data. Dit werkt profiel- en sensordata bij, maar behoudt je notities, locaties, buddy\'s en andere wijzigingen.';
   }
 
   @override
   String diveComputer_detail_reparseAllProgress(int count) {
-    return 'Re-parsing $count dives...';
+    return '$count duiken worden opnieuw verwerkt...';
   }
 
   @override
   String diveComputer_detail_reparseAllSuccess(int count) {
-    return 'Re-parsed $count dives successfully';
+    return '$count duiken succesvol opnieuw verwerkt';
   }
 
   @override
@@ -16115,12 +16119,12 @@ class AppLocalizationsNl extends AppLocalizations {
     int total,
     int failed,
   ) {
-    return 'Re-parsed $succeeded of $total dives. $failed failed.';
+    return '$succeeded van $total duiken opnieuw verwerkt. $failed mislukt.';
   }
 
   @override
   String diveComputer_detail_reparseRawDataCount(int count) {
-    return '$count dives with raw data';
+    return '$count duiken met ruwe data';
   }
 
   @override
@@ -16128,60 +16132,64 @@ class AppLocalizationsNl extends AppLocalizations {
     int count,
     int without,
   ) {
-    return '$count dives with raw data ($without without)';
+    return '$count duiken met ruwe data ($without zonder)';
   }
 
   @override
-  String get diveLog_detail_menu_reparseRawData => 'Re-parse raw data';
+  String get diveLog_detail_menu_reparseRawData =>
+      'Ruwe data opnieuw verwerken';
 
   @override
-  String get diveLog_detail_reparseSuccess => 'Dive re-parsed successfully';
+  String get diveLog_detail_reparseSuccess => 'Duik succesvol opnieuw verwerkt';
 
   @override
   String diveLog_detail_reparseFailed(String error) {
-    return 'Re-parse failed: $error';
+    return 'Opnieuw verwerken mislukt: $error';
   }
 
   @override
-  String get universalImport_label_replaceSource => 'Replace Source';
+  String get universalImport_label_replaceSource => 'Bron vervangen';
 
   @override
   String get universalImport_label_replaceSourceSubtitle =>
-      'Update from same computer';
+      'Bijwerken vanaf dezelfde computer';
 
   @override
-  String get universalImport_title_importOptions => 'Import Options';
+  String get universalImport_title_importOptions => 'Importopties';
 
   @override
-  String get universalImport_label_options => 'Options';
+  String get universalImport_label_options => 'Opties';
 
   @override
   String get universalImport_label_retainDiveNumbers =>
-      'Retain source dive numbers';
+      'Duiknummers van bron behouden';
 
   @override
   String get universalImport_label_retainDiveNumbersSubtitle =>
-      'Use dive numbers from the imported file instead of auto-assigning';
+      'Gebruik de duiknummers uit het geïmporteerde bestand in plaats van automatisch toewijzen';
 
   @override
-  String get universalImport_title_successImported => 'Successfully Imported';
+  String get universalImport_title_successImported => 'Succesvol geïmporteerd';
 
   @override
-  String get universalImport_title_successUpdated => 'Successfully Updated';
+  String get universalImport_title_successUpdated => 'Succesvol bijgewerkt';
 
   @override
   String get universalImport_title_successConsolidated =>
-      'Successfully Consolidated';
+      'Succesvol geconsolideerd';
 
   @override
-  String get universalImport_title_noDivesImported => 'No Dives Imported';
+  String get universalImport_title_noDivesImported =>
+      'Geen duiken geïmporteerd';
 
   @override
-  String get universalImport_label_allDivesSkipped => 'All dives were skipped.';
+  String get universalImport_label_allDivesSkipped =>
+      'Alle duiken zijn overgeslagen.';
 
   @override
-  String get universalImport_label_replacedSourceData => 'Replaced source data';
+  String get universalImport_label_replacedSourceData =>
+      'Brongegevens vervangen';
 
   @override
-  String get universalImport_label_consolidated => 'Consolidated';
+  String get universalImport_label_consolidated => 'Geconsolideerd';
 }

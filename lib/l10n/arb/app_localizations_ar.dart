@@ -1345,7 +1345,7 @@ class AppLocalizationsAr extends AppLocalizations {
   String get common_action_close => 'إغلاق';
 
   @override
-  String get common_action_continue => 'Continue';
+  String get common_action_continue => 'متابعة';
 
   @override
   String get common_action_delete => 'حذف';
@@ -13689,7 +13689,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String universalImport_bulk_replaceSourceAll(int count) {
-    return 'Replace all ($count)';
+    return 'استبدال الكل ($count)';
   }
 
   @override
@@ -14047,15 +14047,17 @@ class AppLocalizationsAr extends AppLocalizations {
   String get diveComputer_detail_notesTitle => 'الملاحظات';
 
   @override
-  String get diveComputer_detail_reimportAllButton => 'Re-import all dives';
+  String get diveComputer_detail_reimportAllButton =>
+      'إعادة استيراد جميع الغطسات';
 
   @override
   String diveComputer_detail_reimportDialogBody(String computerName) {
-    return 'Download every dive from $computerName and review them against your log. This may take several minutes.';
+    return 'تنزيل كل غطسة من $computerName ومراجعتها مقارنة بسجلك. قد يستغرق هذا عدة دقائق.';
   }
 
   @override
-  String get diveComputer_detail_reimportDialogTitle => 'Re-import all dives?';
+  String get diveComputer_detail_reimportDialogTitle =>
+      'إعادة استيراد جميع الغطسات؟';
 
   @override
   String get diveComputer_detail_statisticsTitle => 'الإحصائيات';
@@ -14338,7 +14340,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get diveComputer_download_reimportHint =>
-      'Looking for older or deleted dives? Re-import all';
+      'تبحث عن غطسات قديمة أو محذوفة؟ إعادة استيراد الجميع';
 
   @override
   String get diveComputer_download_retry => 'إعادة المحاولة';
@@ -15897,39 +15899,39 @@ class AppLocalizationsAr extends AppLocalizations {
       'عرض مخطط ملف الغوصة فوق الجدول بشكل افتراضي';
 
   @override
-  String get settings_appearance_mapStyle => 'Map Style';
+  String get settings_appearance_mapStyle => 'نمط الخريطة';
 
   @override
-  String get settings_appearance_mapStyle_openStreetMap => 'Street Map';
+  String get settings_appearance_mapStyle_openStreetMap => 'خريطة الشوارع';
 
   @override
-  String get settings_appearance_mapStyle_openTopoMap => 'Topographic';
+  String get settings_appearance_mapStyle_openTopoMap => 'طبوغرافية';
 
   @override
-  String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
+  String get settings_appearance_mapStyle_esriSatellite => 'قمر صناعي';
 
   @override
-  String get common_action_reparse => 'Re-parse';
+  String get common_action_reparse => 'إعادة التحليل';
 
   @override
-  String get diveComputer_detail_reparseAllButton => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllButton => 'إعادة تحليل جميع الغطسات';
 
   @override
-  String get diveComputer_detail_reparseAllTitle => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllTitle => 'إعادة تحليل جميع الغطسات';
 
   @override
   String diveComputer_detail_reparseAllMessage(int count) {
-    return 'Re-run the dive parser on $count dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.';
+    return 'إعادة تشغيل محلل الغطسات على $count غطسة لها بيانات أولية مخزنة. يُحدِّث ذلك بيانات الملف الشخصي والمستشعرات لكنه يحافظ على الملاحظات والمواقع والشركاء والتعديلات الأخرى.';
   }
 
   @override
   String diveComputer_detail_reparseAllProgress(int count) {
-    return 'Re-parsing $count dives...';
+    return 'جارٍ إعادة تحليل $count غطسة...';
   }
 
   @override
   String diveComputer_detail_reparseAllSuccess(int count) {
-    return 'Re-parsed $count dives successfully';
+    return 'تمت إعادة تحليل $count غطسة بنجاح';
   }
 
   @override
@@ -15938,12 +15940,12 @@ class AppLocalizationsAr extends AppLocalizations {
     int total,
     int failed,
   ) {
-    return 'Re-parsed $succeeded of $total dives. $failed failed.';
+    return 'تمت إعادة تحليل $succeeded من أصل $total غطسة. فشلت $failed.';
   }
 
   @override
   String diveComputer_detail_reparseRawDataCount(int count) {
-    return '$count dives with raw data';
+    return '$count غطسة بها بيانات أولية';
   }
 
   @override
@@ -15951,60 +15953,61 @@ class AppLocalizationsAr extends AppLocalizations {
     int count,
     int without,
   ) {
-    return '$count dives with raw data ($without without)';
+    return '$count غطسة بها بيانات أولية ($without بدون)';
   }
 
   @override
-  String get diveLog_detail_menu_reparseRawData => 'Re-parse raw data';
+  String get diveLog_detail_menu_reparseRawData =>
+      'إعادة تحليل البيانات الأولية';
 
   @override
-  String get diveLog_detail_reparseSuccess => 'Dive re-parsed successfully';
+  String get diveLog_detail_reparseSuccess => 'تمت إعادة تحليل الغطسة بنجاح';
 
   @override
   String diveLog_detail_reparseFailed(String error) {
-    return 'Re-parse failed: $error';
+    return 'فشلت إعادة التحليل: $error';
   }
 
   @override
-  String get universalImport_label_replaceSource => 'Replace Source';
+  String get universalImport_label_replaceSource => 'استبدال المصدر';
 
   @override
   String get universalImport_label_replaceSourceSubtitle =>
-      'Update from same computer';
+      'تحديث من نفس الكمبيوتر';
 
   @override
-  String get universalImport_title_importOptions => 'Import Options';
+  String get universalImport_title_importOptions => 'خيارات الاستيراد';
 
   @override
-  String get universalImport_label_options => 'Options';
+  String get universalImport_label_options => 'خيارات';
 
   @override
   String get universalImport_label_retainDiveNumbers =>
-      'Retain source dive numbers';
+      'الاحتفاظ بأرقام الغطسات الأصلية';
 
   @override
   String get universalImport_label_retainDiveNumbersSubtitle =>
-      'Use dive numbers from the imported file instead of auto-assigning';
+      'استخدام أرقام الغطسات من الملف المستورد بدلاً من تعيينها تلقائياً';
 
   @override
-  String get universalImport_title_successImported => 'Successfully Imported';
+  String get universalImport_title_successImported => 'تم الاستيراد بنجاح';
 
   @override
-  String get universalImport_title_successUpdated => 'Successfully Updated';
+  String get universalImport_title_successUpdated => 'تم التحديث بنجاح';
 
   @override
-  String get universalImport_title_successConsolidated =>
-      'Successfully Consolidated';
+  String get universalImport_title_successConsolidated => 'تم الدمج بنجاح';
 
   @override
-  String get universalImport_title_noDivesImported => 'No Dives Imported';
+  String get universalImport_title_noDivesImported => 'لم يتم استيراد أي غطسة';
 
   @override
-  String get universalImport_label_allDivesSkipped => 'All dives were skipped.';
+  String get universalImport_label_allDivesSkipped => 'تم تخطي جميع الغطسات.';
 
   @override
-  String get universalImport_label_replacedSourceData => 'Replaced source data';
+  String get universalImport_label_replacedSourceData =>
+      'تم استبدال بيانات المصدر';
 
   @override
-  String get universalImport_label_consolidated => 'Consolidated';
+  String get universalImport_label_consolidated => 'مدمجة';
 }

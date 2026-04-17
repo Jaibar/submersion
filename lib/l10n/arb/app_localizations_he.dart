@@ -1336,7 +1336,7 @@ class AppLocalizationsHe extends AppLocalizations {
   String get common_action_close => 'סגירה';
 
   @override
-  String get common_action_continue => 'Continue';
+  String get common_action_continue => 'המשך';
 
   @override
   String get common_action_delete => 'מחיקה';
@@ -13589,7 +13589,7 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String universalImport_bulk_replaceSourceAll(int count) {
-    return 'Replace all ($count)';
+    return 'החלף הכול ($count)';
   }
 
   @override
@@ -13947,15 +13947,16 @@ class AppLocalizationsHe extends AppLocalizations {
   String get diveComputer_detail_notesTitle => 'הערות';
 
   @override
-  String get diveComputer_detail_reimportAllButton => 'Re-import all dives';
+  String get diveComputer_detail_reimportAllButton => 'ייבא מחדש את כל הצלילות';
 
   @override
   String diveComputer_detail_reimportDialogBody(String computerName) {
-    return 'Download every dive from $computerName and review them against your log. This may take several minutes.';
+    return 'הורד כל צלילה מ־$computerName והשווה אותן ליומן שלך. פעולה זו עשויה להימשך מספר דקות.';
   }
 
   @override
-  String get diveComputer_detail_reimportDialogTitle => 'Re-import all dives?';
+  String get diveComputer_detail_reimportDialogTitle =>
+      'לייבא מחדש את כל הצלילות?';
 
   @override
   String get diveComputer_detail_statisticsTitle => 'סטטיסטיקה';
@@ -14233,7 +14234,7 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get diveComputer_download_reimportHint =>
-      'Looking for older or deleted dives? Re-import all';
+      'מחפש צלילות ישנות או שנמחקו? ייבא מחדש את הכול';
 
   @override
   String get diveComputer_download_retry => 'נסה שוב';
@@ -15785,39 +15786,39 @@ class AppLocalizationsHe extends AppLocalizations {
       'הצג תרשים פרופיל צלילה מעל הטבלה כברירת מחדל';
 
   @override
-  String get settings_appearance_mapStyle => 'Map Style';
+  String get settings_appearance_mapStyle => 'סגנון מפה';
 
   @override
-  String get settings_appearance_mapStyle_openStreetMap => 'Street Map';
+  String get settings_appearance_mapStyle_openStreetMap => 'מפת רחובות';
 
   @override
-  String get settings_appearance_mapStyle_openTopoMap => 'Topographic';
+  String get settings_appearance_mapStyle_openTopoMap => 'טופוגרפי';
 
   @override
-  String get settings_appearance_mapStyle_esriSatellite => 'Satellite';
+  String get settings_appearance_mapStyle_esriSatellite => 'לוויין';
 
   @override
-  String get common_action_reparse => 'Re-parse';
+  String get common_action_reparse => 'נתח מחדש';
 
   @override
-  String get diveComputer_detail_reparseAllButton => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllButton => 'נתח מחדש את כל הצלילות';
 
   @override
-  String get diveComputer_detail_reparseAllTitle => 'Re-parse all dives';
+  String get diveComputer_detail_reparseAllTitle => 'נתח מחדש את כל הצלילות';
 
   @override
   String diveComputer_detail_reparseAllMessage(int count) {
-    return 'Re-run the dive parser on $count dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.';
+    return 'הפעל את מנתח הצלילות מחדש על $count צלילות שיש להן נתונים גולמיים שמורים. פעולה זו מעדכנת את נתוני הפרופיל והחיישנים אך שומרת על ההערות, האתרים, השותפים ושאר העריכות.';
   }
 
   @override
   String diveComputer_detail_reparseAllProgress(int count) {
-    return 'Re-parsing $count dives...';
+    return 'מנתח מחדש $count צלילות...';
   }
 
   @override
   String diveComputer_detail_reparseAllSuccess(int count) {
-    return 'Re-parsed $count dives successfully';
+    return 'נותחו מחדש $count צלילות בהצלחה';
   }
 
   @override
@@ -15826,12 +15827,12 @@ class AppLocalizationsHe extends AppLocalizations {
     int total,
     int failed,
   ) {
-    return 'Re-parsed $succeeded of $total dives. $failed failed.';
+    return 'נותחו מחדש $succeeded מתוך $total צלילות. $failed נכשלו.';
   }
 
   @override
   String diveComputer_detail_reparseRawDataCount(int count) {
-    return '$count dives with raw data';
+    return '$count צלילות עם נתונים גולמיים';
   }
 
   @override
@@ -15839,60 +15840,58 @@ class AppLocalizationsHe extends AppLocalizations {
     int count,
     int without,
   ) {
-    return '$count dives with raw data ($without without)';
+    return '$count צלילות עם נתונים גולמיים ($without ללא)';
   }
 
   @override
-  String get diveLog_detail_menu_reparseRawData => 'Re-parse raw data';
+  String get diveLog_detail_menu_reparseRawData => 'נתח מחדש נתונים גולמיים';
 
   @override
-  String get diveLog_detail_reparseSuccess => 'Dive re-parsed successfully';
+  String get diveLog_detail_reparseSuccess => 'הצלילה נותחה מחדש בהצלחה';
 
   @override
   String diveLog_detail_reparseFailed(String error) {
-    return 'Re-parse failed: $error';
+    return 'הניתוח מחדש נכשל: $error';
   }
 
   @override
-  String get universalImport_label_replaceSource => 'Replace Source';
+  String get universalImport_label_replaceSource => 'החלף מקור';
 
   @override
-  String get universalImport_label_replaceSourceSubtitle =>
-      'Update from same computer';
+  String get universalImport_label_replaceSourceSubtitle => 'עדכן מאותו מחשב';
 
   @override
-  String get universalImport_title_importOptions => 'Import Options';
+  String get universalImport_title_importOptions => 'אפשרויות ייבוא';
 
   @override
-  String get universalImport_label_options => 'Options';
+  String get universalImport_label_options => 'אפשרויות';
 
   @override
   String get universalImport_label_retainDiveNumbers =>
-      'Retain source dive numbers';
+      'שמור על מספרי הצלילה מהמקור';
 
   @override
   String get universalImport_label_retainDiveNumbersSubtitle =>
-      'Use dive numbers from the imported file instead of auto-assigning';
+      'השתמש במספרי הצלילה מהקובץ המיובא במקום להקצות אוטומטית';
 
   @override
-  String get universalImport_title_successImported => 'Successfully Imported';
+  String get universalImport_title_successImported => 'יובאו בהצלחה';
 
   @override
-  String get universalImport_title_successUpdated => 'Successfully Updated';
+  String get universalImport_title_successUpdated => 'עודכנו בהצלחה';
 
   @override
-  String get universalImport_title_successConsolidated =>
-      'Successfully Consolidated';
+  String get universalImport_title_successConsolidated => 'אוחדו בהצלחה';
 
   @override
-  String get universalImport_title_noDivesImported => 'No Dives Imported';
+  String get universalImport_title_noDivesImported => 'לא יובאו צלילות';
 
   @override
-  String get universalImport_label_allDivesSkipped => 'All dives were skipped.';
+  String get universalImport_label_allDivesSkipped => 'כל הצלילות דולגו.';
 
   @override
-  String get universalImport_label_replacedSourceData => 'Replaced source data';
+  String get universalImport_label_replacedSourceData => 'נתוני מקור הוחלפו';
 
   @override
-  String get universalImport_label_consolidated => 'Consolidated';
+  String get universalImport_label_consolidated => 'אוחדו';
 }
