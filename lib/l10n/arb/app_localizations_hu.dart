@@ -48153,7 +48153,8 @@ class AppLocalizationsHu extends AppLocalizations {
   String get diveLog_gasGfWhatIf_title => 'What if: gas and GF';
 
   @override
-  String get diveLog_gasGfWhatIf_noProfile => 'This dive has no profile to analyse.';
+  String get diveLog_gasGfWhatIf_noProfile =>
+      'This dive has no profile to analyse.';
 
   @override
   String get diveLog_gasGfWhatIf_loggedLabel => 'Logged';
@@ -48171,7 +48172,8 @@ class AppLocalizationsHu extends AppLocalizations {
   String get diveLog_gasGfWhatIf_gfHighLabel => 'GF high';
 
   @override
-  String get diveLog_gasGfWhatIf_firstCylinderNote => 'Oxygen applies to the first cylinder.';
+  String get diveLog_gasGfWhatIf_firstCylinderNote =>
+      'Oxygen applies to the first cylinder.';
 
   @override
   String get diveLog_gasGfWhatIf_reset => 'Reset to logged';

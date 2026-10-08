@@ -60,7 +60,10 @@ Dive applyGasGfOverrides(Dive dive, GasGfOverrides overrides) {
   final first = firstTank(dive);
   if (o2 != null && first != null) {
     // Clamp so o2 + he never exceeds 100 %.
-    final mix = GasMix(o2: o2.clamp(0, 100 - first.gasMix.he), he: first.gasMix.he);
+    final mix = GasMix(
+      o2: o2.clamp(0, 100 - first.gasMix.he),
+      he: first.gasMix.he,
+    );
     tanks = [
       for (final t in dive.tanks)
         t.id == first.id ? t.copyWith(gasMix: mix) : t,
@@ -119,7 +122,8 @@ class GasGfWhatIfSummary {
     }
     var peak = 0.0;
     for (final s in analysis.decoStatuses) {
-      if (s.leadingCompartmentLoading > peak) peak = s.leadingCompartmentLoading;
+      if (s.leadingCompartmentLoading > peak)
+        peak = s.leadingCompartmentLoading;
     }
     return GasGfWhatIfSummary(
       minNdlSeconds: analysis.ndlCurve.isEmpty ? 0 : minNdl,

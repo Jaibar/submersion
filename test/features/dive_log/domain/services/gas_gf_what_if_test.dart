@@ -46,7 +46,10 @@ void main() {
     });
 
     test('GF override replaces one side and keeps the logged other', () {
-      final out = applyGasGfOverrides(_dive(), const GasGfOverrides(gfHigh: 95));
+      final out = applyGasGfOverrides(
+        _dive(),
+        const GasGfOverrides(gfHigh: 95),
+      );
       expect(out.gradientFactorLow, 40);
       expect(out.gradientFactorHigh, 95);
     });

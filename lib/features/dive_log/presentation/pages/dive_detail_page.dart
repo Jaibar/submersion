@@ -1666,7 +1666,9 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                         value: 'gasGfWhatIf',
                         child: ListTile(
                           leading: const Icon(Icons.science_outlined),
-                          title: Text(context.l10n.diveLog_detail_menu_gasGfWhatIf),
+                          title: Text(
+                            context.l10n.diveLog_detail_menu_gasGfWhatIf,
+                          ),
                           contentPadding: EdgeInsets.zero,
                         ),
                       ),
