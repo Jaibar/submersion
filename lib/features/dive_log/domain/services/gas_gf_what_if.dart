@@ -122,8 +122,9 @@ class GasGfWhatIfSummary {
     }
     var peak = 0.0;
     for (final s in analysis.decoStatuses) {
-      if (s.leadingCompartmentLoading > peak)
+      if (s.leadingCompartmentLoading > peak) {
         peak = s.leadingCompartmentLoading;
+      }
     }
     return GasGfWhatIfSummary(
       minNdlSeconds: analysis.ndlCurve.isEmpty ? 0 : minNdl,
