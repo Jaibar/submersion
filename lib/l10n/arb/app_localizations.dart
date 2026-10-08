@@ -76743,6 +76743,138 @@ abstract class AppLocalizations {
   /// **'Include ascent (whole dive)'**
   String get diveLog_whatIf_fullProfile;
 
+  /// No description provided for @diveLog_detail_menu_gasGfWhatIf.
+  ///
+  /// In en, this message translates to:
+  /// **'What if: gas / GF'**
+  String get diveLog_detail_menu_gasGfWhatIf;
+
+  /// No description provided for @diveLog_gasGfWhatIf_title.
+  ///
+  /// In en, this message translates to:
+  /// **'What if: gas and GF'**
+  String get diveLog_gasGfWhatIf_title;
+
+  /// No description provided for @diveLog_gasGfWhatIf_noProfile.
+  ///
+  /// In en, this message translates to:
+  /// **'This dive has no profile to analyse.'**
+  String get diveLog_gasGfWhatIf_noProfile;
+
+  /// No description provided for @diveLog_gasGfWhatIf_loggedLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Logged'**
+  String get diveLog_gasGfWhatIf_loggedLabel;
+
+  /// No description provided for @diveLog_gasGfWhatIf_whatIfLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'What if'**
+  String get diveLog_gasGfWhatIf_whatIfLabel;
+
+  /// No description provided for @diveLog_gasGfWhatIf_o2Label.
+  ///
+  /// In en, this message translates to:
+  /// **'Oxygen'**
+  String get diveLog_gasGfWhatIf_o2Label;
+
+  /// No description provided for @diveLog_gasGfWhatIf_gfLowLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'GF low'**
+  String get diveLog_gasGfWhatIf_gfLowLabel;
+
+  /// No description provided for @diveLog_gasGfWhatIf_gfHighLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'GF high'**
+  String get diveLog_gasGfWhatIf_gfHighLabel;
+
+  /// No description provided for @diveLog_gasGfWhatIf_firstCylinderNote.
+  ///
+  /// In en, this message translates to:
+  /// **'Oxygen applies to the first cylinder.'**
+  String get diveLog_gasGfWhatIf_firstCylinderNote;
+
+  /// No description provided for @diveLog_gasGfWhatIf_reset.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset to logged'**
+  String get diveLog_gasGfWhatIf_reset;
+
+  /// No description provided for @diveLog_gasGfWhatIf_metricsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'How close to deco'**
+  String get diveLog_gasGfWhatIf_metricsTitle;
+
+  /// No description provided for @diveLog_gasGfWhatIf_minNdl.
+  ///
+  /// In en, this message translates to:
+  /// **'Shortest NDL'**
+  String get diveLog_gasGfWhatIf_minNdl;
+
+  /// No description provided for @diveLog_gasGfWhatIf_decoShort.
+  ///
+  /// In en, this message translates to:
+  /// **'Deco'**
+  String get diveLog_gasGfWhatIf_decoShort;
+
+  /// No description provided for @diveLog_gasGfWhatIf_maxCeiling.
+  ///
+  /// In en, this message translates to:
+  /// **'Deepest ceiling'**
+  String get diveLog_gasGfWhatIf_maxCeiling;
+
+  /// No description provided for @diveLog_gasGfWhatIf_decoObligation.
+  ///
+  /// In en, this message translates to:
+  /// **'Deco obligation'**
+  String get diveLog_gasGfWhatIf_decoObligation;
+
+  /// No description provided for @diveLog_gasGfWhatIf_yes.
+  ///
+  /// In en, this message translates to:
+  /// **'Yes'**
+  String get diveLog_gasGfWhatIf_yes;
+
+  /// No description provided for @diveLog_gasGfWhatIf_no.
+  ///
+  /// In en, this message translates to:
+  /// **'No'**
+  String get diveLog_gasGfWhatIf_no;
+
+  /// No description provided for @diveLog_gasGfWhatIf_peakTissue.
+  ///
+  /// In en, this message translates to:
+  /// **'Peak tissue loading'**
+  String get diveLog_gasGfWhatIf_peakTissue;
+
+  /// No description provided for @diveLog_gasGfWhatIf_cnsEnd.
+  ///
+  /// In en, this message translates to:
+  /// **'CNS at end'**
+  String get diveLog_gasGfWhatIf_cnsEnd;
+
+  /// No description provided for @diveLog_gasGfWhatIf_maxPpO2.
+  ///
+  /// In en, this message translates to:
+  /// **'Max ppO2'**
+  String get diveLog_gasGfWhatIf_maxPpO2;
+
+  /// No description provided for @diveLog_gasGfWhatIf_ceilingTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Depth and ceiling'**
+  String get diveLog_gasGfWhatIf_ceilingTitle;
+
+  /// No description provided for @diveLog_gasGfWhatIf_tissueTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Tissue loading'**
+  String get diveLog_gasGfWhatIf_tissueTitle;
+
   /// No description provided for @diveLog_whatIf_openInPlanner.
   ///
   /// In en, this message translates to:

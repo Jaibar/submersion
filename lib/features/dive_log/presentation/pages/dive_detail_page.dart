@@ -74,6 +74,7 @@ import 'package:submersion/features/dive_log/presentation/utils/sac_normalizatio
 import 'package:submersion/features/dive_log/presentation/utils/sac_segments_availability.dart';
 import 'package:submersion/features/media/presentation/pages/dive_species_photo_viewer_page.dart';
 import 'package:submersion/features/media/presentation/providers/species_media_providers.dart';
+import 'package:submersion/features/dive_log/presentation/pages/gas_gf_what_if_page.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/what_if_sheet.dart';
 import 'package:submersion/features/pre_dive/domain/entities/pre_dive_session.dart';
 import 'package:submersion/features/pre_dive/presentation/providers/pre_dive_providers.dart';
@@ -1278,6 +1279,13 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                   case 'whatIf':
                     showWhatIfSheet(context, dive);
                     break;
+                  case 'gasGfWhatIf':
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => GasGfWhatIfPage(diveId: dive.id),
+                      ),
+                    );
+                    break;
                   case 'delete':
                     _showDeleteConfirmation(context, ref);
                     break;
@@ -1362,6 +1370,15 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                     child: ListTile(
                       leading: const Icon(Icons.tune),
                       title: Text(context.l10n.diveLog_detail_menu_whatIf),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                if (dive.profile.isNotEmpty)
+                  PopupMenuItem(
+                    value: 'gasGfWhatIf',
+                    child: ListTile(
+                      leading: const Icon(Icons.science_outlined),
+                      title: Text(context.l10n.diveLog_detail_menu_gasGfWhatIf),
                       contentPadding: EdgeInsets.zero,
                     ),
                   ),
@@ -1541,6 +1558,13 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                       case 'whatIf':
                         showWhatIfSheet(context, dive);
                         break;
+                      case 'gasGfWhatIf':
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => GasGfWhatIfPage(diveId: dive.id),
+                          ),
+                        );
+                        break;
                       case 'delete':
                         _showDeleteConfirmation(context, ref);
                         break;
@@ -1634,6 +1658,15 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage> {
                         child: ListTile(
                           leading: const Icon(Icons.tune),
                           title: Text(context.l10n.diveLog_detail_menu_whatIf),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                    if (dive.profile.isNotEmpty)
+                      PopupMenuItem(
+                        value: 'gasGfWhatIf',
+                        child: ListTile(
+                          leading: const Icon(Icons.science_outlined),
+                          title: Text(context.l10n.diveLog_detail_menu_gasGfWhatIf),
                           contentPadding: EdgeInsets.zero,
                         ),
                       ),
