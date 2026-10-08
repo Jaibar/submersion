@@ -7,6 +7,10 @@ import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 /// the same axes, so the gap between the diver and the ceiling (how far from
 /// deco) can be read directly. Depth increases downwards; the ceiling curves
 /// are depths too, so a ceiling touching the profile means deco.
+///
+/// Hover (or drag) reports the sample index through [onHover]; [selectedIndex]
+/// draws the cursor and both ceilings' values there, so the chart follows the
+/// same shared cursor as the two dive profile charts.
 class GasGfCeilingChart extends StatelessWidget {
   const GasGfCeilingChart({
     super.key,
@@ -14,6 +18,8 @@ class GasGfCeilingChart extends StatelessWidget {
     required this.loggedCeiling,
     required this.whatIfCeiling,
     required this.units,
+    this.selectedIndex,
+    this.onHover,
     this.height = 160,
   });
 
@@ -23,24 +29,68 @@ class GasGfCeilingChart extends StatelessWidget {
   final List<double> loggedCeiling;
   final List<double> whatIfCeiling;
   final UnitFormatter units;
+  final int? selectedIndex;
+  final ValueChanged<int?>? onHover;
   final double height;
+
+  /// Must match the painter's left gutter for the depth labels.
+  static const double _labelWidth = 36.0;
+
+  /// Nearest sample to horizontal position [dx], or null with no plot area.
+  int? _indexAt(double dx, double width) {
+    if (profile.length < 2 || width <= _labelWidth) return null;
+    final t0 = profile.first.timestamp;
+    final span = profile.last.timestamp - t0;
+    if (span <= 0) return null;
+    final fraction = ((dx - _labelWidth) / (width - _labelWidth)).clamp(
+      0.0,
+      1.0,
+    );
+    final target = t0 + fraction * span;
+    var best = 0;
+    var bestDiff = double.infinity;
+    for (var i = 0; i < profile.length; i++) {
+      final diff = (profile[i].timestamp - target).abs();
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = i;
+      }
+    }
+    return best;
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return SizedBox(
       height: height,
-      child: CustomPaint(
-        painter: _CeilingPainter(
-          profile: profile,
-          loggedCeiling: loggedCeiling,
-          whatIfCeiling: whatIfCeiling,
-          units: units,
-          profileColor: scheme.onSurfaceVariant,
-          loggedColor: scheme.primary,
-          whatIfColor: Colors.deepOrange,
-        ),
-        child: const SizedBox.expand(),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          return MouseRegion(
+            onHover: (e) => onHover?.call(_indexAt(e.localPosition.dx, width)),
+            onExit: (_) => onHover?.call(null),
+            child: GestureDetector(
+              onHorizontalDragUpdate: (d) =>
+                  onHover?.call(_indexAt(d.localPosition.dx, width)),
+              onTapDown: (d) =>
+                  onHover?.call(_indexAt(d.localPosition.dx, width)),
+              child: CustomPaint(
+                painter: _CeilingPainter(
+                  profile: profile,
+                  loggedCeiling: loggedCeiling,
+                  whatIfCeiling: whatIfCeiling,
+                  units: units,
+                  selectedIndex: selectedIndex,
+                  profileColor: scheme.onSurfaceVariant,
+                  loggedColor: scheme.primary,
+                  whatIfColor: Colors.deepOrange,
+                ),
+                child: const SizedBox.expand(),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -52,6 +102,7 @@ class _CeilingPainter extends CustomPainter {
     required this.loggedCeiling,
     required this.whatIfCeiling,
     required this.units,
+    required this.selectedIndex,
     required this.profileColor,
     required this.loggedColor,
     required this.whatIfColor,
@@ -61,6 +112,7 @@ class _CeilingPainter extends CustomPainter {
   final List<double> loggedCeiling;
   final List<double> whatIfCeiling;
   final UnitFormatter units;
+  final int? selectedIndex;
   final Color profileColor;
   final Color loggedColor;
   final Color whatIfColor;
@@ -76,7 +128,7 @@ class _CeilingPainter extends CustomPainter {
     }
     if (span <= 0 || maxDepth <= 0) return;
 
-    const labelWidth = 36.0;
+    const labelWidth = GasGfCeilingChart._labelWidth;
     final chartWidth = size.width - labelWidth;
     Offset at(int i, double depth) => Offset(
       labelWidth + (profile[i].timestamp - t0) / span * chartWidth,
@@ -110,6 +162,41 @@ class _CeilingPainter extends CustomPainter {
       stroke(whatIfColor, 2),
     );
 
+    final selected = selectedIndex;
+    if (selected != null && selected < profile.length) {
+      final x = at(selected, 0).dx;
+      canvas.drawLine(
+        Offset(x, 0),
+        Offset(x, size.height),
+        stroke(profileColor.withValues(alpha: 0.6), 1),
+      );
+      // Both ceilings at the cursor, top of the plot: logged / what-if.
+      final readout = TextPainter(
+        textDirection: TextDirection.ltr,
+        text: TextSpan(
+          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600),
+          children: [
+            TextSpan(
+              text: units.formatDepth(ceilingAt(loggedCeiling, selected)),
+              style: TextStyle(color: loggedColor),
+            ),
+            TextSpan(
+              text: '  /  ',
+              style: TextStyle(color: profileColor),
+            ),
+            TextSpan(
+              text: units.formatDepth(ceilingAt(whatIfCeiling, selected)),
+              style: TextStyle(color: whatIfColor),
+            ),
+          ],
+        ),
+      )..layout();
+      final dx = (x + 6 + readout.width > size.width)
+          ? x - 6 - readout.width
+          : x + 6;
+      readout.paint(canvas, Offset(dx, 2));
+    }
+
     final tp = TextPainter(textDirection: TextDirection.ltr);
     for (final f in [0.0, 0.5, 1.0]) {
       tp.text = TextSpan(
@@ -124,6 +211,7 @@ class _CeilingPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _CeilingPainter old) =>
       old.profile != profile ||
+      old.selectedIndex != selectedIndex ||
       old.loggedCeiling != loggedCeiling ||
       old.whatIfCeiling != whatIfCeiling;
 }

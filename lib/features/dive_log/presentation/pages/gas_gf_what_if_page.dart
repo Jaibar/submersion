@@ -390,6 +390,17 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
               loggedCeiling: loggedAnalysis.ceilingCurve,
               whatIfCeiling: whatIfAnalysis.ceilingCurve,
               units: units,
+              selectedIndex: ref.watch(
+                profileTrackingIndexProvider(widget.diveId),
+              ),
+              onHover: (index) {
+                ref
+                        .read(
+                          profileTrackingIndexProvider(widget.diveId).notifier,
+                        )
+                        .state =
+                    index;
+              },
             ),
           ],
         ),
@@ -417,7 +428,7 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
       dive: dive,
       analysis: loggedAnalysis,
       points: points,
-      overrides: null,
+      overrides: const GasGfOverrides(),
       weeklyOtu: weeklyOtu,
     );
     final whatIf = _panel(
@@ -427,7 +438,13 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
       analysis: whatIfAnalysis,
       points: points,
       overrides: _overrides,
-      weeklyOtu: null,
+      // The weekly total counts this dive in full, so swap the logged dive's
+      // OTU for the what-if one; earlier dives of the week stay as logged.
+      weeklyOtu: weeklyOtu == null
+          ? null
+          : weeklyOtu -
+                loggedAnalysis.o2Exposure.otu +
+                whatIfAnalysis.o2Exposure.otu,
     );
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -452,7 +469,7 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
     required Dive dive,
     required ProfileAnalysis analysis,
     required List<DiveProfilePoint> points,
-    required GasGfOverrides? overrides,
+    required GasGfOverrides overrides,
     required double? weeklyOtu,
   }) {
     final selected = ref.watch(profileTrackingIndexProvider(dive.id));
@@ -498,22 +515,22 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
         // The chart reads its analysis through sourceProfileAnalysisProvider;
         // inside this scope that is the what-if run, so every overlay (ceiling,
         // NDL, ppO2, GF, tissue-derived curves) follows the changed gas/GF.
-        if (overrides == null)
-          chart
-        else
-          ProviderScope(
-            overrides: [
-              sourceProfileAnalysisProvider.overrideWith(
-                (ref, key) => ref.watch(
-                  gasGfWhatIfAnalysisProvider((
-                    diveId: key.diveId,
-                    overrides: overrides,
-                  )).future,
-                ),
+        // Both panels go through this scope (the logged one with no overrides)
+        // so the two charts are fed by the same code path and offer the same
+        // curves and legend entries.
+        ProviderScope(
+          overrides: [
+            sourceProfileAnalysisProvider.overrideWith(
+              (ref, key) => ref.watch(
+                gasGfWhatIfAnalysisProvider((
+                  diveId: key.diveId,
+                  overrides: overrides,
+                )).future,
               ),
-            ],
-            child: chart,
-          ),
+            ),
+          ],
+          child: chart,
+        ),
         const SizedBox(height: 8),
         if (status != null)
           CompactDecoStatusCard(
