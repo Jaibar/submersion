@@ -147,3 +147,23 @@ jobs:
           name: Submersion-custom-android
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 14
+
+  # Tells the owner a new working build exists: an issue on this fork (GitHub
+  # emails it). Runs only when BOTH builds succeeded; a failed run already gets
+  # GitHub's own failure email.
+  notify:
+    needs: [build, android]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue with the download link
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          subject="$(printf '%s' "$COMMIT_MSG" | head -n 1)"
+          gh issue create --repo "${{ github.repository }}" \
+            --title "New build ready: ${subject:-custom/v1.8}" \
+            --body "Windows and Android builds passed. Download them under Artifacts at: $RUN_URL"
