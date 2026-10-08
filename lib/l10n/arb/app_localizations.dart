@@ -76737,6 +76737,12 @@ abstract class AppLocalizations {
   /// **'Seed tissues from previous dive'**
   String get diveLog_whatIf_seedTissues;
 
+  /// No description provided for @diveLog_whatIf_fullProfile.
+  ///
+  /// In en, this message translates to:
+  /// **'Include ascent (whole dive)'**
+  String get diveLog_whatIf_fullProfile;
+
   /// No description provided for @diveLog_whatIf_openInPlanner.
   ///
   /// In en, this message translates to:

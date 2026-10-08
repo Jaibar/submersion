@@ -441,5 +441,29 @@ void main() {
       expect(result.segments, isEmpty);
       expect(result.sourceDiveId, 'dive-1');
     });
+
+    test('includeAscent follows the profile to the surface', () {
+      const converter = DiveToPlanConverter();
+      final profile = _squareProfile();
+      final lastTime = profile.last.timestamp;
+
+      final working = converter.breakpoints(
+        profile: profile,
+        gasSwitches: const [],
+        levels: 3,
+      );
+      final whole = converter.breakpoints(
+        profile: profile,
+        gasSwitches: const [],
+        levels: 3,
+        includeAscent: true,
+      );
+
+      // Default stops at the end of the bottom; whole-dive reaches surfacing.
+      expect(working.last.depth, greaterThan(0));
+      expect(working.last.timeSeconds, lessThan(lastTime));
+      expect(whole.last.timeSeconds, lastTime);
+      expect(whole.last.depth, 0);
+    });
   });
 }

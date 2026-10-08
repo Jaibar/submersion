@@ -39,6 +39,10 @@ class PlanBreakpoint {
 /// the surfacing are deliberately not authored: the plan engine computes them
 /// from that point, so the planner shows its own TTS and deco schedule for the
 /// diver to compare against what the dive computer actually did.
+///
+/// With `includeAscent` the plan instead follows the whole logged profile to
+/// its last sample: the ascent, stops and surfacing are authored too (still
+/// simplified by the same detail level), and the engine adds nothing after it.
 class DiveToPlanConverter {
   const DiveToPlanConverter();
 
@@ -78,6 +82,7 @@ class DiveToPlanConverter {
     required List<DiveProfilePoint> profile,
     required List<GasSwitch> gasSwitches,
     required int levels,
+    bool includeAscent = false,
     required String planName,
     required DivePlanState defaults,
     List<TissueCompartment>? initialTissueState,
@@ -92,6 +97,7 @@ class DiveToPlanConverter {
       profile: profile,
       gasSwitches: gasSwitches,
       levels: levels,
+      includeAscent: includeAscent,
     );
     final firstTimestamp = profile.isEmpty
         ? 0
@@ -161,6 +167,7 @@ class DiveToPlanConverter {
     required List<DiveProfilePoint> profile,
     required List<GasSwitch> gasSwitches,
     required int levels,
+    bool includeAscent = false,
   }) {
     final sorted = [...profile]
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -175,7 +182,11 @@ class DiveToPlanConverter {
     final maxDepth = pts.fold(0.0, (m, p) => math.max(m, p.y));
     if (maxDepth <= 0) return const [];
 
-    final endIndex = _workingEndIndex(pts, maxDepth);
+    // Whole-dive mode ends on the last sample (surfacing) instead of the last
+    // working-depth sample.
+    final endIndex = includeAscent
+        ? pts.length - 1
+        : _workingEndIndex(pts, maxDepth);
     final anchors = _anchorIndices(
       pts,
       endIndex: endIndex,
@@ -235,7 +246,9 @@ class DiveToPlanConverter {
       result.add(PlanBreakpoint(timeSeconds: time, depth: depth));
       resultIsAnchor.add(isAnchor);
     }
-    return _trimTrailingRamp(result, maxDepth);
+    // The trailing-ramp trim exists so the engine ascends from a level; with
+    // the ascent authored the plan legitimately ends on a ramp to the surface.
+    return includeAscent ? result : _trimTrailingRamp(result, maxDepth);
   }
 
   /// The plan must end on a hold so the engine ascends from a level, not from

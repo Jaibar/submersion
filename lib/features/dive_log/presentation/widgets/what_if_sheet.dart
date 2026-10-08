@@ -40,6 +40,7 @@ class WhatIfSheet extends ConsumerStatefulWidget {
 class _WhatIfSheetState extends ConsumerState<WhatIfSheet> {
   int _levels = 3;
   bool _seedTissues = true;
+  bool _includeAscent = false;
   bool _loading = false;
 
   @override
@@ -80,6 +81,7 @@ class _WhatIfSheetState extends ConsumerState<WhatIfSheet> {
                 profile: profile,
                 gasSwitches: gasSwitches,
                 levels: _levels,
+                includeAscent: _includeAscent,
                 units: units,
               ),
               loading: () => const Padding(
@@ -111,6 +113,12 @@ class _WhatIfSheetState extends ConsumerState<WhatIfSheet> {
                 ),
                 Text('$_levels'),
               ],
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _includeAscent,
+              title: Text(context.l10n.diveLog_whatIf_fullProfile),
+              onChanged: (v) => setState(() => _includeAscent = v),
             ),
             precedingAsync.maybeWhen(
               data: (preceding) => preceding == null
@@ -196,6 +204,7 @@ class _WhatIfSheetState extends ConsumerState<WhatIfSheet> {
       profile: profile,
       gasSwitches: gasSwitches,
       levels: _levels,
+      includeAscent: _includeAscent,
       planName: context.l10n.diveLog_whatIf_planName(title),
       defaults: defaults,
       initialTissueState: tissueCompartments.isEmpty
@@ -250,12 +259,14 @@ class _WhatIfPreview extends StatelessWidget {
     required this.profile,
     required this.gasSwitches,
     required this.levels,
+    required this.includeAscent,
     required this.units,
   });
 
   final List<DiveProfilePoint> profile;
   final List<GasSwitch> gasSwitches;
   final int levels;
+  final bool includeAscent;
   final UnitFormatter units;
 
   @override
@@ -270,6 +281,7 @@ class _WhatIfPreview extends StatelessWidget {
           profile: profile,
           gasSwitches: gasSwitches,
           levels: levels,
+          includeAscent: includeAscent,
           units: units,
           actualColor: scheme.onSurfaceVariant,
           levelColor: scheme.primary,
@@ -291,15 +303,18 @@ class WhatIfPreviewPainter extends CustomPainter {
     required this.units,
     required this.actualColor,
     required this.levelColor,
+    this.includeAscent = false,
   }) : waypoints = const DiveToPlanConverter().breakpoints(
          profile: profile,
          gasSwitches: gasSwitches,
          levels: levels,
+         includeAscent: includeAscent,
        );
 
   final List<DiveProfilePoint> profile;
   final List<GasSwitch> gasSwitches;
   final int levels;
+  final bool includeAscent;
   final UnitFormatter units;
   final Color actualColor;
   final Color levelColor;
@@ -383,6 +398,7 @@ class WhatIfPreviewPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant WhatIfPreviewPainter oldDelegate) =>
       oldDelegate.levels != levels ||
+      oldDelegate.includeAscent != includeAscent ||
       oldDelegate.profile != profile ||
       oldDelegate.gasSwitches != gasSwitches;
 }

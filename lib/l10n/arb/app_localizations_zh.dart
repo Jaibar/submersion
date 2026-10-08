@@ -45421,6 +45421,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get diveLog_whatIf_seedTissues => 'Seed tissues from previous dive';
 
   @override
+  String get diveLog_whatIf_fullProfile => 'Include ascent (whole dive)';
+
+  @override
   String get diveLog_whatIf_openInPlanner => 'Open in planner';
 
   @override

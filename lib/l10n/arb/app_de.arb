@@ -14504,6 +14504,7 @@
   "diveLog_whatIf_detailLabel": "Detail",
   "diveLog_whatIf_engineNote": "The plan covers the descent and working levels. The planner computes the ascent and deco so you can compare them with the logged dive.",
   "diveLog_whatIf_seedTissues": "Seed tissues from previous dive",
+  "diveLog_whatIf_fullProfile": "Include ascent (whole dive)",
   "diveLog_whatIf_openInPlanner": "Open in planner",
   "diveLog_whatIf_planName": "Replan: {title}",
   "@diveLog_whatIf_planName": {
