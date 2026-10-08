@@ -1,3 +1,6 @@
+// CUSTOM BRANCH (custom/v1.8): 'Submersion-custom' instead of 'Submersion' so a test
+// build never opens the database of an installed Submersion. Copy submersion.db
+// into Documents\Submersion-custom\ to test against real dives.
 /// The folder under the platform documents directory that holds the app's
 /// own persistent data: the database and its sidecars, pre-reset backups,
 /// and the scanned-page copies written by the OCR import flow.
@@ -7,4 +10,4 @@
 /// among their personal files (issue #1645). Files the user asked for, such
 /// as exports, deliberately land in the Documents root where they can find
 /// them; everything the app keeps for itself goes under this name.
-const String kAppDocumentsFolder = 'Submersion';
+const String kAppDocumentsFolder = 'Submersion-custom';

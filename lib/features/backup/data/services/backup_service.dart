@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 import 'package:uuid/uuid.dart';
 
+import 'package:submersion/core/constants/app_directories.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/services/backup_bookmark_service.dart';
@@ -122,7 +123,10 @@ class BackupService {
   final _log = LoggerService.forClass(BackupService);
   final _uuid = const Uuid();
 
-  static const List<String> _localBackupFolder = ['Submersion', 'Backups'];
+  static const List<String> _localBackupFolder = [
+    kAppDocumentsFolder,
+    'Backups',
+  ];
   static const String _cloudBackupFolder = 'Submersion Backups';
 
   BackupService({
