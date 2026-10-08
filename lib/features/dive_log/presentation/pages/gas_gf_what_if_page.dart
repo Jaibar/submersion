@@ -8,8 +8,13 @@ import 'package:submersion/features/dive_log/domain/services/gas_gf_what_if.dart
 import 'package:submersion/features/dive_log/presentation/providers/gas_gf_what_if_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/gas_gf_ceiling_chart.dart';
-import 'package:submersion/features/dive_log/presentation/widgets/tissue_area_chart.dart';
-import 'package:submersion/features/dive_log/presentation/widgets/tissue_color_schemes.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_tracking_provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/compact_deco_status_card.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/compact_tissue_loading_card.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_chart.dart'
+    show TooltipPresentation;
+import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_chart_host.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/o2_toxicity_card.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
@@ -97,16 +102,12 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
                     units,
                   ),
                   const SizedBox(height: 16),
-                  _tissueCard(
+                  _panels(
                     context,
-                    l10n.diveLog_gasGfWhatIf_loggedLabel,
+                    dive,
                     loggedAnalysis,
-                  ),
-                  const SizedBox(height: 12),
-                  _tissueCard(
-                    context,
-                    l10n.diveLog_gasGfWhatIf_whatIfLabel,
                     whatIfAnalysis,
+                    points,
                   ),
                 ],
               ],
@@ -396,33 +397,149 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
     );
   }
 
-  Widget _tissueCard(
+  /// Logged and what-if side by side (stacked on a narrow screen): the dive
+  /// profile chart, deco status, oxygen toxicity and tissue loading, each the
+  /// same widget the dive detail page uses. Both charts share the dive's
+  /// tracking index, so hovering either one moves the cursor and the readouts
+  /// in both.
+  Widget _panels(
     BuildContext context,
-    String label,
-    ProfileAnalysis analysis,
+    Dive dive,
+    ProfileAnalysis loggedAnalysis,
+    ProfileAnalysis whatIfAnalysis,
+    List<DiveProfilePoint> points,
   ) {
-    final colorFn = colorFnForScheme(ref.watch(tissueColorSchemeProvider));
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
+    final l10n = context.l10n;
+    final weeklyOtu = ref.watch(weeklyOtuProvider(dive.id)).value;
+    final logged = _panel(
+      context,
+      label: l10n.diveLog_gasGfWhatIf_loggedLabel,
+      dive: dive,
+      analysis: loggedAnalysis,
+      points: points,
+      overrides: null,
+      weeklyOtu: weeklyOtu,
+    );
+    final whatIf = _panel(
+      context,
+      label: l10n.diveLog_gasGfWhatIf_whatIfLabel,
+      dive: applyGasGfOverrides(dive, _overrides),
+      analysis: whatIfAnalysis,
+      points: points,
+      overrides: _overrides,
+      weeklyOtu: null,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 1000) {
+          return Column(children: [logged, const SizedBox(height: 24), whatIf]);
+        }
+        return Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              '${context.l10n.diveLog_gasGfWhatIf_tissueTitle} - $label',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 8),
-            if (analysis.decoStatuses.isNotEmpty)
-              TissueAreaChart(
-                decoStatuses: analysis.decoStatuses,
-                colorFn: colorFn,
-                isExpanded: true,
-                height: 120,
-              ),
+            Expanded(child: logged),
+            const SizedBox(width: 16),
+            Expanded(child: whatIf),
           ],
-        ),
-      ),
+        );
+      },
     );
+  }
+
+  Widget _panel(
+    BuildContext context, {
+    required String label,
+    required Dive dive,
+    required ProfileAnalysis analysis,
+    required List<DiveProfilePoint> points,
+    required GasGfOverrides? overrides,
+    required double? weeklyOtu,
+  }) {
+    final selected = ref.watch(profileTrackingIndexProvider(dive.id));
+    final hasSelection = selected != null && selected < points.length;
+    final subtitle = hasSelection
+        ? context.l10n.diveLog_detail_collapsed_atTime(
+            _formatTimestamp(points[selected].timestamp),
+          )
+        : null;
+
+    double? at(List<double>? curve) =>
+        hasSelection && curve != null && selected < curve.length
+        ? curve[selected]
+        : null;
+
+    final chart = DiveProfileChartHost(
+      dive: dive,
+      tooltipPresentation: TooltipPresentation.nativeBubble,
+    );
+
+    final o2 = CompactO2ToxicityPanel(
+      exposure: analysis.o2Exposure,
+      selectedPpO2: at(analysis.ppO2Curve),
+      selectedCns: at(analysis.cnsCurve),
+      selectedOtu: at(analysis.otuCurve),
+      subtitle: subtitle,
+      weeklyOtu: weeklyOtu,
+    );
+
+    final statuses = analysis.decoStatuses;
+    final showDeco = statuses.isNotEmpty && !analysis.tissueLoadingWithheld;
+    final status = showDeco
+        ? statuses[hasSelection && selected < statuses.length
+              ? selected
+              : statuses.length - 1]
+        : null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(label, style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 8),
+        // The chart reads its analysis through sourceProfileAnalysisProvider;
+        // inside this scope that is the what-if run, so every overlay (ceiling,
+        // NDL, ppO2, GF, tissue-derived curves) follows the changed gas/GF.
+        if (overrides == null)
+          chart
+        else
+          ProviderScope(
+            overrides: [
+              sourceProfileAnalysisProvider.overrideWith(
+                (ref, key) => ref.watch(
+                  gasGfWhatIfAnalysisProvider((
+                    diveId: key.diveId,
+                    overrides: overrides,
+                  )).future,
+                ),
+              ),
+            ],
+            child: chart,
+          ),
+        const SizedBox(height: 8),
+        if (status != null)
+          CompactDecoStatusCard(
+            status: status,
+            gfSource: analysis.gfSource,
+            subtitle: subtitle,
+          ),
+        const SizedBox(height: 8),
+        o2,
+        const SizedBox(height: 8),
+        if (status != null)
+          CompactTissueLoadingCard(
+            status: status,
+            decoStatuses: statuses,
+            selectedIndex: selected,
+            subtitle: subtitle,
+            onHeatMapHover: (index) =>
+                ref.read(profileTrackingIndexProvider(dive.id).notifier).state =
+                    index,
+          ),
+      ],
+    );
+  }
+
+  String _formatTimestamp(int seconds) {
+    final secs = (seconds % 60).toString().padLeft(2, '0');
+    return '${seconds ~/ 60}:$secs';
   }
 }
