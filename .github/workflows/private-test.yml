@@ -1,0 +1,84 @@
+name: Private test build
+
+# Fork-only workflow for the custom/** branches: no pull request needed.
+# Runs on every push to custom/** and can also be started by hand from the
+# Actions tab. It
+#   1. formats the code with `dart format` and commits the result back to the
+#      branch (there is no local Dart to do it),
+#   2. analyzes it and runs the tests for the what-if features,
+#   3. builds the Windows release and uploads it as a zip artifact: download it
+#      from the run page, unzip, run submersion.exe. Nothing to install.
+# Never touches upstream: it only exists on this fork's custom/** branches.
+
+on:
+  push:
+    branches: ['custom/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: private-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Read Flutter version
+        id: flutter-ver
+        shell: bash
+        run: echo "version=$(cat .github/flutter-version.txt)" >> "$GITHUB_OUTPUT"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter-ver.outputs.version }}
+          channel: stable
+
+      - name: Install dependencies and run code generation
+        run: |
+          flutter pub get
+          dart run build_runner build --delete-conflicting-outputs
+
+      - name: Format and commit back to the branch
+        shell: bash
+        run: |
+          dart format lib test
+          if [ -n "$(git status --porcelain lib test)" ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add lib test
+            git commit -m "style: apply dart format"
+            git push
+          else
+            echo "Already formatted."
+          fi
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Tests for the what-if features
+        run: >
+          flutter test
+          test/features/dive_log/domain/services/gas_gf_what_if_test.dart
+          test/features/dive_log/presentation/widgets/what_if_sheet_test.dart
+          test/features/planner/domain/services/dive_to_plan_converter_test.dart
+
+      - name: Build Windows release
+        run: flutter build windows --release --dart-define=UPDATE_CHANNEL=github
+
+      - name: Zip the build
+        shell: pwsh
+        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath Submersion-custom-windows.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Submersion-custom-windows
+          path: Submersion-custom-windows.zip
+          retention-days: 14
