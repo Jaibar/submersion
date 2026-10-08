@@ -1,0 +1,77 @@
+name: Private upstream sync
+
+# Fork-only. Every 3 days (or by hand from the Actions tab) merges
+# submersion-app/submersion main into custom/v1.8 and, when something new came
+# in, lets private-test.yml build the Windows zip and Android APK.
+#
+# - Read-only towards upstream: it only fetches. Everything is pushed to THIS
+#   fork's custom/v1.8.
+# - A merge conflict fails the job (nothing is pushed, the merge is aborted);
+#   GitHub emails the failure. Resolve it by asking Claude to update the branch.
+# - Scheduled workflows only run from the fork's DEFAULT branch, so this only
+#   fires nightly once custom/v1.8 is set as the fork's default branch.
+# - Pushing with the built-in token can not touch .github/workflows and does not
+#   start other workflows. With a fork secret SYNC_TOKEN (a fine-grained token
+#   with Contents + Workflows write on this fork) both limits go away; without
+#   it the job dispatches private-test.yml itself.
+
+on:
+  schedule:
+    - cron: '0 3 */3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: private-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: custom/v1.8
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Merge upstream/main
+        id: merge
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git remote add upstream https://github.com/submersion-app/submersion.git
+          git fetch upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream/main."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Upstream commits not yet in custom/v1.8:"
+          git log --oneline HEAD..upstream/main | head -20
+
+          if ! git merge upstream/main -m "Merge upstream/main into custom/v1.8"; then
+            echo "::error::Merge conflict. Conflicting files:"
+            git diff --name-only --diff-filter=U
+            git merge --abort
+            exit 1
+          fi
+
+          git push origin HEAD:custom/v1.8
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # A push made with the built-in token does not trigger private-test.yml,
+      # so start it explicitly. With SYNC_TOKEN the push itself triggers it.
+      - name: Start the test build
+        if: steps.merge.outputs.changed == 'true' && env.HAS_SYNC_TOKEN == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # `secrets` is not available in `if:`, so test it through env.
+          HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+        run: gh workflow run private-test.yml --ref custom/v1.8
