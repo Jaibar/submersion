@@ -42,3 +42,16 @@ final gasGfWhatIfAnalysisProvider =
         perSource: true,
       );
     });
+
+/// The overrides one what-if panel is showing.
+///
+/// Meant to be overridden with `overrideWithValue` in the panel's own
+/// [ProviderScope], and read by the scope's `sourceProfileAnalysisProvider`
+/// override. The override callback is only run when a provider instance is
+/// first created: capturing the overrides in the closure left the chart
+/// showing the previous gas/GF after "Reset to logged" until a slider happened
+/// to rebuild it. Reading them through a provider makes the analysis follow
+/// every change.
+final whatIfPanelOverridesProvider = Provider<GasGfOverrides>(
+  (ref) => const GasGfOverrides(),
+);

@@ -520,11 +520,12 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
         // curves and legend entries.
         ProviderScope(
           overrides: [
+            whatIfPanelOverridesProvider.overrideWithValue(overrides),
             sourceProfileAnalysisProvider.overrideWith(
               (ref, key) => ref.watch(
                 gasGfWhatIfAnalysisProvider((
                   diveId: key.diveId,
-                  overrides: overrides,
+                  overrides: ref.watch(whatIfPanelOverridesProvider),
                 )).future,
               ),
             ),
