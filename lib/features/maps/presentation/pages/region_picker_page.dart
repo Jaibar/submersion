@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -14,8 +15,14 @@ import 'package:submersion/l10n/l10n_extension.dart';
 /// Page for selecting a rectangular region on a map and opening the
 /// [RegionDownloadDialog] for that region.
 ///
-/// The user drags on the map to draw a bounding box, then confirms the
-/// selection to launch the download dialog.
+/// It has two modes, switched by the toggle at the top:
+/// - Move: drag to pan, pinch / double-tap / the +/- buttons to zoom.
+/// - Select: drag to draw the download rectangle, or drag one of its corner
+///   handles to adjust it. Confirm to launch the download dialog.
+///
+/// The rectangle is stored as coordinates, so it stays put on the map while
+/// the map is moved. The page starts in Move mode so the diver can first
+/// navigate to the area (Palau, the Bahamas) before drawing.
 class RegionPickerPage extends ConsumerStatefulWidget {
   const RegionPickerPage({super.key});
 
@@ -24,7 +31,16 @@ class RegionPickerPage extends ConsumerStatefulWidget {
 }
 
 class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
+  /// Lowest zoom the picker allows: the whole world.
+  static const double _minZoom = 2.0;
+
   final MapController _mapController = MapController();
+
+  bool _selecting = false;
+
+  /// Bumped on every camera change so the selection rectangle repaints at its
+  /// new screen position.
+  int _cameraTick = 0;
 
   Future<void> _onRegionSelected(LatLng southWest, LatLng northEast) async {
     final confirmed = await showDialog<bool>(
@@ -38,10 +54,39 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
     }
   }
 
+  void _zoomBy(double delta) {
+    final camera = _mapController.camera;
+    final maxZoom = ref.read(mapTileMaxZoomProvider).toDouble();
+    final zoom = (camera.zoom + delta).clamp(_minZoom, maxZoom);
+    _mapController.move(camera.center, zoom);
+  }
+
+  /// Called by flutter_map on every camera change, possibly during a layout
+  /// pass, so the rebuild is deferred to after the frame.
+  void _onCameraChanged() {
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => _cameraTick++);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    // Select mode keeps only the gestures that cannot clash with drawing;
+    // Move mode gives the map every gesture except rotation.
+    final flags = _selecting
+        ? InteractiveFlag.pinchZoom |
+              InteractiveFlag.pinchMove |
+              InteractiveFlag.doubleTapZoom
+        : InteractiveFlag.drag |
+              InteractiveFlag.flingAnimation |
+              InteractiveFlag.pinchMove |
+              InteractiveFlag.pinchZoom |
+              InteractiveFlag.doubleTapZoom |
+              InteractiveFlag.scrollWheelZoom;
+
     return Scaffold(
-      appBar: AppBar(title: Text(context.l10n.maps_offline_downloadNewRegion)),
+      appBar: AppBar(title: Text(l10n.maps_offline_downloadNewRegion)),
       body: Stack(
         children: [
           TrackpadZoomMap(
@@ -51,12 +96,10 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
               options: MapOptions(
                 initialCenter: const LatLng(20.0, 0.0),
                 initialZoom: 2.0,
-                minZoom: 2.0,
+                minZoom: _minZoom,
                 maxZoom: ref.watch(mapTileMaxZoomProvider),
-                interactionOptions: const InteractionOptions(
-                  flags:
-                      InteractiveFlag.pinchZoom | InteractiveFlag.doubleTapZoom,
-                ),
+                interactionOptions: InteractionOptions(flags: flags),
+                onPositionChanged: (camera, hasGesture) => _onCameraChanged(),
               ),
               children: [
                 TileLayer(
@@ -74,6 +117,54 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
           RegionSelector(
             mapController: _mapController,
             onRegionSelected: _onRegionSelected,
+            selecting: _selecting,
+            cameraTick: _cameraTick,
+          ),
+          // Mode toggle, under the instruction card.
+          Positioned(
+            top: 88,
+            left: 16,
+            child: SegmentedButton<bool>(
+              showSelectedIcon: false,
+              segments: [
+                ButtonSegment(
+                  value: false,
+                  icon: const Icon(Icons.open_with),
+                  label: Text(l10n.maps_regionSelector_modeMove),
+                ),
+                ButtonSegment(
+                  value: true,
+                  icon: const Icon(Icons.crop_free),
+                  label: Text(l10n.maps_regionSelector_modeSelect),
+                ),
+              ],
+              selected: {_selecting},
+              onSelectionChanged: (value) =>
+                  setState(() => _selecting = value.first),
+            ),
+          ),
+          // Zoom buttons, above the action buttons.
+          Positioned(
+            right: 16,
+            bottom: 96,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: null,
+                  tooltip: l10n.maps_regionSelector_zoomIn,
+                  onPressed: () => _zoomBy(1),
+                  child: const Icon(Icons.add),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: null,
+                  tooltip: l10n.maps_regionSelector_zoomOut,
+                  onPressed: () => _zoomBy(-1),
+                  child: const Icon(Icons.remove),
+                ),
+              ],
+            ),
           ),
         ],
       ),

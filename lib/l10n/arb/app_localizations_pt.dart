@@ -31514,6 +31514,21 @@ class AppLocalizationsPt extends AppLocalizations {
   String get maps_regionSelector_selectRegionButton => 'Selecionar Região';
 
   @override
+  String get maps_regionSelector_dragToMove => 'Drag to move the map, pinch or use + / - to zoom';
+
+  @override
+  String get maps_regionSelector_modeMove => 'Move';
+
+  @override
+  String get maps_regionSelector_modeSelect => 'Select';
+
+  @override
+  String get maps_regionSelector_zoomIn => 'Zoom in';
+
+  @override
+  String get maps_regionSelector_zoomOut => 'Zoom out';
+
+  @override
   String get tankPresets_addPreset => 'Adicionar preset de cilindro';
 
   @override
