@@ -69,6 +69,7 @@ jobs:
           test/features/dive_log/domain/services/gas_gf_what_if_test.dart
           test/features/dive_log/presentation/widgets/what_if_sheet_test.dart
           test/features/planner/domain/services/dive_to_plan_converter_test.dart
+          test/features/maps/presentation/widgets/region_download_tile_layer_test.dart
 
       - name: Build Windows release
         run: flutter build windows --release --dart-define=UPDATE_CHANNEL=github
