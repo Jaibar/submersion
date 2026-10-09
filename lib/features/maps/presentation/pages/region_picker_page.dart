@@ -104,86 +104,87 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
                 _zoomBy(-1),
           },
           child: Stack(
-        children: [
-          TrackpadZoomMap(
-            controller: _mapController,
-            child: FlutterMap(
-              mapController: _mapController,
-              options: MapOptions(
-                initialCenter: const LatLng(20.0, 0.0),
-                initialZoom: 2.0,
-                minZoom: _minZoom,
-                maxZoom: ref.watch(mapTileMaxZoomProvider),
-                interactionOptions: InteractionOptions(flags: flags),
-                onPositionChanged: (camera, hasGesture) => _onCameraChanged(),
-              ),
-              children: [
-                TileLayer(
-                  urlTemplate: ref.watch(mapTileUrlProvider),
-                  userAgentPackageName: 'app.submersion',
-                  maxZoom: ref.watch(mapTileMaxZoomProvider),
-                  tileProvider: TileCacheService.instance.tileProviderFor(
-                    urlTemplate: ref.watch(mapTileUrlProvider),
+            children: [
+              TrackpadZoomMap(
+                controller: _mapController,
+                child: FlutterMap(
+                  mapController: _mapController,
+                  options: MapOptions(
+                    initialCenter: const LatLng(20.0, 0.0),
+                    initialZoom: 2.0,
+                    minZoom: _minZoom,
+                    maxZoom: ref.watch(mapTileMaxZoomProvider),
+                    interactionOptions: InteractionOptions(flags: flags),
+                    onPositionChanged: (camera, hasGesture) =>
+                        _onCameraChanged(),
                   ),
+                  children: [
+                    TileLayer(
+                      urlTemplate: ref.watch(mapTileUrlProvider),
+                      userAgentPackageName: 'app.submersion',
+                      maxZoom: ref.watch(mapTileMaxZoomProvider),
+                      tileProvider: TileCacheService.instance.tileProviderFor(
+                        urlTemplate: ref.watch(mapTileUrlProvider),
+                      ),
+                    ),
+                    const MapAttribution(),
+                  ],
                 ),
-                const MapAttribution(),
-              ],
-            ),
+              ),
+              RegionSelector(
+                mapController: _mapController,
+                onRegionSelected: _onRegionSelected,
+                selecting: _selecting,
+                cameraTick: _cameraTick,
+              ),
+              // Mode toggle, under the instruction card.
+              Positioned(
+                top: 88,
+                left: 16,
+                child: SegmentedButton<bool>(
+                  showSelectedIcon: false,
+                  segments: [
+                    ButtonSegment(
+                      value: false,
+                      icon: const Icon(Icons.open_with),
+                      label: Text(l10n.maps_regionSelector_modeMove),
+                    ),
+                    ButtonSegment(
+                      value: true,
+                      icon: const Icon(Icons.crop_free),
+                      label: Text(l10n.maps_regionSelector_modeSelect),
+                    ),
+                  ],
+                  selected: {_selecting},
+                  onSelectionChanged: (value) =>
+                      setState(() => _selecting = value.first),
+                ),
+              ),
+              // Zoom buttons, above the action buttons.
+              Positioned(
+                right: 16,
+                bottom: 96,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FloatingActionButton.small(
+                      heroTag: null,
+                      tooltip: l10n.maps_regionSelector_zoomIn,
+                      onPressed: () => _zoomBy(1),
+                      child: const Icon(Icons.add),
+                    ),
+                    const SizedBox(height: 8),
+                    FloatingActionButton.small(
+                      heroTag: null,
+                      tooltip: l10n.maps_regionSelector_zoomOut,
+                      onPressed: () => _zoomBy(-1),
+                      child: const Icon(Icons.remove),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          RegionSelector(
-            mapController: _mapController,
-            onRegionSelected: _onRegionSelected,
-            selecting: _selecting,
-            cameraTick: _cameraTick,
-          ),
-          // Mode toggle, under the instruction card.
-          Positioned(
-            top: 88,
-            left: 16,
-            child: SegmentedButton<bool>(
-              showSelectedIcon: false,
-              segments: [
-                ButtonSegment(
-                  value: false,
-                  icon: const Icon(Icons.open_with),
-                  label: Text(l10n.maps_regionSelector_modeMove),
-                ),
-                ButtonSegment(
-                  value: true,
-                  icon: const Icon(Icons.crop_free),
-                  label: Text(l10n.maps_regionSelector_modeSelect),
-                ),
-              ],
-              selected: {_selecting},
-              onSelectionChanged: (value) =>
-                  setState(() => _selecting = value.first),
-            ),
-          ),
-          // Zoom buttons, above the action buttons.
-          Positioned(
-            right: 16,
-            bottom: 96,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                FloatingActionButton.small(
-                  heroTag: null,
-                  tooltip: l10n.maps_regionSelector_zoomIn,
-                  onPressed: () => _zoomBy(1),
-                  child: const Icon(Icons.add),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: null,
-                  tooltip: l10n.maps_regionSelector_zoomOut,
-                  onPressed: () => _zoomBy(-1),
-                  child: const Icon(Icons.remove),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
         ),
       ),
     );

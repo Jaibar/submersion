@@ -102,8 +102,8 @@ class _RegionSelectorState extends State<RegionSelector> {
     (LatLng, LatLng)? best;
     var bestDistance = radius;
     for (final pair in _cornerPairs()) {
-      final distance = (camera.latLngToScreenOffset(pair.$1) - localPos)
-          .distance;
+      final distance =
+          (camera.latLngToScreenOffset(pair.$1) - localPos).distance;
       if (distance <= bestDistance) {
         bestDistance = distance;
         best = pair;

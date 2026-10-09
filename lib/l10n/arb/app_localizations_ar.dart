@@ -31931,7 +31931,8 @@ class AppLocalizationsAr extends AppLocalizations {
   String get maps_regionSelector_selectRegionButton => 'تحديد المنطقة';
 
   @override
-  String get maps_regionSelector_dragToMove => 'Drag to move the map, pinch or use + / - to zoom';
+  String get maps_regionSelector_dragToMove =>
+      'Drag to move the map, pinch or use + / - to zoom';
 
   @override
   String get maps_regionSelector_modeMove => 'Move';
