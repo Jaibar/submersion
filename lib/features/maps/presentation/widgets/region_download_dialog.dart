@@ -8,6 +8,32 @@ import 'package:submersion/features/maps/presentation/providers/map_tile_provide
 import 'package:submersion/features/maps/presentation/providers/offline_map_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
+/// A tile provider that holds no HTTP client, used only to describe a download.
+///
+/// FMTC copies the whole [TileLayer] to its download isolate, and a layer built
+/// without a provider gets flutter_map's network provider, which owns an HTTP
+/// client. On Windows the app installs `TrustedHttpOverrides`, so that client's
+/// `HttpClient` holds a native `SecurityContext`, and `Isolate.spawn` fails
+/// with "object is unsendable ... _SecurityContext": the download never starts
+/// and the progress card sits at 0 / 0 tiles. The download isolate only reads
+/// this provider's headers and tile URL, so a provider with no client does the
+/// job and can cross the isolate boundary on every platform.
+class DownloadTileProvider extends TileProvider {
+  DownloadTileProvider();
+}
+
+/// The [TileLayer] handed to FMTC to describe [urlTemplate] for a region
+/// download or tile-count estimate.
+TileLayer regionDownloadTileLayer({
+  required String urlTemplate,
+  required double maxZoom,
+}) => TileLayer(
+  urlTemplate: urlTemplate,
+  userAgentPackageName: 'app.submersion',
+  maxZoom: maxZoom,
+  tileProvider: DownloadTileProvider(),
+);
+
 /// Dialog for configuring and starting a region download.
 ///
 /// Allows users to:
@@ -39,9 +65,8 @@ class _RegionDownloadDialogState extends ConsumerState<RegionDownloadDialog> {
   int? _estimatedTiles;
 
   /// Default tile layer options using the selected map style.
-  TileLayer get _tileLayerOptions => TileLayer(
+  TileLayer get _tileLayerOptions => regionDownloadTileLayer(
     urlTemplate: ref.watch(mapTileUrlProvider),
-    userAgentPackageName: 'app.submersion',
     maxZoom: ref.watch(mapTileMaxZoomProvider),
   );
 
