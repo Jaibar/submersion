@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -19,6 +20,9 @@ import 'package:submersion/l10n/l10n_extension.dart';
 /// - Move: drag to pan, pinch / double-tap / the +/- buttons to zoom.
 /// - Select: drag to draw the download rectangle, or drag one of its corner
 ///   handles to adjust it. Confirm to launch the download dialog.
+///
+/// Mouse and keyboard: wheel and double-click zoom, `+` / `-` (also on the
+/// numpad) zoom in and out, and the middle button pans in Select mode too.
 ///
 /// The rectangle is stored as coordinates, so it stays put on the map while
 /// the map is moved. The page starts in Move mode so the diver can first
@@ -87,7 +91,19 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.maps_offline_downloadNewRegion)),
-      body: Stack(
+      body: Focus(
+        autofocus: true,
+        child: CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.equal): () => _zoomBy(1),
+            const SingleActivator(LogicalKeyboardKey.add): () => _zoomBy(1),
+            const SingleActivator(LogicalKeyboardKey.numpadAdd): () =>
+                _zoomBy(1),
+            const SingleActivator(LogicalKeyboardKey.minus): () => _zoomBy(-1),
+            const SingleActivator(LogicalKeyboardKey.numpadSubtract): () =>
+                _zoomBy(-1),
+          },
+          child: Stack(
         children: [
           TrackpadZoomMap(
             controller: _mapController,
@@ -167,6 +183,8 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
             ),
           ),
         ],
+      ),
+        ),
       ),
     );
   }

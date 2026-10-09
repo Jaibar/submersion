@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' hide Path;
@@ -16,6 +17,11 @@ typedef RegionSelectedCallback =
 ///   on one of the rectangle's four corner handles, in which case that corner
 ///   follows the finger and the opposite corner stays put. The drawing layer
 ///   sits above the map, so the map itself cannot be panned in this mode.
+///
+/// Mouse: the cursor turns into a crosshair in select mode and into a grab hand
+/// over a corner handle, the corner grab area is smaller for a mouse than for a
+/// finger, and the middle button pans the map even in select mode.
+///
 /// - Move (false): the drawing layer is removed, so drags and pinches reach the
 ///   map and it can be panned and zoomed. The rectangle stays drawn and follows
 ///   the map (it is stored as coordinates, and [cameraTick] makes it repaint).
@@ -47,9 +53,20 @@ class _RegionSelectorState extends State<RegionSelector> {
   /// grabs it. Generous, because a fingertip is much bigger than the dot.
   static const double _cornerGrabRadius = 36;
 
+  /// A mouse is precise, so its grab area is much smaller; a big one would make
+  /// it impossible to start a new rectangle near an existing corner.
+  static const double _cornerGrabRadiusMouse = 14;
+
   LatLng? _startPoint;
   LatLng? _endPoint;
   bool _isDragging = false;
+
+  /// Mouse is over a corner handle (changes the cursor to a grab hand).
+  bool _hoverCorner = false;
+
+  /// The middle mouse button is held and moving: pan the map by hand, because
+  /// the drawing layer above the map takes the primary-button drags.
+  bool _middlePanning = false;
 
   LatLng? get _southWest {
     if (_startPoint == null || _endPoint == null) return null;
@@ -79,11 +96,11 @@ class _RegionSelectorState extends State<RegionSelector> {
 
   /// The corner pair whose handle is nearest [localPos] and within the grab
   /// radius, or null when the press is not on a handle.
-  (LatLng, LatLng)? _cornerNear(Offset localPos) {
+  (LatLng, LatLng)? _cornerNear(Offset localPos, double radius) {
     if (_southWest == null || _northEast == null) return null;
     final camera = widget.mapController.camera;
     (LatLng, LatLng)? best;
-    var bestDistance = _cornerGrabRadius;
+    var bestDistance = radius;
     for (final pair in _cornerPairs()) {
       final distance = (camera.latLngToScreenOffset(pair.$1) - localPos)
           .distance;
@@ -98,7 +115,10 @@ class _RegionSelectorState extends State<RegionSelector> {
   void _onPanStart(DragStartDetails details) {
     final renderBox = context.findRenderObject() as RenderBox;
     final localPos = renderBox.globalToLocal(details.globalPosition);
-    final corner = _cornerNear(localPos);
+    final radius = details.kind == PointerDeviceKind.mouse
+        ? _cornerGrabRadiusMouse
+        : _cornerGrabRadius;
+    final corner = _cornerNear(localPos, radius);
     setState(() {
       if (corner != null) {
         // Grab the corner where it is (no jump), pinned to its opposite.
@@ -123,6 +143,33 @@ class _RegionSelectorState extends State<RegionSelector> {
     setState(() {
       _endPoint = point;
     });
+  }
+
+  void _onHover(PointerHoverEvent event) {
+    final over =
+        _cornerNear(event.localPosition, _cornerGrabRadiusMouse) != null;
+    if (over != _hoverCorner) setState(() => _hoverCorner = over);
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    if (event.buttons == kMiddleMouseButton) _middlePanning = true;
+  }
+
+  void _onPointerMove(PointerMoveEvent event) {
+    if (!_middlePanning) return;
+    final camera = widget.mapController.camera;
+    final size = (context.findRenderObject() as RenderBox).size;
+    // Dragging the map right means the view centre moves left by the same
+    // number of pixels, hence centre - delta.
+    final centre = Offset(size.width / 2, size.height / 2);
+    widget.mapController.move(
+      camera.screenOffsetToLatLng(centre - event.delta),
+      camera.zoom,
+    );
+  }
+
+  void _onPointerUp(PointerEvent event) {
+    _middlePanning = false;
   }
 
   void _onPanEnd(DragEndDetails details) {
@@ -168,11 +215,23 @@ class _RegionSelectorState extends State<RegionSelector> {
           Positioned.fill(
             child: Semantics(
               label: l10n.maps_regionSelector_selectRegion,
-              child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onPanStart: _onPanStart,
-                onPanUpdate: _onPanUpdate,
-                onPanEnd: _onPanEnd,
+              child: Listener(
+                onPointerDown: _onPointerDown,
+                onPointerMove: _onPointerMove,
+                onPointerUp: _onPointerUp,
+                onPointerCancel: _onPointerUp,
+                child: MouseRegion(
+                  cursor: _hoverCorner
+                      ? SystemMouseCursors.grab
+                      : SystemMouseCursors.precise,
+                  onHover: _onHover,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onPanStart: _onPanStart,
+                    onPanUpdate: _onPanUpdate,
+                    onPanEnd: _onPanEnd,
+                  ),
+                ),
               ),
             ),
           ),
