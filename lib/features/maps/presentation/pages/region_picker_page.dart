@@ -8,6 +8,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
 import 'package:submersion/features/maps/presentation/providers/map_tile_providers.dart';
 import 'package:submersion/features/maps/presentation/widgets/map_attribution.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_style_button.dart';
 import 'package:submersion/features/maps/presentation/widgets/region_download_dialog.dart';
 import 'package:submersion/features/maps/presentation/widgets/region_selector.dart';
 import 'package:submersion/features/maps/presentation/widgets/trackpad_zoom_map.dart';
@@ -160,7 +161,11 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
                       setState(() => _selecting = value.first),
                 ),
               ),
-              // Zoom buttons, above the action buttons.
+              // Map style (Street / Topo / Satellite), top right under the
+          // instruction card. It changes the app-wide style, so the tiles here
+          // and the tiles a download fetches are the same style.
+          const Positioned(top: 88, right: 16, child: MapStyleButton()),
+          // Zoom buttons, above the action buttons.
               Positioned(
                 right: 16,
                 bottom: 96,
