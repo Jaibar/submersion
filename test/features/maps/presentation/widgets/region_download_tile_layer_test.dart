@@ -34,7 +34,10 @@ void main() {
       );
 
       // FMTC copies these headers onto every tile request it makes.
-      expect(layer.tileProvider.headers['User-Agent'], contains('app.submersion'));
+      expect(
+        layer.tileProvider.headers['User-Agent'],
+        contains('app.submersion'),
+      );
     });
   });
 }
