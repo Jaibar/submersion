@@ -46,7 +46,11 @@ class MapStyleButton extends ConsumerWidget {
         ],
         child: Padding(
           padding: const EdgeInsets.all(6),
-          child: Icon(Icons.layers_outlined, size: 20, color: colorScheme.primary),
+          child: Icon(
+            Icons.layers_outlined,
+            size: 20,
+            color: colorScheme.primary,
+          ),
         ),
       ),
     );
