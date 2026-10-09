@@ -162,10 +162,10 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
                 ),
               ),
               // Map style (Street / Topo / Satellite), top right under the
-          // instruction card. It changes the app-wide style, so the tiles here
-          // and the tiles a download fetches are the same style.
-          const Positioned(top: 88, right: 16, child: MapStyleButton()),
-          // Zoom buttons, above the action buttons.
+              // instruction card. It changes the app-wide style, so the tiles here
+              // and the tiles a download fetches are the same style.
+              const Positioned(top: 88, right: 16, child: MapStyleButton()),
+              // Zoom buttons, above the action buttons.
               Positioned(
                 right: 16,
                 bottom: 96,
