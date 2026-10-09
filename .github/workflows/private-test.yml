@@ -161,12 +161,14 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 14
 
-  # Publishes the APK as a GitHub Release on this fork so Obtainium can follow
-  # it (Obtainium reads releases, not workflow artifacts). One release per
+  # Publishes the APK (and the Windows zip) as a GitHub Release on this fork so
+  # Obtainium can follow it (Obtainium reads releases, not workflow artifacts;
+  # it is Android only, so the Windows zip is just a convenient download next
+  # to the APK instead of a zip inside an artifact zip). One release per
   # successful build, tagged v<pubspec version>-custom.<run number>: the run
   # number only ever grows, so each build counts as a newer version.
   release:
-    needs: [android]
+    needs: [build, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -177,6 +179,10 @@ jobs:
         with:
           name: Submersion-custom-android
 
+      - uses: actions/download-artifact@v7
+        with:
+          name: Submersion-custom-windows
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -184,11 +190,14 @@ jobs:
           base="$(grep -m1 '^version:' pubspec.yaml | sed -E 's/^version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
           tag="v${base}-custom.${{ github.run_number }}"
           mv app-release.apk "Submersion-custom-${tag}.apk"
-          gh release create "$tag" "Submersion-custom-${tag}.apk" \
+          mv Submersion-custom-windows.zip "Submersion-custom-${tag}-windows.zip"
+          gh release create "$tag" \
+            "Submersion-custom-${tag}.apk" \
+            "Submersion-custom-${tag}-windows.zip" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "Submersion custom ${tag}" \
-            --notes "Private test build of custom/v1.8. Sideload only."
+            --notes "Private test build of custom/v1.8. The .apk is for Android (sideload, Obtainium), the -windows.zip is the Windows app: unzip and run submersion.exe."
 
   # Tells the owner a new working build exists: an issue on this fork (GitHub
   # emails it). Runs only when BOTH builds succeeded; a failed run already gets
