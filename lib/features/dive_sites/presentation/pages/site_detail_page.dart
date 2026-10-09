@@ -42,6 +42,7 @@ import 'package:submersion/features/divers/presentation/providers/diver_provider
 import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
 import 'package:submersion/features/maps/presentation/providers/map_tile_providers.dart';
 import 'package:submersion/features/maps/presentation/widgets/map_attribution.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_style_button.dart';
 import 'package:submersion/features/maps/presentation/widgets/trackpad_zoom_map.dart';
 import 'package:submersion/features/marine_life/presentation/widgets/site_marine_life_section.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -749,6 +750,7 @@ class _SiteDetailContentState extends ConsumerState<_SiteDetailContent> {
                 ],
               ),
             ),
+            const Positioned(right: 48, top: 8, child: MapStyleButton()),
             Positioned(
               right: 8,
               top: 8,
@@ -2111,11 +2113,12 @@ class _FullscreenSiteScapePageState
                 ],
               ),
             ),
+            const Positioned(right: 8, top: 8, child: MapStyleButton()),
             if (_placing)
               Positioned(
                 top: 8,
                 left: 56,
-                right: 8,
+                right: 52,
                 child: Material(
                   key: const ValueKey('siteFeaturePlaceBanner'),
                   color: colorScheme.secondaryContainer,
