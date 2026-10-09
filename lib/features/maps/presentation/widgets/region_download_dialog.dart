@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/core/services/location_service.dart';
+import 'package:submersion/features/maps/domain/region_size_estimate.dart';
 import 'package:submersion/features/maps/presentation/providers/map_tile_providers.dart';
 import 'package:submersion/features/maps/presentation/providers/offline_map_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
@@ -155,8 +156,12 @@ class _RegionDownloadDialogState extends ConsumerState<RegionDownloadDialog> {
   }
 
   String _formatEstimatedSize(int tiles) {
-    // Rough estimate: ~30KB per tile on average for map tiles
-    final bytes = tiles * 30 * 1024;
+    // Learned from the regions already downloaded (their measured bytes per
+    // tile), because real tiles average far below a flat guess: open water is
+    // mostly skipped or tiny. With no measured region it is the generous flat
+    // 30 KB per tile.
+    final regions = ref.watch(cachedRegionsProvider).value ?? const [];
+    final bytes = estimateRegionBytes(tiles, regions);
     if (bytes < 1024 * 1024) {
       return '${(bytes / 1024).toStringAsFixed(0)} KB';
     }
