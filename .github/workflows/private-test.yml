@@ -83,11 +83,12 @@ jobs:
           path: Submersion-custom-windows.zip
           retention-days: 14
 
-  # Android APK, signed with the runner's throwaway debug key (no key.properties
-  # here), so it installs by sideloading only. The package name is changed to
-  # app.submersion.custom for this build alone (the repo files are not edited),
-  # so it installs NEXT TO a Play/GitHub Submersion instead of clashing with its
-  # signature, and keeps its own separate data.
+  # Android APK, sideload only. Signed with a STABLE test key kept in the fork
+  # secret ANDROID_TEST_KEYSTORE_B64, so every build has the same signature and
+  # installs over the previous one (and Obtainium can update it). The package
+  # name is changed to app.submersion.custom for this build alone (the repo
+  # files are not edited), so it installs NEXT TO a Play/GitHub Submersion
+  # instead of clashing with its signature, and keeps its own separate data.
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -139,6 +140,18 @@ jobs:
           grep -n 'applicationId' android/app/build.gradle.kts
           grep -n 'android:label="Submersion' android/app/src/main/AndroidManifest.xml
 
+      - name: Sign with the stable test key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_TEST_KEYSTORE_B64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 --decode > android/app/release.keystore
+          cat > android/key.properties <<EOL
+          storePassword=submersion-custom
+          keyPassword=submersion-custom
+          keyAlias=custom
+          storeFile=release.keystore
+          EOL
+
       - name: Build Android APK
         run: flutter build apk --release --dart-define=UPDATE_CHANNEL=github
 
@@ -148,11 +161,40 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 14
 
+  # Publishes the APK as a GitHub Release on this fork so Obtainium can follow
+  # it (Obtainium reads releases, not workflow artifacts). One release per
+  # successful build, tagged v<pubspec version>-custom.<run number>: the run
+  # number only ever grows, so each build counts as a newer version.
+  release:
+    needs: [android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: Submersion-custom-android
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base="$(grep -m1 '^version:' pubspec.yaml | sed -E 's/^version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+          tag="v${base}-custom.${{ github.run_number }}"
+          mv app-release.apk "Submersion-custom-${tag}.apk"
+          gh release create "$tag" "Submersion-custom-${tag}.apk" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Submersion custom ${tag}" \
+            --notes "Private test build of custom/v1.8. Sideload only."
+
   # Tells the owner a new working build exists: an issue on this fork (GitHub
   # emails it). Runs only when BOTH builds succeeded; a failed run already gets
   # GitHub's own failure email.
   notify:
-    needs: [build, android]
+    needs: [build, android, release]
     runs-on: ubuntu-latest
     permissions:
       issues: write
