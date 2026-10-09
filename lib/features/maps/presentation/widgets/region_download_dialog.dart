@@ -60,10 +60,18 @@ class RegionDownloadDialog extends ConsumerStatefulWidget {
 class _RegionDownloadDialogState extends ConsumerState<RegionDownloadDialog> {
   final _nameController = TextEditingController();
   int _minZoom = 8;
-  int _maxZoom = 16;
+  // Overview by default: a planning-sized download. The deeper levels hold
+  // about three quarters of all tiles, so 16 was a very heavy default.
+  int _maxZoom = 12;
   bool _isEstimating = false;
   bool _isLoadingName = false;
   int? _estimatedTiles;
+
+  /// Above this many tiles the Download button is disabled: a request this big
+  /// takes hours and is heavy use of a public tile server.
+  static const int _maxTiles = 100000;
+
+  bool get _overLimit => (_estimatedTiles ?? 0) > _maxTiles;
 
   /// Default tile layer options using the selected map style.
   TileLayer get _tileLayerOptions => regionDownloadTileLayer(
@@ -241,6 +249,30 @@ class _RegionDownloadDialogState extends ConsumerState<RegionDownloadDialog> {
               ),
             ),
             const SizedBox(height: 8),
+            // Quality presets: each is just a max zoom (min stays 8). Every
+            // extra level is about four times the tiles.
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final preset in [
+                  (l10n.maps_regionDownload_presetOverview, 12),
+                  (l10n.maps_regionDownload_presetDetail, 14),
+                  (l10n.maps_regionDownload_presetFull, 16),
+                ])
+                  ChoiceChip(
+                    label: Text(preset.$1),
+                    selected: _minZoom == 8 && _maxZoom == preset.$2,
+                    onSelected: (_) {
+                      setState(() {
+                        _minZoom = 8;
+                        _maxZoom = preset.$2;
+                      });
+                      _estimateTiles();
+                    },
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
@@ -378,6 +410,17 @@ class _RegionDownloadDialogState extends ConsumerState<RegionDownloadDialog> {
                   ),
                 ),
               ),
+            if (_overLimit)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(
+                  l10n.maps_regionDownload_tooManyTiles,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: colorScheme.error,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -387,7 +430,7 @@ class _RegionDownloadDialogState extends ConsumerState<RegionDownloadDialog> {
           child: Text(l10n.common_action_cancel),
         ),
         FilledButton.icon(
-          onPressed: _startDownload,
+          onPressed: _overLimit ? null : _startDownload,
           icon: const Icon(Icons.download),
           label: Text(l10n.maps_regionDownload_downloadButton),
         ),
