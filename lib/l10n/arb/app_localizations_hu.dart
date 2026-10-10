@@ -26145,10 +26145,6 @@ class AppLocalizationsHu extends AppLocalizations {
   String get insights_summary_depthDistribution_title => 'Mélység megoszlás';
 
   @override
-  String get insights_summary_diveTypes_semanticLabel =>
-      'Kördiagram a merülési típusok megoszlásáról';
-
-  @override
   String get insights_summary_diveTypes_title => 'Merülési típusok';
 
   @override

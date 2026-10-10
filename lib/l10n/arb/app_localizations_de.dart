@@ -26220,10 +26220,6 @@ class AppLocalizationsDe extends AppLocalizations {
   String get insights_summary_depthDistribution_title => 'Tiefenverteilung';
 
   @override
-  String get insights_summary_diveTypes_semanticLabel =>
-      'Kreisdiagramm der Tauchgangarten-Verteilung';
-
-  @override
   String get insights_summary_diveTypes_title => 'Tauchgangarten';
 
   @override
