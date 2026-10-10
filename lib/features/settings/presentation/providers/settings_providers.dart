@@ -328,6 +328,9 @@ class AppSettings {
   /// END limit in meters for MND calculations (typically 30)
   final double endLimit;
 
+  /// Whether the ICD calculator warns on isobaric counterdiffusion risk.
+  final bool icdWarningsEnabled;
+
   /// Default data source for NDL metric (computer or calculated)
   final MetricDataSource defaultNdlSource;
 
@@ -664,6 +667,7 @@ class AppSettings {
     this.ascentGasSet = AscentGasSet.allCarried,
     this.o2Narcotic = true,
     this.endLimit = 30.0,
+    this.icdWarningsEnabled = true,
     this.defaultNdlSource = MetricDataSource.computer,
     this.defaultDecoStopSource = MetricDataSource.computer,
     this.defaultTtsSource = MetricDataSource.computer,
@@ -856,6 +860,7 @@ class AppSettings {
     AscentGasSet? ascentGasSet,
     bool? o2Narcotic,
     double? endLimit,
+    bool? icdWarningsEnabled,
     MetricDataSource? defaultNdlSource,
     MetricDataSource? defaultDecoStopSource,
     MetricDataSource? defaultTtsSource,
@@ -1025,6 +1030,7 @@ class AppSettings {
       ascentGasSet: ascentGasSet ?? this.ascentGasSet,
       o2Narcotic: o2Narcotic ?? this.o2Narcotic,
       endLimit: endLimit ?? this.endLimit,
+      icdWarningsEnabled: icdWarningsEnabled ?? this.icdWarningsEnabled,
       defaultNdlSource: defaultNdlSource ?? this.defaultNdlSource,
       defaultDecoStopSource:
           defaultDecoStopSource ?? this.defaultDecoStopSource,
@@ -2264,6 +2270,11 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
 
   Future<void> setO2Narcotic(bool value) async {
     state = state.copyWith(o2Narcotic: value);
+    await _saveSettings();
+  }
+
+  Future<void> setIcdWarningsEnabled(bool value) async {
+    state = state.copyWith(icdWarningsEnabled: value);
     await _saveSettings();
   }
 
