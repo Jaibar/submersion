@@ -19708,6 +19708,19 @@ class AppLocalizationsHe extends AppLocalizations {
       'מדד ברירת מחדל המוצג בציר הימני';
 
   @override
+  String get settings_appearance_viewerFullscreen => 'מצב מסך מלא';
+
+  @override
+  String get settings_appearance_viewerFullscreen_subtitle =>
+      'האם פרופיל הצלילה ומציג המדיה במסך מלא ממלאים את החלון או את המסך כולו';
+
+  @override
+  String get settings_appearance_viewerFullscreen_window => 'חלון מלא';
+
+  @override
+  String get settings_appearance_viewerFullscreen_screen => 'מסך מלא';
+
+  @override
   String get settings_appearance_subsection_decompressionMetrics =>
       'מדדי דקומפרסיה';
 
