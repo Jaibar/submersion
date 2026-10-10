@@ -1429,10 +1429,71 @@ class AppLocalizationsFr extends AppLocalizations {
       'Mélange standard le plus proche couvrant cette profondeur';
 
   @override
-  String get gasCalculators_bestMix_recommendedMix => 'Mélange recommandé';
+  String get gasCalculators_bestMix_recommendedMix => 'Mélange calculé';
+
+  @override
+  String gasCalculators_bestMix_semanticsLabel(String mix, String mod) {
+    return 'Mélange calculé $mix, MOD $mod';
+  }
+
+  @override
+  String gasCalculators_bestMix_showAllMixes(int count) {
+    return 'Tout afficher ($count)';
+  }
+
+  @override
+  String get gasCalculators_bestMix_showFewerMixes => 'Afficher moins';
 
   @override
   String get gasCalculators_bestMix_withoutHelium => 'Sans hélium';
+
+  @override
+  String get gasCalculators_bestMix_ccrSource => 'Source de gaz';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceBailout => 'Secours';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceDiluent => 'Diluant';
+
+  @override
+  String get gasCalculators_bestMix_densityAware =>
+      'Maintenir la densité du gaz dans les limites';
+
+  @override
+  String get gasCalculators_bestMix_eadLabel => 'EAD à la profondeur';
+
+  @override
+  String get gasCalculators_bestMix_heliumBoth =>
+      'Hélium ajouté pour maintenir l\'END et la densité du gaz dans vos limites.';
+
+  @override
+  String get gasCalculators_bestMix_heliumDensity =>
+      'Hélium ajouté pour maintenir la densité du gaz dans les limites.';
+
+  @override
+  String get gasCalculators_bestMix_mode => 'Mode';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTec => 'CCR Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTecHint =>
+      'Circuit fermé : Diluant vérifie par rapport à la ppO₂ de rinçage du diluant, Bailout par rapport à votre ppO₂ de déco (maximale) en circuit ouvert.';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTec => 'OC Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTecHint =>
+      'Trimix en circuit ouvert, vérifié par rapport à votre limite de ppO₂ de travail.';
+
+  @override
+  String get gasCalculators_bestMix_modeRec => 'Rec';
+
+  @override
+  String get gasCalculators_bestMix_modeRecHint =>
+      'Nitrox pour la plongée loisir, comme aujourd\'hui.';
 
   @override
   String get gasCalculators_planningCaveat =>
@@ -16132,8 +16193,8 @@ class AppLocalizationsFr extends AppLocalizations {
   String get gasCalculators_mod_fromProfile => 'Depuis ton profil de plongeur';
 
   @override
-  String gasCalculators_mod_differsFromProfile(String value) {
-    return 'Différent de ton profil ($value bar)';
+  String gasCalculators_differsFromProfile(String value) {
+    return 'Différent de ton profil ($value)';
   }
 
   @override

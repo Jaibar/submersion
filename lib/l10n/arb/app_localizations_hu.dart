@@ -1426,10 +1426,71 @@ class AppLocalizationsHu extends AppLocalizations {
       'A legközelebbi szabványkeverék erre a mélységre';
 
   @override
-  String get gasCalculators_bestMix_recommendedMix => 'Ajánlott keverék';
+  String get gasCalculators_bestMix_recommendedMix => 'Számított keverék';
+
+  @override
+  String gasCalculators_bestMix_semanticsLabel(String mix, String mod) {
+    return 'Számított keverék $mix, MOD $mod';
+  }
+
+  @override
+  String gasCalculators_bestMix_showAllMixes(int count) {
+    return 'Összes mutatása ($count)';
+  }
+
+  @override
+  String get gasCalculators_bestMix_showFewerMixes => 'Kevesebb mutatása';
 
   @override
   String get gasCalculators_bestMix_withoutHelium => 'Hélium nélkül';
+
+  @override
+  String get gasCalculators_bestMix_ccrSource => 'Gázforrás';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceBailout => 'Bailout';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceDiluent => 'Hígítógáz';
+
+  @override
+  String get gasCalculators_bestMix_densityAware =>
+      'A gázsűrűség határokon belül tartása';
+
+  @override
+  String get gasCalculators_bestMix_eadLabel => 'EAD a mélységben';
+
+  @override
+  String get gasCalculators_bestMix_heliumBoth =>
+      'Hélium hozzáadva, hogy az END és a gázsűrűség is a határaidon belül maradjon.';
+
+  @override
+  String get gasCalculators_bestMix_heliumDensity =>
+      'Hélium hozzáadva, hogy a gázsűrűség a határokon belül maradjon.';
+
+  @override
+  String get gasCalculators_bestMix_mode => 'Mód';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTec => 'CCR Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTecHint =>
+      'Zárt rendszer: Hígítógáz a hígítógáz öblítési ppO₂-jéhez, Bailout a nyitott rendszerű dekó-ppO₂-dhöz (maximum) viszonyít.';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTec => 'OC Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTecHint =>
+      'Trimix nyitott rendszerben, a munka-ppO₂ korlátodhoz viszonyítva.';
+
+  @override
+  String get gasCalculators_bestMix_modeRec => 'Rec';
+
+  @override
+  String get gasCalculators_bestMix_modeRecHint =>
+      'Nitrox a szabadidős merüléshez, mint eddig.';
 
   @override
   String get gasCalculators_planningCaveat =>
@@ -16036,8 +16097,8 @@ class AppLocalizationsHu extends AppLocalizations {
   String get gasCalculators_mod_fromProfile => 'A búvárprofilodból';
 
   @override
-  String gasCalculators_mod_differsFromProfile(String value) {
-    return 'Eltér a profiltól ($value bar)';
+  String gasCalculators_differsFromProfile(String value) {
+    return 'Eltér a profiltól ($value)';
   }
 
   @override

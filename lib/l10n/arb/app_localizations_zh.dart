@@ -1373,10 +1373,66 @@ class AppLocalizationsZh extends AppLocalizations {
   String get gasCalculators_bestMix_nearestStandard => '可覆盖此深度的最接近标准混合气';
 
   @override
-  String get gasCalculators_bestMix_recommendedMix => '推荐混合气';
+  String get gasCalculators_bestMix_recommendedMix => '计算混合气';
+
+  @override
+  String gasCalculators_bestMix_semanticsLabel(String mix, String mod) {
+    return '计算混合气 $mix，MOD $mod';
+  }
+
+  @override
+  String gasCalculators_bestMix_showAllMixes(int count) {
+    return '显示全部 ($count)';
+  }
+
+  @override
+  String get gasCalculators_bestMix_showFewerMixes => '显示更少';
 
   @override
   String get gasCalculators_bestMix_withoutHelium => '不含氦气';
+
+  @override
+  String get gasCalculators_bestMix_ccrSource => '气体来源';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceBailout => '备用';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceDiluent => '稀释气';
+
+  @override
+  String get gasCalculators_bestMix_densityAware => '将气体密度保持在限值内';
+
+  @override
+  String get gasCalculators_bestMix_eadLabel => '深度处 EAD';
+
+  @override
+  String get gasCalculators_bestMix_heliumBoth => '已加入氦气，使 END 与气体密度都保持在你的限值内。';
+
+  @override
+  String get gasCalculators_bestMix_heliumDensity => '已加入氦气，使气体密度保持在限值内。';
+
+  @override
+  String get gasCalculators_bestMix_mode => '模式';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTec => 'CCR Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTecHint =>
+      '密闭式循环呼吸器：稀释气模式按稀释气的冲洗 ppO₂ 校验，备用模式按你的开放式减压（最大）ppO₂ 校验。';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTec => 'OC Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTecHint => '开放式三混气，按你的工作 ppO₂ 限值校验。';
+
+  @override
+  String get gasCalculators_bestMix_modeRec => 'Rec';
+
+  @override
+  String get gasCalculators_bestMix_modeRecHint => '休闲潜水高氧，与现在相同。';
 
   @override
   String get gasCalculators_planningCaveat =>
@@ -15326,8 +15382,8 @@ class AppLocalizationsZh extends AppLocalizations {
   String get gasCalculators_mod_fromProfile => '来自你的潜水员档案';
 
   @override
-  String gasCalculators_mod_differsFromProfile(String value) {
-    return '与档案不同（$value bar）';
+  String gasCalculators_differsFromProfile(String value) {
+    return '与档案不同（$value）';
   }
 
   @override

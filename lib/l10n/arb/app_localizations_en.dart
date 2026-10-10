@@ -1413,10 +1413,71 @@ class AppLocalizationsEn extends AppLocalizations {
       'Nearest standard mix covering this depth';
 
   @override
-  String get gasCalculators_bestMix_recommendedMix => 'Recommended mix';
+  String get gasCalculators_bestMix_recommendedMix => 'Calculated mix';
+
+  @override
+  String gasCalculators_bestMix_semanticsLabel(String mix, String mod) {
+    return 'Calculated mix $mix, MOD $mod';
+  }
+
+  @override
+  String gasCalculators_bestMix_showAllMixes(int count) {
+    return 'Show all ($count)';
+  }
+
+  @override
+  String get gasCalculators_bestMix_showFewerMixes => 'Show fewer';
 
   @override
   String get gasCalculators_bestMix_withoutHelium => 'Without helium';
+
+  @override
+  String get gasCalculators_bestMix_ccrSource => 'Gas source';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceBailout => 'Bailout';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceDiluent => 'Diluent';
+
+  @override
+  String get gasCalculators_bestMix_densityAware =>
+      'Keep gas density within limits';
+
+  @override
+  String get gasCalculators_bestMix_eadLabel => 'EAD at depth';
+
+  @override
+  String get gasCalculators_bestMix_heliumBoth =>
+      'Helium added to keep END and gas density within your limits.';
+
+  @override
+  String get gasCalculators_bestMix_heliumDensity =>
+      'Helium added to keep gas density within limits.';
+
+  @override
+  String get gasCalculators_bestMix_mode => 'Mode';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTec => 'CCR Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTecHint =>
+      'Closed circuit: Diluent checks against the diluent\'s flush ppO2, Bailout against your OC deco (maximum) ppO2.';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTec => 'OC Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTecHint =>
+      'Trimix on open circuit, checked against your working ppO2 limit.';
+
+  @override
+  String get gasCalculators_bestMix_modeRec => 'Rec';
+
+  @override
+  String get gasCalculators_bestMix_modeRecHint =>
+      'Nitrox for recreational diving, as today.';
 
   @override
   String get gasCalculators_planningCaveat =>
@@ -15840,8 +15901,8 @@ class AppLocalizationsEn extends AppLocalizations {
   String get gasCalculators_mod_fromProfile => 'From your diver profile';
 
   @override
-  String gasCalculators_mod_differsFromProfile(String value) {
-    return 'Differs from your profile ($value bar)';
+  String gasCalculators_differsFromProfile(String value) {
+    return 'Differs from your profile ($value)';
   }
 
   @override

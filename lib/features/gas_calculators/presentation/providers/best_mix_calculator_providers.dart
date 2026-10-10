@@ -2,39 +2,42 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/constants/enums.dart' show WaterType;
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
-import 'package:submersion/features/gas_calculators/domain/gas_limits.dart';
-import 'package:submersion/features/gas_calculators/domain/mod_calculator_preferences.dart';
+import 'package:submersion/features/gas_calculators/domain/best_mix.dart';
+import 'package:submersion/features/gas_calculators/domain/best_mix_calculator_preferences.dart';
+import 'package:submersion/features/gas_calculators/domain/gas_density_calculator.dart'
+    show GasDensityTemperature;
 import 'package:submersion/features/gas_calculators/domain/mod_limit_overrides.dart';
+import 'package:submersion/features/gas_calculators/presentation/providers/mod_calculator_providers.dart'
+    show modProfileLimits;
 import 'package:submersion/features/settings/data/repositories/app_settings_repository.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MOD Calculator State (issue #2342)
+// Best Mix Calculator State (issue #3112)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Key of the calculator's preferences in the synced `settings` table.
-const String modCalculatorPrefsKey = 'gas_mod_calculator_prefs';
+const String bestMixCalculatorPrefsKey = 'gas_best_mix_calculator_prefs';
 
-const _log = LoggerService('ModCalculatorPreferences');
+const _log = LoggerService('BestMixCalculatorPreferences');
 
-/// The MOD calculator's inputs, restored on first use, re-read when sync
-/// changes them, and saved after every change.
-///
-/// Saves are debounced: dragging a slider is one database write once it
-/// settles, not one per frame. The ppO2 limit overrides belong to the active
-/// diver, read through [_diverId] and resolved against [_profile].
-class ModCalculatorNotifier extends StateNotifier<ModCalculatorPreferences> {
-  ModCalculatorNotifier(
+/// The Best Mix calculator's inputs, restored on first use, re-read when
+/// sync changes them, and saved after every change. Mirrors
+/// `ModCalculatorNotifier` exactly, including its debounced save and the
+/// per-diver ppO2 overrides.
+class BestMixCalculatorNotifier
+    extends StateNotifier<BestMixCalculatorPreferences> {
+  BestMixCalculatorNotifier(
     this._repository, {
     required String? Function() diverId,
     required ModProfileLimits Function() profile,
   }) : _diverId = diverId,
        _profile = profile,
-       super(ModCalculatorPreferences.defaults) {
+       super(BestMixCalculatorPreferences.defaults) {
     unawaited(reload());
   }
 
@@ -60,25 +63,25 @@ class ModCalculatorNotifier extends StateNotifier<ModCalculatorPreferences> {
   /// itself ticks again, and that read finds what was saved.
   Future<void> reload() async {
     final seq = ++_loadSeq;
-    final raw = await _repository.getRawSetting(modCalculatorPrefsKey);
+    final raw = await _repository.getRawSetting(bestMixCalculatorPrefsKey);
     if (raw == null || !mounted || seq != _loadSeq || _hasUnsavedEdit) {
       return;
     }
     try {
       final decoded = jsonDecode(raw);
       if (decoded is Map<String, dynamic>) {
-        state = ModCalculatorPreferences.fromJson(decoded);
+        state = BestMixCalculatorPreferences.fromJson(decoded);
       }
     } on FormatException catch (e, stackTrace) {
       _log.error(
-        'Stored MOD calculator preferences are not JSON',
+        'Stored Best Mix calculator preferences are not JSON',
         error: e,
         stackTrace: stackTrace,
       );
     }
   }
 
-  void _update(ModCalculatorPreferences next) {
+  void _update(BestMixCalculatorPreferences next) {
     if (next == state) return;
     _loadSeq++;
     state = next;
@@ -92,12 +95,12 @@ class ModCalculatorNotifier extends StateNotifier<ModCalculatorPreferences> {
     _saving = true;
     try {
       await _repository.setRawSetting(
-        modCalculatorPrefsKey,
+        bestMixCalculatorPrefsKey,
         jsonEncode(state.toJson()),
       );
     } catch (e, stackTrace) {
       _log.error(
-        'Failed to save MOD calculator preferences',
+        'Failed to save Best Mix calculator preferences',
         error: e,
         stackTrace: stackTrace,
       );
@@ -106,9 +109,9 @@ class ModCalculatorNotifier extends StateNotifier<ModCalculatorPreferences> {
     }
   }
 
-  ModModeInputs get _current => state.inputsFor(state.mode);
+  BestMixModeInputs get _current => state.inputsFor(state.mode);
 
-  void _updateCurrent(ModModeInputs inputs) =>
+  void _updateCurrent(BestMixModeInputs inputs) =>
       _update(state.withInputs(state.mode, inputs));
 
   ModLimitOverrides get _overrides => state.overridesFor(_diverId());
@@ -118,33 +121,33 @@ class ModCalculatorNotifier extends StateNotifier<ModCalculatorPreferences> {
 
   ModResolvedLimits get _resolved => resolveModLimits(_overrides, _profile());
 
-  void setMode(ModCalculatorMode mode) => _update(state.copyWith(mode: mode));
+  void setMode(BestMixMode mode) => _update(state.copyWith(mode: mode));
 
-  /// Also pulls helium back into the room the new oxygen leaves.
-  void setO2Percent(double o2) {
-    final he = _current.hePercent.clamp(0.0, 100.0 - o2).toDouble();
-    _updateCurrent(_current.copyWith(o2Percent: o2, hePercent: he));
-  }
+  void setCcrSource(CcrGasSource source) =>
+      _update(state.copyWith(ccrSource: source));
 
-  void setHePercent(double he) => _updateCurrent(
-    _current.copyWith(
-      hePercent: he.clamp(0.0, 100.0 - _current.o2Percent).toDouble(),
-    ),
-  );
+  void setDepth(double meters) =>
+      _updateCurrent(_current.copyWith(depthMeters: meters));
 
-  void setTargetDepth(double meters) =>
-      _updateCurrent(_current.copyWith(targetDepthMeters: meters));
+  void setDensityAware(bool value) =>
+      _updateCurrent(_current.copyWith(densityAware: value));
 
-  void setCheckTargetDepth(bool check) =>
-      _updateCurrent(_current.copyWith(checkTargetDepth: check));
+  /// Rec only: one of the three ppO2 chips.
+  void setRecPpO2(double ppO2) =>
+      _updateCurrent(_current.copyWith(recPpO2: ppO2));
 
   void setWaterType(WaterType type) => _update(state.copyWith(waterType: type));
 
-  void setMinPpO2(double ppO2) => _update(state.copyWith(minPpO2: ppO2));
+  void setTemperature(GasDensityTemperature temperature) =>
+      _update(state.copyWith(temperature: temperature));
 
   /// Working and deco are never inverted, the rule the profile keeps:
   /// raising working pulls deco up with it, lowering deco pulls working
-  /// down. A value equal to the profile's is stored as "follow the profile".
+  /// down. Each is stored as "follow the profile" once it equals the
+  /// profile value, mirroring `ModCalculatorNotifier`. Shared by OC-Tec
+  /// (working) and CCR-Tec's Bailout source (deco, the diver's maximum
+  /// ppO2 rather than their working one): one per-diver override pair,
+  /// same as the MOD calculator keeps.
   void setWorkingPpO2(double ppO2) =>
       _setWorkingDeco(ppO2, math.max(_resolved.decoPpO2, ppO2));
 
@@ -175,13 +178,19 @@ class ModCalculatorNotifier extends StateNotifier<ModCalculatorPreferences> {
   void resetFlushPpO2() =>
       _updateOverrides(_overrides.withFlushPpO2(null, _profile()));
 
-  void setSetpoint(double bar) =>
-      _updateOverrides(_overrides.withSetpoint(bar, _profile()));
+  void setEndLimit(double meters) =>
+      _updateOverrides(_overrides.withEndLimit(meters, _profile()));
 
-  void resetSetpoint() =>
-      _updateOverrides(_overrides.withSetpoint(null, _profile()));
+  void resetEndLimit() =>
+      _updateOverrides(_overrides.withEndLimit(null, _profile()));
 
-  void reset() => _update(ModCalculatorPreferences.defaults);
+  void setO2Narcotic(bool value) =>
+      _updateOverrides(_overrides.withO2Narcotic(value, _profile()));
+
+  void resetO2Narcotic() =>
+      _updateOverrides(_overrides.withO2Narcotic(null, _profile()));
+
+  void reset() => _update(BestMixCalculatorPreferences.defaults);
 
   /// A pending save still goes out when the notifier goes away.
   @override
@@ -194,12 +203,13 @@ class ModCalculatorNotifier extends StateNotifier<ModCalculatorPreferences> {
   }
 }
 
-final modCalculatorNotifierProvider =
-    StateNotifierProvider<ModCalculatorNotifier, ModCalculatorPreferences>((
-      ref,
-    ) {
+final bestMixCalculatorNotifierProvider =
+    StateNotifierProvider<
+      BestMixCalculatorNotifier,
+      BestMixCalculatorPreferences
+    >((ref) {
       final repository = ref.read(appSettingsRepositoryProvider);
-      final notifier = ModCalculatorNotifier(
+      final notifier = BestMixCalculatorNotifier(
         repository,
         diverId: () => ref.read(currentDiverIdProvider),
         profile: () => modProfileLimits(ref.read(settingsProvider)),
@@ -213,44 +223,20 @@ final modCalculatorNotifierProvider =
       return notifier;
     });
 
-/// The water type the Tec modes use: the diver's choice, else the planner's
-/// default. A custom salinity maps to salt, the sea water it defaults to.
-WaterType modCalculatorWaterType(
-  ModCalculatorPreferences prefs,
+/// The water type the Tec modes use, following the same fallback rule the
+/// MOD calculator uses.
+WaterType bestMixCalculatorWaterType(
+  BestMixCalculatorPreferences prefs,
   AppSettings settings,
 ) => resolveWaterType(prefs.waterType, settings.defaultPlannerWaterType);
 
-/// The profile's CCR high setpoint, held to the calculator's setpoint range.
-///
-/// The profile allows 0.5-1.6 bar; the calculator's slider 0.4-1.6. A
-/// profile value outside it is computed at the nearest edge, so what the
-/// slider shows is what the numbers are computed for.
-double modProfileSetpoint(AppSettings settings) => settings.ccrSetpointHigh
-    .clamp(modSetpointMinBar, modSetpointMaxBar)
-    .toDouble();
-
-/// The profile's CCR diluent MOD ppO2. The calculator offers the profile's
-/// own 0.5-1.6 bar range, so a stored value is never raised to a deeper
-/// MOD; the clamp only guards a value from outside that range.
-double modProfileFlushPpO2(AppSettings settings) => settings.ccrDiluentModPpO2
-    .clamp(modFlushPpO2Min, modFlushPpO2Max)
-    .toDouble();
-
-/// The active diver's profile limits: the OC ppO2 limits for Rec and OC
-/// Tec, the CCR ppO2 limits for CCR Tec.
-ModProfileLimits modProfileLimits(AppSettings settings) => ModProfileLimits(
-  workingPpO2: settings.ppO2MaxWorking,
-  decoPpO2: settings.ppO2MaxDeco,
-  flushPpO2: modProfileFlushPpO2(settings),
-  setpointBar: modProfileSetpoint(settings),
-  endLimitMeters: settings.endLimit,
-  o2Narcotic: settings.o2Narcotic,
-);
-
 /// The ppO2 limits in effect for the active diver, and which of them differ
-/// from their profile.
-final modCalculatorLimitsProvider = Provider<ModResolvedLimits>((ref) {
-  final prefs = ref.watch(modCalculatorNotifierProvider);
+/// from their profile. `workingPpO2` (OC-Tec), `decoPpO2` (CCR-Tec Bailout)
+/// and `flushPpO2` (CCR-Tec Diluent) are all read by Best Mix; `setpointBar`
+/// is carried along unused, same as the MOD calculator leaves fields unused
+/// outside the mode that needs them.
+final bestMixCalculatorLimitsProvider = Provider<ModResolvedLimits>((ref) {
+  final prefs = ref.watch(bestMixCalculatorNotifierProvider);
   final diverId = ref.watch(currentDiverIdProvider);
   final settings = ref.watch(settingsProvider);
   return resolveModLimits(
@@ -261,27 +247,38 @@ final modCalculatorLimitsProvider = Provider<ModResolvedLimits>((ref) {
 
 /// The calculator inputs with every override resolved against the active
 /// diver's profile.
-final modCalculatorInputsProvider = Provider<GasLimitsInputs>((ref) {
-  final prefs = ref.watch(modCalculatorNotifierProvider);
+final bestMixCalculatorInputsProvider = Provider<BestMixInputs>((ref) {
+  final prefs = ref.watch(bestMixCalculatorNotifierProvider);
   final settings = ref.watch(settingsProvider);
-  final limits = ref.watch(modCalculatorLimitsProvider);
+  final limits = ref.watch(bestMixCalculatorLimitsProvider);
   final mode = prefs.inputsFor(prefs.mode);
-  return GasLimitsInputs(
+  return BestMixInputs(
+    depthMeters: mode.depthMeters,
+    ppO2Limit: switch (prefs.mode) {
+      BestMixMode.rec => mode.recPpO2,
+      BestMixMode.ocTec => limits.workingPpO2,
+      // Bailout is an OC emergency cylinder: the diver's maximum (deco)
+      // ppO2, not their normal working one, per issue #3112's own
+      // clarification.
+      BestMixMode.ccrTec => limits.decoPpO2,
+    },
+    // Rec keeps reading the profile's narcosis settings live; only the
+    // Tec modes expose an override (the UI has no control for Rec).
+    endLimitMeters: prefs.mode == BestMixMode.rec
+        ? settings.endLimit
+        : limits.endLimitMeters,
+    o2Narcotic: prefs.mode == BestMixMode.rec
+        ? settings.o2Narcotic
+        : limits.o2Narcotic,
     mode: prefs.mode,
-    o2Percent: mode.o2Percent,
-    hePercent: mode.hePercent,
-    workingPpO2: limits.workingPpO2,
-    decoPpO2: limits.decoPpO2,
+    ccrSource: prefs.ccrSource,
     flushPpO2: limits.flushPpO2,
-    setpointBar: limits.setpointBar,
-    minPpO2: prefs.minPpO2,
-    endLimitMeters: settings.endLimit,
-    o2Narcotic: settings.o2Narcotic,
-    targetDepthMeters: mode.checkTargetDepth ? mode.targetDepthMeters : null,
-    waterType: modCalculatorWaterType(prefs, settings),
+    waterType: bestMixCalculatorWaterType(prefs, settings),
+    densityAware: mode.densityAware,
+    temperature: prefs.temperature,
   );
 });
 
-final modCalculatorResultProvider = Provider<GasLimitsResult>(
-  (ref) => computeGasLimits(ref.watch(modCalculatorInputsProvider)),
+final bestMixCalculatorResultProvider = Provider<BestMixResult>(
+  (ref) => computeBestMix(ref.watch(bestMixCalculatorInputsProvider)),
 );

@@ -2207,14 +2207,116 @@ abstract class AppLocalizations {
   /// No description provided for @gasCalculators_bestMix_recommendedMix.
   ///
   /// In en, this message translates to:
-  /// **'Recommended mix'**
+  /// **'Calculated mix'**
   String get gasCalculators_bestMix_recommendedMix;
+
+  /// No description provided for @gasCalculators_bestMix_semanticsLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Calculated mix {mix}, MOD {mod}'**
+  String gasCalculators_bestMix_semanticsLabel(String mix, String mod);
+
+  /// No description provided for @gasCalculators_bestMix_showAllMixes.
+  ///
+  /// In en, this message translates to:
+  /// **'Show all ({count})'**
+  String gasCalculators_bestMix_showAllMixes(int count);
+
+  /// No description provided for @gasCalculators_bestMix_showFewerMixes.
+  ///
+  /// In en, this message translates to:
+  /// **'Show fewer'**
+  String get gasCalculators_bestMix_showFewerMixes;
 
   /// No description provided for @gasCalculators_bestMix_withoutHelium.
   ///
   /// In en, this message translates to:
   /// **'Without helium'**
   String get gasCalculators_bestMix_withoutHelium;
+
+  /// No description provided for @gasCalculators_bestMix_ccrSource.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas source'**
+  String get gasCalculators_bestMix_ccrSource;
+
+  /// No description provided for @gasCalculators_bestMix_ccrSourceBailout.
+  ///
+  /// In en, this message translates to:
+  /// **'Bailout'**
+  String get gasCalculators_bestMix_ccrSourceBailout;
+
+  /// No description provided for @gasCalculators_bestMix_ccrSourceDiluent.
+  ///
+  /// In en, this message translates to:
+  /// **'Diluent'**
+  String get gasCalculators_bestMix_ccrSourceDiluent;
+
+  /// No description provided for @gasCalculators_bestMix_densityAware.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep gas density within limits'**
+  String get gasCalculators_bestMix_densityAware;
+
+  /// No description provided for @gasCalculators_bestMix_eadLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'EAD at depth'**
+  String get gasCalculators_bestMix_eadLabel;
+
+  /// No description provided for @gasCalculators_bestMix_heliumBoth.
+  ///
+  /// In en, this message translates to:
+  /// **'Helium added to keep END and gas density within your limits.'**
+  String get gasCalculators_bestMix_heliumBoth;
+
+  /// No description provided for @gasCalculators_bestMix_heliumDensity.
+  ///
+  /// In en, this message translates to:
+  /// **'Helium added to keep gas density within limits.'**
+  String get gasCalculators_bestMix_heliumDensity;
+
+  /// No description provided for @gasCalculators_bestMix_mode.
+  ///
+  /// In en, this message translates to:
+  /// **'Mode'**
+  String get gasCalculators_bestMix_mode;
+
+  /// No description provided for @gasCalculators_bestMix_modeCcrTec.
+  ///
+  /// In en, this message translates to:
+  /// **'CCR Tec'**
+  String get gasCalculators_bestMix_modeCcrTec;
+
+  /// No description provided for @gasCalculators_bestMix_modeCcrTecHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Closed circuit: Diluent checks against the diluent\'s flush ppO2, Bailout against your OC deco (maximum) ppO2.'**
+  String get gasCalculators_bestMix_modeCcrTecHint;
+
+  /// No description provided for @gasCalculators_bestMix_modeOcTec.
+  ///
+  /// In en, this message translates to:
+  /// **'OC Tec'**
+  String get gasCalculators_bestMix_modeOcTec;
+
+  /// No description provided for @gasCalculators_bestMix_modeOcTecHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Trimix on open circuit, checked against your working ppO2 limit.'**
+  String get gasCalculators_bestMix_modeOcTecHint;
+
+  /// No description provided for @gasCalculators_bestMix_modeRec.
+  ///
+  /// In en, this message translates to:
+  /// **'Rec'**
+  String get gasCalculators_bestMix_modeRec;
+
+  /// No description provided for @gasCalculators_bestMix_modeRecHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Nitrox for recreational diving, as today.'**
+  String get gasCalculators_bestMix_modeRecHint;
 
   /// No description provided for @gasCalculators_planningCaveat.
   ///
@@ -26020,11 +26122,11 @@ abstract class AppLocalizations {
   /// **'From your diver profile'**
   String get gasCalculators_mod_fromProfile;
 
-  /// No description provided for @gasCalculators_mod_differsFromProfile.
+  /// No description provided for @gasCalculators_differsFromProfile.
   ///
   /// In en, this message translates to:
-  /// **'Differs from your profile ({value} bar)'**
-  String gasCalculators_mod_differsFromProfile(String value);
+  /// **'Differs from your profile ({value})'**
+  String gasCalculators_differsFromProfile(String value);
 
   /// No description provided for @gasCalculators_mod_useProfileValue.
   ///

@@ -1408,10 +1408,71 @@ class AppLocalizationsHe extends AppLocalizations {
       'התערובת התקנית הקרובה ביותר המכסה עומק זה';
 
   @override
-  String get gasCalculators_bestMix_recommendedMix => 'תערובת מומלצת';
+  String get gasCalculators_bestMix_recommendedMix => 'תערובת מחושבת';
+
+  @override
+  String gasCalculators_bestMix_semanticsLabel(String mix, String mod) {
+    return 'תערובת מחושבת $mix, MOD $mod';
+  }
+
+  @override
+  String gasCalculators_bestMix_showAllMixes(int count) {
+    return 'הצגת הכול ($count)';
+  }
+
+  @override
+  String get gasCalculators_bestMix_showFewerMixes => 'הצגת פחות';
 
   @override
   String get gasCalculators_bestMix_withoutHelium => 'ללא הליום';
+
+  @override
+  String get gasCalculators_bestMix_ccrSource => 'מקור הגז';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceBailout => 'חילוץ';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceDiluent => 'מדלל';
+
+  @override
+  String get gasCalculators_bestMix_densityAware =>
+      'לשמור על צפיפות הגז בתוך הגבולות';
+
+  @override
+  String get gasCalculators_bestMix_eadLabel => 'EAD בעומק';
+
+  @override
+  String get gasCalculators_bestMix_heliumBoth =>
+      'נוסף הליום כדי לשמור על ה-END וצפיפות הגז בתוך הגבולות שלך.';
+
+  @override
+  String get gasCalculators_bestMix_heliumDensity =>
+      'נוסף הליום כדי לשמור על צפיפות הגז בתוך הגבולות.';
+
+  @override
+  String get gasCalculators_bestMix_mode => 'מצב';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTec => 'CCR Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTecHint =>
+      'מעגל סגור: מדלל נבדק מול ppO₂ השטיפה של המדלל, חילוץ מול ppO₂ הדקו (המרבי) שלך במעגל פתוח.';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTec => 'OC Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTecHint =>
+      'טרימיקס במעגל פתוח, נבדק מול מגבלת ppO₂ העבודה שלך.';
+
+  @override
+  String get gasCalculators_bestMix_modeRec => 'Rec';
+
+  @override
+  String get gasCalculators_bestMix_modeRecHint =>
+      'ניטרוקס לצלילת פנאי, כמו היום.';
 
   @override
   String get gasCalculators_planningCaveat =>
@@ -15730,8 +15791,8 @@ class AppLocalizationsHe extends AppLocalizations {
   String get gasCalculators_mod_fromProfile => 'מפרופיל הצולל שלך';
 
   @override
-  String gasCalculators_mod_differsFromProfile(String value) {
-    return 'שונה מהפרופיל ($value בר)';
+  String gasCalculators_differsFromProfile(String value) {
+    return 'שונה מהפרופיל ($value)';
   }
 
   @override
