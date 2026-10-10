@@ -19288,6 +19288,21 @@ class AppLocalizationsFr extends AppLocalizations {
       'Ces outils sont destinés à la planification uniquement. Vérifiez toujours les calculs et suivez votre formation de plongée.';
 
   @override
+  String get planning_disclaimer_dialog_title =>
+      'Avertissement des outils de planification';
+
+  @override
+  String get planning_disclaimer_dialog_body =>
+      'Les outils de cette section sont destinés à la planification uniquement. Ils ne remplacent ni votre formation de plongée ni votre ordinateur de plongée. Vérifiez toujours chaque calcul vous-même avant de l\'utiliser pour une décision de sécurité.';
+
+  @override
+  String get planning_disclaimer_dialog_confirm => 'J\'ai compris';
+
+  @override
+  String get settings_conflict_field_hasAcceptedPlanningDisclaimer =>
+      'Avertissement de planification accepté';
+
+  @override
   String get planning_section_tools => 'Outils';
 
   @override
