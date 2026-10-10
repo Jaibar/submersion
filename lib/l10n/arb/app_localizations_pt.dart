@@ -44529,6 +44529,19 @@ class AppLocalizationsPt extends AppLocalizations {
   String get maps_regionDownload_downloadButton => 'Baixar';
 
   @override
+  String get maps_regionDownload_presetOverview => 'Overview';
+
+  @override
+  String get maps_regionDownload_presetDetail => 'Detail';
+
+  @override
+  String get maps_regionDownload_presetFull => 'Full';
+
+  @override
+  String get maps_regionDownload_tooManyTiles =>
+      'Mais de 100.000 tiles: reduza a área ou diminua o zoom máximo.';
+
+  @override
   String get diveLog_map_title => 'Atividade de Mergulho';
 
   @override

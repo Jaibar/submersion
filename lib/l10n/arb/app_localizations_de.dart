@@ -44423,6 +44423,19 @@ class AppLocalizationsDe extends AppLocalizations {
   String get maps_regionDownload_downloadButton => 'Herunterladen';
 
   @override
+  String get maps_regionDownload_presetOverview => 'Overview';
+
+  @override
+  String get maps_regionDownload_presetDetail => 'Detail';
+
+  @override
+  String get maps_regionDownload_presetFull => 'Full';
+
+  @override
+  String get maps_regionDownload_tooManyTiles =>
+      'Over 100,000 tiles: shrink the area or lower the maximum zoom.';
+
+  @override
   String get diveLog_map_title => 'Tauchaktivität';
 
   @override
