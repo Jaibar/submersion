@@ -14835,6 +14835,13 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
+  String get equipment_edit_snackbar_hiddenByView =>
+      'Gespeichert, aber die aktuelle Listenansicht blendet es aus';
+
+  @override
+  String get equipment_edit_snackbar_showAction => 'Anzeigen';
+
+  @override
   String get equipment_edit_snackbar_updated => 'Ausrüstung aktualisiert';
 
   @override

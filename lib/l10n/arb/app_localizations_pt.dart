@@ -14838,6 +14838,13 @@ class AppLocalizationsPt extends AppLocalizations {
   }
 
   @override
+  String get equipment_edit_snackbar_hiddenByView =>
+      'Salvo, mas a visualização atual da lista o oculta';
+
+  @override
+  String get equipment_edit_snackbar_showAction => 'Mostrar';
+
+  @override
   String get equipment_edit_snackbar_updated => 'Equipamento atualizado';
 
   @override
