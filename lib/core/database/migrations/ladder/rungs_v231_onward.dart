@@ -295,5 +295,11 @@ extension RungsFromV231 on AppDatabase {
       await _assertHasAcceptedPlanningDisclaimerColumn();
     }
     if (from < 274) await reportProgress();
+    // v275: diver_settings.default_start_pressure retyped INTEGER to REAL
+    // (issue #3091). Re-asserted in beforeOpen.
+    if (from < 275) {
+      await _retypeDefaultStartPressureColumn();
+    }
+    if (from < 275) await reportProgress();
   }
 }

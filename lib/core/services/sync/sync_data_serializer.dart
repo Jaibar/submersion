@@ -9998,7 +9998,7 @@ class SyncDataSerializer {
       // Defaults
       'defaultDiveType': 'recreational',
       'defaultTankVolume': 12.0,
-      'defaultStartPressure': 200,
+      'defaultStartPressure': 200.0,
       'defaultTankPreset': 'al80',
       'applyDefaultTankToImports': false,
       // Decompression settings
