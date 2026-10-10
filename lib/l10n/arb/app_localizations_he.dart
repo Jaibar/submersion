@@ -18782,7 +18782,7 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get planning_card_gasCalculators_subtitle =>
-      'MOD, תערובת אופטימלית, צריכה, Rock Bottom';
+      'מגבלות עומק, תערובות, צריכת גז ומילוי';
 
   @override
   String get planning_card_gasCalculators_title => 'מחשבוני גז';

@@ -19190,7 +19190,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get planning_card_gasCalculators_subtitle =>
-      'MOD, Beste Mischung, Verbrauch, Mindestreserve';
+      'Tiefengrenzen, Gemische, Gasverbrauch und Füllen';
 
   @override
   String get planning_card_gasCalculators_title => 'Gasrechner';
