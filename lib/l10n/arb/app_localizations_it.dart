@@ -11917,7 +11917,7 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogContent(Object name) {
-    return 'This will permanently delete $name and all associated data including dive logs, dive computers, equipment, certifications, and sites.';
+    return 'Questa operazione eliminerà definitivamente $name e tutti i dati associati, inclusi i registri delle immersioni, i computer subacquei, l\'attrezzatura, i brevetti e i siti.';
   }
 
   @override
@@ -12061,12 +12061,12 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogConfirmHint(String name) {
-    return 'Type \"Delete $name\" to confirm';
+    return 'Digita \"Elimina $name\" per confermare';
   }
 
   @override
   String divers_detail_deleteDialogConfirmText(String name) {
-    return 'Delete $name';
+    return 'Elimina $name';
   }
 
   @override
