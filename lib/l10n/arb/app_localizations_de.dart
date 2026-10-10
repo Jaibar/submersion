@@ -14821,20 +14821,6 @@ class AppLocalizationsDe extends AppLocalizations {
   }
 
   @override
-  String get equipment_edit_saveButton_edit => 'Änderungen speichern';
-
-  @override
-  String get equipment_edit_saveButton_new => 'Ausrüstung hinzufügen';
-
-  @override
-  String get equipment_edit_saveTooltip_edit =>
-      'Ausrüstungsänderungen speichern';
-
-  @override
-  String get equipment_edit_saveTooltip_new =>
-      'Neuen Ausrüstungsgegenstand hinzufügen';
-
-  @override
   String get equipment_edit_selectDate => 'Datum auswählen';
 
   @override
@@ -15777,12 +15763,6 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get equipment_setEdit_notFoundTitle => 'Set nicht gefunden';
-
-  @override
-  String get equipment_setEdit_saveButton_edit => 'Änderungen speichern';
-
-  @override
-  String get equipment_setEdit_saveButton_new => 'Set erstellen';
 
   @override
   String get equipment_setEdit_saveTooltip_edit =>
@@ -28159,16 +28139,10 @@ class AppLocalizationsDe extends AppLocalizations {
   String get trips_edit_appBar_edit => 'Reise bearbeiten';
 
   @override
-  String get trips_edit_button_add => 'Reise hinzufügen';
-
-  @override
   String get trips_edit_button_cancel => 'Abbrechen';
 
   @override
   String get trips_edit_button_save => 'Speichern';
-
-  @override
-  String get trips_edit_button_update => 'Reise aktualisieren';
 
   @override
   String get trips_edit_dialog_discard => 'Verwerfen';

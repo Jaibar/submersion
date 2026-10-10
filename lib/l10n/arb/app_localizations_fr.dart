@@ -14869,19 +14869,6 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
-  String get equipment_edit_saveButton_edit => 'Enregistrer les modifications';
-
-  @override
-  String get equipment_edit_saveButton_new => 'Ajouter l\'équipement';
-
-  @override
-  String get equipment_edit_saveTooltip_edit =>
-      'Enregistrer les modifications de l\'équipement';
-
-  @override
-  String get equipment_edit_saveTooltip_new => 'Ajouter un nouvel équipement';
-
-  @override
   String get equipment_edit_selectDate => 'Sélectionner une date';
 
   @override
@@ -15832,13 +15819,6 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get equipment_setEdit_notFoundTitle => 'Ensemble introuvable';
-
-  @override
-  String get equipment_setEdit_saveButton_edit =>
-      'Enregistrer les modifications';
-
-  @override
-  String get equipment_setEdit_saveButton_new => 'Créer l\'ensemble';
 
   @override
   String get equipment_setEdit_saveTooltip_edit =>
@@ -28317,16 +28297,10 @@ class AppLocalizationsFr extends AppLocalizations {
   String get trips_edit_appBar_edit => 'Modifier le voyage';
 
   @override
-  String get trips_edit_button_add => 'Ajouter un voyage';
-
-  @override
   String get trips_edit_button_cancel => 'Annuler';
 
   @override
   String get trips_edit_button_save => 'Enregistrer';
-
-  @override
-  String get trips_edit_button_update => 'Mettre à jour le voyage';
 
   @override
   String get trips_edit_dialog_discard => 'Abandonner';

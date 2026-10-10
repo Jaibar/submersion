@@ -14519,18 +14519,6 @@ class AppLocalizationsHe extends AppLocalizations {
   }
 
   @override
-  String get equipment_edit_saveButton_edit => 'שמור שינויים';
-
-  @override
-  String get equipment_edit_saveButton_new => 'הוסף ציוד';
-
-  @override
-  String get equipment_edit_saveTooltip_edit => 'שמור שינויי ציוד';
-
-  @override
-  String get equipment_edit_saveTooltip_new => 'הוסף פריט ציוד חדש';
-
-  @override
   String get equipment_edit_selectDate => 'בחר תאריך';
 
   @override
@@ -15446,12 +15434,6 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get equipment_setEdit_notFoundTitle => 'הסט לא נמצא';
-
-  @override
-  String get equipment_setEdit_saveButton_edit => 'שמור שינויים';
-
-  @override
-  String get equipment_setEdit_saveButton_new => 'צור סט';
 
   @override
   String get equipment_setEdit_saveTooltip_edit => 'שמור שינויי סט ציוד';
@@ -27505,16 +27487,10 @@ class AppLocalizationsHe extends AppLocalizations {
   String get trips_edit_appBar_edit => 'ערוך טיול';
 
   @override
-  String get trips_edit_button_add => 'הוסף טיול';
-
-  @override
   String get trips_edit_button_cancel => 'ביטול';
 
   @override
   String get trips_edit_button_save => 'שמירה';
-
-  @override
-  String get trips_edit_button_update => 'עדכן טיול';
 
   @override
   String get trips_edit_dialog_discard => 'מחיקה';
