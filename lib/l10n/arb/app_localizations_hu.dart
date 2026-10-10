@@ -45575,6 +45575,10 @@ class AppLocalizationsHu extends AppLocalizations {
       'Nem sikerült a profilverzió váltása.';
 
   @override
+  String get diveLog_profileEditor_revisionLegacyHint =>
+      'A verzióelőzmények előtt mentve; nincs számítógéphez kapcsolva';
+
+  @override
   String diveLog_sources_sectionTitle(int count) {
     String _temp0 = intl.Intl.pluralLogic(
       count,
