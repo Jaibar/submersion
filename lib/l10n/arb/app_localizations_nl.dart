@@ -1417,10 +1417,71 @@ class AppLocalizationsNl extends AppLocalizations {
       'Dichtstbijzijnde standaardmengsel voor deze diepte';
 
   @override
-  String get gasCalculators_bestMix_recommendedMix => 'Aanbevolen mengsel';
+  String get gasCalculators_bestMix_recommendedMix => 'Berekend mengsel';
+
+  @override
+  String gasCalculators_bestMix_semanticsLabel(String mix, String mod) {
+    return 'Berekend mengsel $mix, MOD $mod';
+  }
+
+  @override
+  String gasCalculators_bestMix_showAllMixes(int count) {
+    return 'Alles tonen ($count)';
+  }
+
+  @override
+  String get gasCalculators_bestMix_showFewerMixes => 'Minder tonen';
 
   @override
   String get gasCalculators_bestMix_withoutHelium => 'Zonder helium';
+
+  @override
+  String get gasCalculators_bestMix_ccrSource => 'Gasbron';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceBailout => 'Bailout';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceDiluent => 'Diluent';
+
+  @override
+  String get gasCalculators_bestMix_densityAware =>
+      'Gasdichtheid binnen de limieten houden';
+
+  @override
+  String get gasCalculators_bestMix_eadLabel => 'EAD op diepte';
+
+  @override
+  String get gasCalculators_bestMix_heliumBoth =>
+      'Helium toegevoegd om END en gasdichtheid binnen je limieten te houden.';
+
+  @override
+  String get gasCalculators_bestMix_heliumDensity =>
+      'Helium toegevoegd om de gasdichtheid binnen de limieten te houden.';
+
+  @override
+  String get gasCalculators_bestMix_mode => 'Modus';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTec => 'CCR Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTecHint =>
+      'Gesloten circuit: Diluent toetst aan de flush-ppO₂ van het diluent, Bailout aan je deco-ppO₂ (maximum) in open circuit.';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTec => 'OC Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTecHint =>
+      'Trimix in open circuit, getoetst aan je werk-ppO₂-limiet.';
+
+  @override
+  String get gasCalculators_bestMix_modeRec => 'Rec';
+
+  @override
+  String get gasCalculators_bestMix_modeRecHint =>
+      'Nitrox voor recreatief duiken, zoals nu.';
 
   @override
   String get gasCalculators_planningCaveat =>
@@ -9630,6 +9691,18 @@ class AppLocalizationsNl extends AppLocalizations {
   String get diveLog_tank_section_gasMix => 'Gasmengsel';
 
   @override
+  String get diveLog_tank_computerMix_matches =>
+      'Vastgelegd door je duikcomputer';
+
+  @override
+  String diveLog_tank_computerMix_differs(String mix) {
+    return 'Je duikcomputer heeft $mix vastgelegd';
+  }
+
+  @override
+  String get diveLog_tank_computerMix_restore => 'Herstellen';
+
+  @override
   String get diveLog_tank_selectPreset => 'Selecteer voorinstelling...';
 
   @override
@@ -9912,6 +9985,11 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get divePlanner_action_editTank => 'Fles bewerken';
+
+  @override
+  String divePlanner_action_fillBestMix(String depth, String mix) {
+    return 'Beste mengsel voor $depth: $mix';
+  }
 
   @override
   String get divePlanner_action_moreOptions => 'Meer opties';
@@ -11764,7 +11842,7 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogContent(Object name) {
-    return 'This will permanently delete $name and all associated data including dive logs, dive computers, equipment, certifications, and sites.';
+    return 'Hiermee worden $name en alle bijbehorende gegevens permanent verwijderd, inclusief duiklogs, duikcomputers, uitrusting, brevetten en duikstekken.';
   }
 
   @override
@@ -11908,12 +11986,12 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogConfirmHint(String name) {
-    return 'Type \"Delete $name\" to confirm';
+    return 'Typ \"Verwijderen $name\" om te bevestigen';
   }
 
   @override
   String divers_detail_deleteDialogConfirmText(String name) {
-    return 'Delete $name';
+    return 'Verwijderen $name';
   }
 
   @override
@@ -14662,20 +14740,6 @@ class AppLocalizationsNl extends AppLocalizations {
   }
 
   @override
-  String get equipment_edit_saveButton_edit => 'Wijzigingen opslaan';
-
-  @override
-  String get equipment_edit_saveButton_new => 'Uitrusting toevoegen';
-
-  @override
-  String get equipment_edit_saveTooltip_edit =>
-      'Wijzigingen in uitrusting opslaan';
-
-  @override
-  String get equipment_edit_saveTooltip_new =>
-      'Nieuw uitrustingsonderdeel toevoegen';
-
-  @override
   String get equipment_edit_selectDate => 'Selecteer datum';
 
   @override
@@ -14688,6 +14752,13 @@ class AppLocalizationsNl extends AppLocalizations {
   String equipment_edit_snackbar_error(Object error) {
     return 'Fout bij opslaan van uitrusting: $error';
   }
+
+  @override
+  String get equipment_edit_snackbar_hiddenByView =>
+      'Opgeslagen, maar de huidige lijstweergave verbergt het';
+
+  @override
+  String get equipment_edit_snackbar_showAction => 'Tonen';
 
   @override
   String get equipment_edit_snackbar_updated => 'Uitrusting bijgewerkt';
@@ -15622,12 +15693,6 @@ class AppLocalizationsNl extends AppLocalizations {
   String get equipment_setEdit_notFoundTitle => 'Set niet gevonden';
 
   @override
-  String get equipment_setEdit_saveButton_edit => 'Wijzigingen opslaan';
-
-  @override
-  String get equipment_setEdit_saveButton_new => 'Set aanmaken';
-
-  @override
   String get equipment_setEdit_saveTooltip_edit =>
       'Wijzigingen in uitrustingsset opslaan';
 
@@ -15979,8 +16044,8 @@ class AppLocalizationsNl extends AppLocalizations {
   String get gasCalculators_mod_fromProfile => 'Uit je duikersprofiel';
 
   @override
-  String gasCalculators_mod_differsFromProfile(String value) {
-    return 'Wijkt af van je profiel ($value bar)';
+  String gasCalculators_differsFromProfile(String value) {
+    return 'Wijkt af van je profiel ($value)';
   }
 
   @override
@@ -16206,6 +16271,64 @@ class AppLocalizationsNl extends AppLocalizations {
   String get gasCalculators_mnd_resultTitle => 'Maximale narcotische diepte';
 
   @override
+  String get gasCalculators_icd_gasATitle => 'Huidig gas';
+
+  @override
+  String get gasCalculators_icd_gasBTitle => 'Overgeschakeld gas';
+
+  @override
+  String get gasCalculators_icd_o2Percent => 'O2 %';
+
+  @override
+  String get gasCalculators_icd_hePercent => 'He %';
+
+  @override
+  String get gasCalculators_icd_n2Percent => 'N2 %';
+
+  @override
+  String get gasCalculators_icd_resultTitle => 'ICD-beoordeling';
+
+  @override
+  String get gasCalculators_icd_ok =>
+      'Geen ICD-risico volgens de vijfde-regel.';
+
+  @override
+  String get gasCalculators_icd_caution =>
+      'Grensgeval: de stikstoftoename ligt dicht bij het toegestane maximum.';
+
+  @override
+  String gasCalculators_icd_violation(String increase, String max) {
+    return 'Vijfde-regel overtreden: stikstof stijgt met $increase%, het toegestane maximum is $max%.';
+  }
+
+  @override
+  String get gasCalculators_icd_disabledNotice =>
+      'De ICD-beoordeling is uitgeschakeld in Instellingen > Decompressie.';
+
+  @override
+  String get gasCalculators_icd_suggestionsTitle => 'Conform maken';
+
+  @override
+  String gasCalculators_icd_suggestionKeepA(String he) {
+    return 'Huidig gas behouden, He van het overgeschakelde gas instellen op $he%';
+  }
+
+  @override
+  String gasCalculators_icd_suggestionKeepB(String he) {
+    return 'Overgeschakeld gas behouden, He van het huidige gas instellen op $he%';
+  }
+
+  @override
+  String get gasCalculators_icd_applyButton => 'Toepassen';
+
+  @override
+  String get gasCalculators_icd_infoTitle => 'Over isobare tegendiffusie';
+
+  @override
+  String get gasCalculators_icd_infoContent =>
+      'Isobare tegendiffusie (ICD) is het risico dat het overschakelen van een heliumrijker naar een stikstofrijker gas de totale inerte gasspanning in weefsel verhoogt, omdat helium sneller diffundeert dan stikstof. De vijfde-regel is een veelgebruikte vuistregel: het stikstofaandeel mag met maximaal een vijfde van de afname van het heliumaandeel stijgen.\n\nOrganisaties zijn het er niet over eens hoe belangrijk dit in de praktijk is bij een goed geplande duik met standaardgassen. Deze rekenmachine past de vuistregel toe op de twee ingevoerde gassen; het vervangt geen training of professioneel advies.';
+
+  @override
   String get gasCalculators_ppO2Limit => 'ppO₂ limiet';
 
   @override
@@ -16222,6 +16345,9 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get gasCalculators_tab_mnd => 'MND/END';
+
+  @override
+  String get gasCalculators_tab_icd => 'ICD';
 
   @override
   String get gasCalculators_tab_blender => 'Trimix-menger';
@@ -16719,6 +16845,10 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get gasCalculators_desc_mnd => 'Narcosediepte-limiet voor een mengsel';
+
+  @override
+  String get gasCalculators_desc_icd =>
+      'Risico op isobare tegendiffusie tussen twee gassen';
 
   @override
   String get gasCalculators_tab_density => 'Gasdichtheid';
@@ -19016,7 +19146,7 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get planning_card_gasCalculators_subtitle =>
-      'MOD, Beste mix, Verbruik, Noodreserve';
+      'Dieptelimieten, mengsels, gasverbruik en vullen';
 
   @override
   String get planning_card_gasCalculators_title => 'Gascalculators';
@@ -19038,6 +19168,20 @@ class AppLocalizationsNl extends AppLocalizations {
   @override
   String get planning_info_disclaimer =>
       'Deze tools zijn alleen voor planningsdoeleinden. Controleer berekeningen altijd en volg je duikopleiding.';
+
+  @override
+  String get planning_disclaimer_dialog_title => 'Waarschuwing planningstools';
+
+  @override
+  String get planning_disclaimer_dialog_body =>
+      'De tools in dit gedeelte zijn alleen voor planningsdoeleinden. Ze vervangen niet je duikopleiding of je duikcomputer. Controleer altijd elke berekening zelf voordat je deze gebruikt voor een veiligheidsbeslissing.';
+
+  @override
+  String get planning_disclaimer_dialog_confirm => 'Begrepen';
+
+  @override
+  String get settings_conflict_field_hasAcceptedPlanningDisclaimer =>
+      'Planningswaarschuwing geaccepteerd';
 
   @override
   String get planning_section_tools => 'Gereedschappen';
@@ -19083,9 +19227,6 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get settings_appBar_title => 'Instellingen';
-
-  @override
-  String get settings_appearance_appLanguage => 'App-taal';
 
   @override
   String get settings_appearance_displaySize => 'Weergavegrootte';
@@ -19949,6 +20090,19 @@ class AppLocalizationsNl extends AppLocalizations {
       'Standaardmetriek getoond op de rechter as';
 
   @override
+  String get settings_appearance_viewerFullscreen => 'Volledig-schermmodus';
+
+  @override
+  String get settings_appearance_viewerFullscreen_subtitle =>
+      'Of het duikprofiel en de mediaviewer op volledig scherm het venster of het hele scherm vullen';
+
+  @override
+  String get settings_appearance_viewerFullscreen_window => 'Volledig venster';
+
+  @override
+  String get settings_appearance_viewerFullscreen_screen => 'Volledig scherm';
+
+  @override
   String get settings_appearance_subsection_decompressionMetrics =>
       'Decompressiemetrieken';
 
@@ -20563,20 +20717,55 @@ class AppLocalizationsNl extends AppLocalizations {
   @override
   String settings_conflict_consequence_keep(
     String kept,
+    String keptKind,
     String discarded,
+    String discardedKind,
     String fields,
   ) {
-    return 'Bewaart de versie van $kept. De waarden van $discarded voor $fields worden weggegooid.';
+    String _temp0 = intl.Intl.selectLogic(keptKind, {
+      'thisDevice': 'van dit apparaat',
+      'otherDevice': 'van het andere apparaat',
+      'other': 'van $kept',
+    });
+    String _temp1 = intl.Intl.selectLogic(discardedKind, {
+      'thisDevice': 'van dit apparaat',
+      'otherDevice': 'van het andere apparaat',
+      'other': 'van $discarded',
+    });
+    return 'Bewaart de versie $_temp0. De waarden $_temp1 voor $fields worden weggegooid.';
   }
 
   @override
-  String settings_conflict_consequence_keepBoth(String local, String remote) {
-    return 'Bewaart de versie van $local en voegt de versie van $remote toe als aparte kopie.';
+  String settings_conflict_consequence_keepBoth(
+    String local,
+    String localKind,
+    String remote,
+    String remoteKind,
+  ) {
+    String _temp0 = intl.Intl.selectLogic(localKind, {
+      'thisDevice': 'van dit apparaat',
+      'otherDevice': 'van het andere apparaat',
+      'other': 'van $local',
+    });
+    String _temp1 = intl.Intl.selectLogic(remoteKind, {
+      'thisDevice': 'van dit apparaat',
+      'otherDevice': 'van het andere apparaat',
+      'other': 'van $remote',
+    });
+    return 'Bewaart de versie $_temp0 en voegt de versie $_temp1 toe als aparte kopie.';
   }
 
   @override
-  String settings_conflict_consequence_keepRecord(String device) {
-    return 'Bewaart het record, met de waarden van $device.';
+  String settings_conflict_consequence_keepRecord(
+    String device,
+    String deviceKind,
+  ) {
+    String _temp0 = intl.Intl.selectLogic(deviceKind, {
+      'thisDevice': 'van dit apparaat',
+      'otherDevice': 'van het andere apparaat',
+      'other': 'van $device',
+    });
+    return 'Bewaart het record, met de waarden $_temp0.';
   }
 
   @override
@@ -20593,8 +20782,13 @@ class AppLocalizationsNl extends AppLocalizations {
   }
 
   @override
-  String settings_conflict_deletedValues(String device) {
-    return 'Het record zoals $device het heeft:';
+  String settings_conflict_deletedValues(String device, String deviceKind) {
+    String _temp0 = intl.Intl.selectLogic(deviceKind, {
+      'thisDevice': 'dit apparaat',
+      'otherDevice': 'het andere apparaat',
+      'other': '$device',
+    });
+    return 'Het record zoals $_temp0 het heeft:';
   }
 
   @override
@@ -21335,6 +21529,10 @@ class AppLocalizationsNl extends AppLocalizations {
   @override
   String get settings_conflict_field_endLimit =>
       'Grens van de narcotische diepte';
+
+  @override
+  String get settings_conflict_field_icdWarningsEnabled =>
+      'ICD-waarschuwingen ingeschakeld';
 
   @override
   String get settings_conflict_field_endLongitude =>
@@ -22578,8 +22776,13 @@ class AppLocalizationsNl extends AppLocalizations {
   String get settings_conflict_keepBoth => 'Beide bewaren';
 
   @override
-  String settings_conflict_keepDevice(String device) {
-    return '$device bewaren';
+  String settings_conflict_keepDevice(String device, String deviceKind) {
+    String _temp0 = intl.Intl.selectLogic(deviceKind, {
+      'thisDevice': 'Versie van dit apparaat bewaren',
+      'otherDevice': 'Versie van het andere apparaat bewaren',
+      'other': '$device bewaren',
+    });
+    return '$_temp0';
   }
 
   @override
@@ -22602,6 +22805,9 @@ class AppLocalizationsNl extends AppLocalizations {
     );
     return '$fields en $_temp0';
   }
+
+  @override
+  String get settings_conflict_fieldListSeparator => ', ';
 
   @override
   String get settings_conflict_next_tooltip => 'Volgend conflict';
@@ -23200,6 +23406,16 @@ class AppLocalizationsNl extends AppLocalizations {
   String get settings_decompression_endLimit_dialog_title => 'END-limiet';
 
   @override
+  String get settings_decompression_header_icd => 'Isobare tegendiffusie';
+
+  @override
+  String get settings_decompression_icdWarnings => 'Waarschuwen bij ICD-risico';
+
+  @override
+  String get settings_decompression_icdWarnings_subtitle =>
+      'Toont in de ICD-rekenmachine een beoordeling volgens de vijfde-regel bij het overschakelen van een heliumrijker naar een stikstofrijker gas.';
+
+  @override
   String get settings_decompression_cnsMethodTitle => 'CNS-berekening';
 
   @override
@@ -23390,9 +23606,6 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get settings_language_appBar_title => 'Taal';
-
-  @override
-  String get settings_language_selected => 'Geselecteerd';
 
   @override
   String get settings_language_systemDefault => 'Systeemstandaard';
@@ -24558,6 +24771,9 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get signatures_handoff_title => 'Geef je apparaat aan';
+
+  @override
+  String get signatures_buddySignature => 'Handtekening buddy';
 
   @override
   String get signatures_instructorSignature => 'Handtekening instructeur';
@@ -25974,10 +26190,6 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get insights_summary_depthDistribution_title => 'Diepteverdeling';
-
-  @override
-  String get insights_summary_diveTypes_semanticLabel =>
-      'Cirkeldiagram met duiktypeverdeling';
 
   @override
   String get insights_summary_diveTypes_title => 'Duiktypes';
@@ -27938,16 +28150,10 @@ class AppLocalizationsNl extends AppLocalizations {
   String get trips_edit_appBar_edit => 'Reis bewerken';
 
   @override
-  String get trips_edit_button_add => 'Reis toevoegen';
-
-  @override
   String get trips_edit_button_cancel => 'Annuleren';
 
   @override
   String get trips_edit_button_save => 'Opslaan';
-
-  @override
-  String get trips_edit_button_update => 'Reis bijwerken';
 
   @override
   String get trips_edit_dialog_discard => 'Verwerpen';
@@ -31457,6 +31663,18 @@ class AppLocalizationsNl extends AppLocalizations {
       'Ontbrekende flesgegevens bij geïmporteerde duiken aanvullen met de standaardpreset';
 
   @override
+  String get tankPresets_defaultStartPressure => 'Standaard begindruk';
+
+  @override
+  String get tankPresets_defaultStartPressure_subtitle =>
+      'Ingevuld bij nieuwe flessen, en bij geïmporteerde flessen zonder begindruk wanneer de standaardfles op imports wordt toegepast';
+
+  @override
+  String tankPresets_defaultStartPressure_range(String max, String min) {
+    return 'Voer een druk in van $min tot $max';
+  }
+
+  @override
   String get tankPresets_new_title => 'Nieuwe flesinstelling';
 
   @override
@@ -34635,6 +34853,28 @@ class AppLocalizationsNl extends AppLocalizations {
       'Regio onbekend - wereldwijde noodlijn wordt gebruikt';
 
   @override
+  String emergencyCard_regionManual(String region) {
+    return 'Regio: $region, handmatig ingesteld';
+  }
+
+  @override
+  String get emergencyCard_regionChange => 'Regio wijzigen';
+
+  @override
+  String get emergencyCard_regionPicker_title => 'Noodregio';
+
+  @override
+  String get emergencyCard_regionPicker_automatic =>
+      'Automatisch (meest recente duik)';
+
+  @override
+  String get emergencyCard_regionPicker_search => 'Landen zoeken';
+
+  @override
+  String get emergencyCard_regionPicker_noMatches =>
+      'Geen overeenkomende landen';
+
+  @override
   String get emergencyCard_noDiverData =>
       'Geen duikersprofielgegevens. Voeg noodcontacten, medische gegevens en verzekering toe in het duikersprofiel.';
 
@@ -36489,6 +36729,27 @@ class AppLocalizationsNl extends AppLocalizations {
   @override
   String get settings_placeNameLanguage_subtitle =>
       'Gebruikt wanneer land, regio, plaats en water uit coördinaten worden opgezocht. Bestaande duikstekken worden niet gewijzigd.';
+
+  @override
+  String settings_language_placeNameOffer_title(String language) {
+    return 'Plaatsnamen opslaan in $language?';
+  }
+
+  @override
+  String settings_language_placeNameOffer_body(
+    String current,
+    String language,
+  ) {
+    return 'Namen van landen en regio\'s die voor je duikstekken worden opgezocht, worden opgeslagen in $current. Overschakelen naar $language voor nieuwe zoekopdrachten? Daarna kun je je bestaande duikstekken opnieuw opzoeken.';
+  }
+
+  @override
+  String settings_language_placeNameOffer_keep(String current) {
+    return '$current behouden';
+  }
+
+  @override
+  String get settings_language_placeNameOffer_switch => 'Overschakelen';
 
   @override
   String get settings_coordinateFormat_decimalDegrees => 'Decimale graden';
@@ -43600,6 +43861,31 @@ class AppLocalizationsNl extends AppLocalizations {
       'Naar welke meegenomen flessen de gesimuleerde opstijging (TTS, plafond en stops) op elke diepte mag overschakelen. Alleen gassen die bij de duik zijn vastgelegd, worden meegenomen.';
 
   @override
+  String get settings_decompression_header_ascentRate => 'Opstijgsnelheid';
+
+  @override
+  String get settings_decompression_header_ascentRate_subtitle =>
+      'De grenzen die de kleuren en gebeurtenissen voor opstijgsnelheid in het profiel gebruiken. De veiligheidscontrole houdt haar eigen vaste grenzen aan, dus deze wijzigen verandert nooit al gecontroleerde duiken.';
+
+  @override
+  String get settings_decompression_ascentRateThresholds =>
+      'Grenzen voor opstijgsnelheid';
+
+  @override
+  String settings_decompression_ascentRateThresholds_subtitle(
+    String critical,
+    String warning,
+  ) {
+    return 'Waarschuwing $warning, kritiek $critical';
+  }
+
+  @override
+  String get settings_decompression_ascentRateWarning => 'Waarschuwing';
+
+  @override
+  String get settings_decompression_ascentRateCritical => 'Kritiek';
+
+  @override
   String get settings_decompression_header_dataSources =>
       'Voorkeuren voor gegevensbron';
 
@@ -45453,6 +45739,10 @@ class AppLocalizationsNl extends AppLocalizations {
       'Kan niet wisselen van profielrevisie.';
 
   @override
+  String get diveLog_profileEditor_revisionLegacyHint =>
+      'Opgeslagen vóór de revisiegeschiedenis; niet gekoppeld aan een computer';
+
+  @override
   String diveLog_sources_sectionTitle(int count) {
     String _temp0 = intl.Intl.pluralLogic(
       count,
@@ -45777,6 +46067,11 @@ class AppLocalizationsNl extends AppLocalizations {
   @override
   String backup_operation_created(String size) {
     return 'Back-up gemaakt: $size';
+  }
+
+  @override
+  String backup_operation_createdLocalOnlyLocked(String size) {
+    return 'Back-up gemaakt: $size. Deze is alleen op dit apparaat opgeslagen: voer je wachtwoordzin voor versleuteling in om back-ups naar de cloud te uploaden.';
   }
 
   @override

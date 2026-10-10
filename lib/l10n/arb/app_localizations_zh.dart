@@ -1373,10 +1373,66 @@ class AppLocalizationsZh extends AppLocalizations {
   String get gasCalculators_bestMix_nearestStandard => '可覆盖此深度的最接近标准混合气';
 
   @override
-  String get gasCalculators_bestMix_recommendedMix => '推荐混合气';
+  String get gasCalculators_bestMix_recommendedMix => '计算混合气';
+
+  @override
+  String gasCalculators_bestMix_semanticsLabel(String mix, String mod) {
+    return '计算混合气 $mix，MOD $mod';
+  }
+
+  @override
+  String gasCalculators_bestMix_showAllMixes(int count) {
+    return '显示全部 ($count)';
+  }
+
+  @override
+  String get gasCalculators_bestMix_showFewerMixes => '显示更少';
 
   @override
   String get gasCalculators_bestMix_withoutHelium => '不含氦气';
+
+  @override
+  String get gasCalculators_bestMix_ccrSource => '气体来源';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceBailout => '备用';
+
+  @override
+  String get gasCalculators_bestMix_ccrSourceDiluent => '稀释气';
+
+  @override
+  String get gasCalculators_bestMix_densityAware => '将气体密度保持在限值内';
+
+  @override
+  String get gasCalculators_bestMix_eadLabel => '深度处 EAD';
+
+  @override
+  String get gasCalculators_bestMix_heliumBoth => '已加入氦气，使 END 与气体密度都保持在你的限值内。';
+
+  @override
+  String get gasCalculators_bestMix_heliumDensity => '已加入氦气，使气体密度保持在限值内。';
+
+  @override
+  String get gasCalculators_bestMix_mode => '模式';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTec => 'CCR Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeCcrTecHint =>
+      '密闭式循环呼吸器：稀释气模式按稀释气的冲洗 ppO₂ 校验，备用模式按你的开放式减压（最大）ppO₂ 校验。';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTec => 'OC Tec';
+
+  @override
+  String get gasCalculators_bestMix_modeOcTecHint => '开放式三混气，按你的工作 ppO₂ 限值校验。';
+
+  @override
+  String get gasCalculators_bestMix_modeRec => 'Rec';
+
+  @override
+  String get gasCalculators_bestMix_modeRecHint => '休闲潜水高氧，与现在相同。';
 
   @override
   String get gasCalculators_planningCaveat =>
@@ -9221,6 +9277,17 @@ class AppLocalizationsZh extends AppLocalizations {
   String get diveLog_tank_section_gasMix => '气体混合';
 
   @override
+  String get diveLog_tank_computerMix_matches => '由潜水电脑记录';
+
+  @override
+  String diveLog_tank_computerMix_differs(String mix) {
+    return '潜水电脑记录的是 $mix';
+  }
+
+  @override
+  String get diveLog_tank_computerMix_restore => '恢复';
+
+  @override
   String get diveLog_tank_selectPreset => '选择预设...';
 
   @override
@@ -9497,6 +9564,11 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get divePlanner_action_editTank => '编辑气瓶';
+
+  @override
+  String divePlanner_action_fillBestMix(String depth, String mix) {
+    return '$depth 的最佳混合气：$mix';
+  }
 
   @override
   String get divePlanner_action_moreOptions => '更多选项';
@@ -11279,7 +11351,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogContent(Object name) {
-    return 'This will permanently delete $name and all associated data including dive logs, dive computers, equipment, certifications, and sites.';
+    return '这将永久删除 $name 及所有相关数据，包括潜水日志、潜水电脑、装备、证书和潜水点。';
   }
 
   @override
@@ -11415,12 +11487,12 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String divers_detail_deleteDialogConfirmHint(String name) {
-    return 'Type \"Delete $name\" to confirm';
+    return '输入「删除 $name」以确认';
   }
 
   @override
   String divers_detail_deleteDialogConfirmText(String name) {
-    return 'Delete $name';
+    return '删除 $name';
   }
 
   @override
@@ -14090,18 +14162,6 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get equipment_edit_saveButton_edit => '保存更改';
-
-  @override
-  String get equipment_edit_saveButton_new => '添加装备';
-
-  @override
-  String get equipment_edit_saveTooltip_edit => '保存装备更改';
-
-  @override
-  String get equipment_edit_saveTooltip_new => '添加新装备';
-
-  @override
   String get equipment_edit_selectDate => '选择日期';
 
   @override
@@ -14114,6 +14174,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String equipment_edit_snackbar_error(Object error) {
     return '保存装备出错：$error';
   }
+
+  @override
+  String get equipment_edit_snackbar_hiddenByView => '已保存，但当前列表视图将其隐藏';
+
+  @override
+  String get equipment_edit_snackbar_showAction => '显示';
 
   @override
   String get equipment_edit_snackbar_updated => '装备已更新';
@@ -14982,12 +15048,6 @@ class AppLocalizationsZh extends AppLocalizations {
   String get equipment_setEdit_notFoundTitle => '未找到套装';
 
   @override
-  String get equipment_setEdit_saveButton_edit => '保存更改';
-
-  @override
-  String get equipment_setEdit_saveButton_new => '创建套装';
-
-  @override
   String get equipment_setEdit_saveTooltip_edit => '保存装备套装更改';
 
   @override
@@ -15326,8 +15386,8 @@ class AppLocalizationsZh extends AppLocalizations {
   String get gasCalculators_mod_fromProfile => '来自你的潜水员档案';
 
   @override
-  String gasCalculators_mod_differsFromProfile(String value) {
-    return '与档案不同（$value bar）';
+  String gasCalculators_differsFromProfile(String value) {
+    return '与档案不同（$value）';
   }
 
   @override
@@ -15545,6 +15605,61 @@ class AppLocalizationsZh extends AppLocalizations {
   String get gasCalculators_mnd_resultTitle => '最大麻醉深度';
 
   @override
+  String get gasCalculators_icd_gasATitle => '当前气体';
+
+  @override
+  String get gasCalculators_icd_gasBTitle => '切换后气体';
+
+  @override
+  String get gasCalculators_icd_o2Percent => 'O2 %';
+
+  @override
+  String get gasCalculators_icd_hePercent => 'He %';
+
+  @override
+  String get gasCalculators_icd_n2Percent => 'N2 %';
+
+  @override
+  String get gasCalculators_icd_resultTitle => 'ICD评估';
+
+  @override
+  String get gasCalculators_icd_ok => '根据五分之一法则,无ICD风险。';
+
+  @override
+  String get gasCalculators_icd_caution => '临界:氮气增量接近允许的最大值。';
+
+  @override
+  String gasCalculators_icd_violation(String increase, String max) {
+    return '违反五分之一法则:氮气上升$increase%,允许的最大值为$max%。';
+  }
+
+  @override
+  String get gasCalculators_icd_disabledNotice => 'ICD评估已在设置 > 减压中关闭。';
+
+  @override
+  String get gasCalculators_icd_suggestionsTitle => '使其符合规则';
+
+  @override
+  String gasCalculators_icd_suggestionKeepA(String he) {
+    return '保留当前气体,将切换后气体的He设为$he%';
+  }
+
+  @override
+  String gasCalculators_icd_suggestionKeepB(String he) {
+    return '保留切换后气体,将当前气体的He设为$he%';
+  }
+
+  @override
+  String get gasCalculators_icd_applyButton => '应用';
+
+  @override
+  String get gasCalculators_icd_infoTitle => '关于等压逆向扩散';
+
+  @override
+  String get gasCalculators_icd_infoContent =>
+      '等压逆向扩散(ICD)是指从氦气含量较高的气体切换到氮气含量较高的气体时,由于氦气扩散速度快于氮气,可能导致组织中惰性气体总张力升高的风险。五分之一法则是一个常见的经验法则:氮气比例的上升幅度不应超过氦气比例下降幅度的五分之一。\n\n各机构对于在使用标准气体、规划良好的潜水中这一风险的实际重要性存在分歧。本计算器将该经验法则应用于输入的两种气体;它不能替代培训或专业建议。';
+
+  @override
   String get gasCalculators_ppO2Limit => '氧分压限制';
 
   @override
@@ -15561,6 +15676,9 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get gasCalculators_tab_mnd => '最大麻醉深度/等效麻醉深度';
+
+  @override
+  String get gasCalculators_tab_icd => 'ICD';
 
   @override
   String get gasCalculators_tab_blender => '三混气配气器';
@@ -16027,6 +16145,9 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get gasCalculators_desc_mnd => '混合气体的麻醉深度极限';
+
+  @override
+  String get gasCalculators_desc_icd => '两种气体之间的等压逆向扩散风险';
 
   @override
   String get gasCalculators_tab_density => '气体密度';
@@ -18229,7 +18350,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get planning_card_divePlanner_title => '潜水计划器';
 
   @override
-  String get planning_card_gasCalculators_subtitle => '最大作业深度、最佳混合气、耗气量、底限储备';
+  String get planning_card_gasCalculators_subtitle => '深度限制、混合气、耗气量与配气';
 
   @override
   String get planning_card_gasCalculators_title => '气体计算器';
@@ -18248,6 +18369,19 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get planning_info_disclaimer => '这些工具仅供计划参考。请务必验证计算结果并遵循您的潜水训练。';
+
+  @override
+  String get planning_disclaimer_dialog_title => '计划工具提示';
+
+  @override
+  String get planning_disclaimer_dialog_body =>
+      '此区域中的工具仅供计划参考。它们不能替代您的潜水训练或潜水电脑。在将计算结果用于安全决策之前,请务必自行验证每一项计算。';
+
+  @override
+  String get planning_disclaimer_dialog_confirm => '我已了解';
+
+  @override
+  String get settings_conflict_field_hasAcceptedPlanningDisclaimer => '已接受计划提示';
 
   @override
   String get planning_section_tools => '工具';
@@ -18293,9 +18427,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settings_appBar_title => '设置';
-
-  @override
-  String get settings_appearance_appLanguage => '应用语言';
 
   @override
   String get settings_appearance_displaySize => '显示大小';
@@ -19095,6 +19226,19 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings_appearance_rightYAxisMetric_subtitle => '右轴默认显示的指标';
 
   @override
+  String get settings_appearance_viewerFullscreen => '全屏模式';
+
+  @override
+  String get settings_appearance_viewerFullscreen_subtitle =>
+      '全屏潜水轮廓和媒体查看器是填满窗口还是整个屏幕';
+
+  @override
+  String get settings_appearance_viewerFullscreen_window => '填满窗口';
+
+  @override
+  String get settings_appearance_viewerFullscreen_screen => '全屏';
+
+  @override
   String get settings_appearance_subsection_decompressionMetrics => '减压指标';
 
   @override
@@ -19670,20 +19814,55 @@ class AppLocalizationsZh extends AppLocalizations {
   @override
   String settings_conflict_consequence_keep(
     String kept,
+    String keptKind,
     String discarded,
+    String discardedKind,
     String fields,
   ) {
-    return '保留 $kept 的版本。$discarded 中 $fields 的值将被舍弃。';
+    String _temp0 = intl.Intl.selectLogic(keptKind, {
+      'thisDevice': '本设备',
+      'otherDevice': '另一台设备',
+      'other': ' $kept ',
+    });
+    String _temp1 = intl.Intl.selectLogic(discardedKind, {
+      'thisDevice': '本设备',
+      'otherDevice': '另一台设备',
+      'other': '$discarded ',
+    });
+    return '保留$_temp0的版本。$_temp1中 $fields 的值将被舍弃。';
   }
 
   @override
-  String settings_conflict_consequence_keepBoth(String local, String remote) {
-    return '保留 $local 的版本，并将 $remote 的版本添加为单独的副本。';
+  String settings_conflict_consequence_keepBoth(
+    String local,
+    String localKind,
+    String remote,
+    String remoteKind,
+  ) {
+    String _temp0 = intl.Intl.selectLogic(localKind, {
+      'thisDevice': '本设备',
+      'otherDevice': '另一台设备',
+      'other': ' $local ',
+    });
+    String _temp1 = intl.Intl.selectLogic(remoteKind, {
+      'thisDevice': '本设备',
+      'otherDevice': '另一台设备',
+      'other': ' $remote ',
+    });
+    return '保留$_temp0的版本，并将$_temp1的版本添加为单独的副本。';
   }
 
   @override
-  String settings_conflict_consequence_keepRecord(String device) {
-    return '保留该记录，使用 $device 的值。';
+  String settings_conflict_consequence_keepRecord(
+    String device,
+    String deviceKind,
+  ) {
+    String _temp0 = intl.Intl.selectLogic(deviceKind, {
+      'thisDevice': '本设备',
+      'otherDevice': '另一台设备',
+      'other': ' $device ',
+    });
+    return '保留该记录，使用$_temp0的值。';
   }
 
   @override
@@ -19698,8 +19877,13 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String settings_conflict_deletedValues(String device) {
-    return '$device 上的记录：';
+  String settings_conflict_deletedValues(String device, String deviceKind) {
+    String _temp0 = intl.Intl.selectLogic(deviceKind, {
+      'thisDevice': '本设备',
+      'otherDevice': '另一台设备',
+      'other': '$device ',
+    });
+    return '$_temp0上的记录：';
   }
 
   @override
@@ -20341,6 +20525,9 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settings_conflict_field_endLimit => '麻醉深度上限';
+
+  @override
+  String get settings_conflict_field_icdWarningsEnabled => '已启用ICD警告';
 
   @override
   String get settings_conflict_field_endLongitude => '终点经度';
@@ -21475,8 +21662,13 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings_conflict_keepBoth => '保留两者';
 
   @override
-  String settings_conflict_keepDevice(String device) {
-    return '保留 $device';
+  String settings_conflict_keepDevice(String device, String deviceKind) {
+    String _temp0 = intl.Intl.selectLogic(deviceKind, {
+      'thisDevice': '保留本设备的版本',
+      'otherDevice': '保留另一台设备的版本',
+      'other': '保留 $device',
+    });
+    return '$_temp0';
   }
 
   @override
@@ -21498,6 +21690,9 @@ class AppLocalizationsZh extends AppLocalizations {
     );
     return '$fields等另外 $_temp0';
   }
+
+  @override
+  String get settings_conflict_fieldListSeparator => '、';
 
   @override
   String get settings_conflict_next_tooltip => '下一步冲突';
@@ -22084,6 +22279,16 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings_decompression_endLimit_dialog_title => 'END 限制';
 
   @override
+  String get settings_decompression_header_icd => '等压逆向扩散';
+
+  @override
+  String get settings_decompression_icdWarnings => 'ICD风险警告';
+
+  @override
+  String get settings_decompression_icdWarnings_subtitle =>
+      '在从氦气含量较高的气体切换到氮气含量较高的气体时,在ICD计算器中显示根据五分之一法则得出的评估。';
+
+  @override
   String get settings_decompression_cnsMethodTitle => 'CNS 计算';
 
   @override
@@ -22264,9 +22469,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settings_language_appBar_title => '语言';
-
-  @override
-  String get settings_language_selected => '已选择';
 
   @override
   String get settings_language_systemDefault => '系统默认';
@@ -23372,6 +23574,9 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get signatures_handoff_title => '请将设备交给';
+
+  @override
+  String get signatures_buddySignature => '潜伴签名';
 
   @override
   String get signatures_instructorSignature => '教练签名';
@@ -24691,9 +24896,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get insights_summary_depthDistribution_title => '深度分布';
-
-  @override
-  String get insights_summary_diveTypes_semanticLabel => '显示潜水类型分布的饼图';
 
   @override
   String get insights_summary_diveTypes_title => '潜水类型';
@@ -26567,16 +26769,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get trips_edit_appBar_edit => '编辑旅行';
 
   @override
-  String get trips_edit_button_add => '添加旅行';
-
-  @override
   String get trips_edit_button_cancel => '取消';
 
   @override
   String get trips_edit_button_save => '保存';
-
-  @override
-  String get trips_edit_button_update => '更新旅行';
 
   @override
   String get trips_edit_dialog_discard => '丢弃';
@@ -29885,6 +30081,18 @@ class AppLocalizationsZh extends AppLocalizations {
   String get tankPresets_applyToImports_subtitle => '使用默认预设为导入的潜水填充缺失的气瓶数据';
 
   @override
+  String get tankPresets_defaultStartPressure => '默认起始压力';
+
+  @override
+  String get tankPresets_defaultStartPressure_subtitle =>
+      '用于新气瓶，以及在将默认气瓶应用于导入时没有起始压力的导入气瓶';
+
+  @override
+  String tankPresets_defaultStartPressure_range(String max, String min) {
+    return '请输入 $min 至 $max 之间的压力';
+  }
+
+  @override
   String get tankPresets_new_title => '新建气瓶预设';
 
   @override
@@ -32901,6 +33109,26 @@ class AppLocalizationsZh extends AppLocalizations {
   String get emergencyCard_regionUnknown => '区域未知 - 使用全球热线';
 
   @override
+  String emergencyCard_regionManual(String region) {
+    return '区域:$region，手动设置';
+  }
+
+  @override
+  String get emergencyCard_regionChange => '更改区域';
+
+  @override
+  String get emergencyCard_regionPicker_title => '紧急救援地区';
+
+  @override
+  String get emergencyCard_regionPicker_automatic => '自动（最近一次潜水）';
+
+  @override
+  String get emergencyCard_regionPicker_search => '搜索国家/地区';
+
+  @override
+  String get emergencyCard_regionPicker_noMatches => '没有匹配的国家/地区';
+
+  @override
   String get emergencyCard_noDiverData => '无潜水员资料。请在潜水员资料设置中添加紧急联系人、医疗和保险信息。';
 
   @override
@@ -34666,6 +34894,27 @@ class AppLocalizationsZh extends AppLocalizations {
   @override
   String get settings_placeNameLanguage_subtitle =>
       '根据坐标查找国家、地区、城镇和水域时使用。现有潜点不会更改。';
+
+  @override
+  String settings_language_placeNameOffer_title(String language) {
+    return '以$language保存地名？';
+  }
+
+  @override
+  String settings_language_placeNameOffer_body(
+    String current,
+    String language,
+  ) {
+    return '为你的潜点查询到的国家和地区名称以$current保存。新的查询改用$language吗？之后你可以重新查询已有的潜点。';
+  }
+
+  @override
+  String settings_language_placeNameOffer_keep(String current) {
+    return '保留$current';
+  }
+
+  @override
+  String get settings_language_placeNameOffer_switch => '切换';
 
   @override
   String get settings_coordinateFormat_decimalDegrees => '十进制度';
@@ -41273,6 +41522,30 @@ class AppLocalizationsZh extends AppLocalizations {
       '模拟上升（TTS、天花板和停留）在各深度可切换到哪些携带的气瓶。仅考虑本次潜水中记录的气体。';
 
   @override
+  String get settings_decompression_header_ascentRate => '上升速度';
+
+  @override
+  String get settings_decompression_header_ascentRate_subtitle =>
+      '剖面图中上升速度颜色和事件所用的阈值。安全回顾使用自己固定的限值，因此修改这些值不会改变已回顾的潜水。';
+
+  @override
+  String get settings_decompression_ascentRateThresholds => '上升速度阈值';
+
+  @override
+  String settings_decompression_ascentRateThresholds_subtitle(
+    String critical,
+    String warning,
+  ) {
+    return '警告 $warning，危险 $critical';
+  }
+
+  @override
+  String get settings_decompression_ascentRateWarning => '警告';
+
+  @override
+  String get settings_decompression_ascentRateCritical => '危险';
+
+  @override
   String get settings_decompression_header_dataSources => '数据来源首选项';
 
   @override
@@ -42969,6 +43242,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get diveLog_profileEditor_revisionSwitchFailed => '无法切换剖面版本。';
 
   @override
+  String get diveLog_profileEditor_revisionLegacyHint => '保存于版本历史之前；未关联潜水电脑';
+
+  @override
   String diveLog_sources_sectionTitle(int count) {
     String _temp0 = intl.Intl.pluralLogic(
       count,
@@ -43248,6 +43524,11 @@ class AppLocalizationsZh extends AppLocalizations {
   @override
   String backup_operation_created(String size) {
     return '已创建备份：$size';
+  }
+
+  @override
+  String backup_operation_createdLocalOnlyLocked(String size) {
+    return '已创建备份：$size。备份仅保存在此设备上：请输入加密口令，以便将备份上传到云端。';
   }
 
   @override
