@@ -428,7 +428,8 @@ class ProfileSeriesRepository {
   /// Ranking: the null-computer series first (a manual edit is the live
   /// version of its source's samples, the rule `restoreOriginalProfile`
   /// encodes), then the greatest id. Both halves are derived from synced
-  /// values, so every device resolves the same winners.
+  /// values, so every device resolves the same winners. `liveSeriesOf`
+  /// applies the same ranking on read.
   ///
   /// A lower-ranked series is superseded only where it overlaps a winner in
   /// time. `saveEditedProfile` does not replace what it supersedes: it

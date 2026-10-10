@@ -1099,10 +1099,18 @@ class DiveRepository {
   ///
   /// Revision kind is persisted as `Edit: <editKind>` (for example
   /// `Edit: profile_editor` or `Edit: data_quality_repair`).
+  ///
+  /// [sourceId] names the data source the edit started from. When it is not
+  /// the dive's primary source, that source is promoted first, in the same
+  /// transaction, so the edit still belongs to the primary (issue #3066).
+  /// A [sourceId] that names no source of this dive (deleted since the
+  /// editor opened, or a stale deep link) throws [StateError] before
+  /// anything is written, rather than saving the edit to another source.
   Future<void> saveEditedProfileWithKind({
     required String diveId,
     required List<domain.DiveProfilePoint> editedPoints,
     required String editKind,
+    String? sourceId,
   }) async {
     try {
       _log.info('Saving edited profile for dive: $diveId');
@@ -1110,6 +1118,23 @@ class DiveRepository {
       final revisionKind = _composeEditRevisionKind(editKind);
 
       await _db.transaction(() async {
+        if (sourceId != null) {
+          final chosen =
+              await (_db.select(_db.diveDataSources)..where(
+                    (t) => t.id.equals(sourceId) & t.diveId.equals(diveId),
+                  ))
+                  .getSingleOrNull();
+          if (chosen == null) {
+            throw StateError('Dive $diveId has no data source $sourceId');
+          }
+          if (!chosen.isPrimary) {
+            await setPrimaryDataSource(
+              diveId: diveId,
+              computerReadingId: sourceId,
+            );
+          }
+        }
+
         // The edit belongs to whichever source is primary right now: it is a
         // correction of that source's samples, not a new source. Read the id
         // before the demote so setPrimaryDataSource can later promote the
@@ -1331,7 +1356,13 @@ class DiveRepository {
             sourceId: s.id,
             computerId: s.computerId,
             isEdited: s.id == primary.id && primaryIsEdited,
-            points: mergeSeriesPoints(grouped[s.id]!),
+            // The primary's superseded originals were already dropped above;
+            // another source may still own an edit and its original.
+            points: mergeSeriesPoints(
+              s.id == primary.id
+                  ? grouped[s.id]!
+                  : liveSeriesOf(grouped[s.id]!),
+            ),
           ),
       };
     } catch (e, stackTrace) {
