@@ -24809,6 +24809,9 @@ class AppLocalizationsEs extends AppLocalizations {
   String get signatures_handoff_title => 'Entrega tu dispositivo a';
 
   @override
+  String get signatures_buddySignature => 'Firma del compañero';
+
+  @override
   String get signatures_instructorSignature => 'Firma del Instructor';
 
   @override

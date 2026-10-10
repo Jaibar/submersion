@@ -24798,6 +24798,9 @@ class AppLocalizationsPt extends AppLocalizations {
   String get signatures_handoff_title => 'Entregue seu dispositivo para';
 
   @override
+  String get signatures_buddySignature => 'Assinatura da Dupla';
+
+  @override
   String get signatures_instructorSignature => 'Assinatura do Instrutor';
 
   @override

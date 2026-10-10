@@ -24689,6 +24689,9 @@ class AppLocalizationsHu extends AppLocalizations {
   String get signatures_handoff_title => 'Add át az eszközt';
 
   @override
+  String get signatures_buddySignature => 'Búvártárs aláírása';
+
+  @override
   String get signatures_instructorSignature => 'Oktató aláírása';
 
   @override

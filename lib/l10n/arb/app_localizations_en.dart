@@ -24368,6 +24368,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get signatures_handoff_title => 'Hand your device to';
 
   @override
+  String get signatures_buddySignature => 'Buddy Signature';
+
+  @override
   String get signatures_instructorSignature => 'Instructor Signature';
 
   @override

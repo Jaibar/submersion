@@ -24965,6 +24965,9 @@ class AppLocalizationsAr extends AppLocalizations {
   String get signatures_handoff_title => 'ناول جهازك إلى';
 
   @override
+  String get signatures_buddySignature => 'توقيع زميل الغوص';
+
+  @override
   String get signatures_instructorSignature => 'توقيع المدرب';
 
   @override
