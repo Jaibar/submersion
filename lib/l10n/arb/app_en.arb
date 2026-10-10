@@ -12033,7 +12033,6 @@
     }
   },
   "settings_appBar_title": "Settings",
-  "settings_appearance_appLanguage": "App Language",
   "settings_appearance_displaySize": "Display size",
   "@settings_appearance_displaySize": {
     "description": "Title of the app-wide display zoom control in Appearance settings"
@@ -13612,7 +13611,6 @@
   "settings_import_phase_courses": "Importing courses...",
   "settings_import_phase_applyingTags": "Applying tags...",
   "settings_language_appBar_title": "Language",
-  "settings_language_selected": "Selected",
   "settings_language_systemDefault": "System Default",
   "settings_lightroom_albumFilter_all": "Entire catalog",
   "settings_lightroom_albumFilter_title": "Albums to scan",

@@ -19193,9 +19193,6 @@ class AppLocalizationsDe extends AppLocalizations {
   String get settings_appBar_title => 'Einstellungen';
 
   @override
-  String get settings_appearance_appLanguage => 'App-Sprache';
-
-  @override
   String get settings_appearance_displaySize => 'Anzeigegröße';
 
   @override
@@ -23513,9 +23510,6 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get settings_language_appBar_title => 'Sprache';
-
-  @override
-  String get settings_language_selected => 'Ausgewählt';
 
   @override
   String get settings_language_systemDefault => 'Systemstandard';

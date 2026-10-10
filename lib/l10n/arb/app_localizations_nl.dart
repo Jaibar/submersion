@@ -19085,9 +19085,6 @@ class AppLocalizationsNl extends AppLocalizations {
   String get settings_appBar_title => 'Instellingen';
 
   @override
-  String get settings_appearance_appLanguage => 'App-taal';
-
-  @override
   String get settings_appearance_displaySize => 'Weergavegrootte';
 
   @override
@@ -23390,9 +23387,6 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get settings_language_appBar_title => 'Taal';
-
-  @override
-  String get settings_language_selected => 'Geselecteerd';
 
   @override
   String get settings_language_systemDefault => 'Systeemstandaard';

@@ -18784,9 +18784,6 @@ class AppLocalizationsHe extends AppLocalizations {
   String get settings_appBar_title => 'הגדרות';
 
   @override
-  String get settings_appearance_appLanguage => 'שפת האפליקציה';
-
-  @override
   String get settings_appearance_displaySize => 'גודל התצוגה';
 
   @override
@@ -22957,9 +22954,6 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get settings_language_appBar_title => 'שפה';
-
-  @override
-  String get settings_language_selected => 'נבחר';
 
   @override
   String get settings_language_systemDefault => 'ברירת מחדל של המערכת';

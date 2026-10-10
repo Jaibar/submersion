@@ -5,7 +5,7 @@ import 'package:submersion/features/settings/presentation/providers/settings_pro
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
-class LanguageSettingsPage extends ConsumerWidget {
+class LanguageSettingsPage extends StatelessWidget {
   const LanguageSettingsPage({super.key});
 
   static const supportedLocales = [
@@ -40,20 +40,40 @@ class LanguageSettingsPage extends ConsumerWidget {
   ];
 
   @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(context.l10n.settings_language_appBar_title)),
+      body: ListView(children: const [LanguageOptionTiles()]),
+    );
+  }
+
+  static String getDisplayName(AppLocalizations l10n, String localeCode) {
+    final option = supportedLocales.firstWhere(
+      (o) => o.code == localeCode,
+      orElse: () => supportedLocales.first,
+    );
+    if (option.code == 'system') return l10n.settings_language_systemDefault;
+    return option.nativeName;
+  }
+}
+
+/// The language choices, one row per [LanguageSettingsPage.supportedLocales]
+/// entry. Shared by [LanguageSettingsPage], pushed on a phone, and the inline
+/// language list of the tablet and desktop settings pane, so the two cannot
+/// drift apart (#3095).
+class LanguageOptionTiles extends ConsumerWidget {
+  const LanguageOptionTiles({super.key});
+
+  @override
   Widget build(BuildContext context, WidgetRef ref) {
     final currentLocale = ref.watch(localeProvider);
     final theme = Theme.of(context);
 
-    return Scaffold(
-      appBar: AppBar(title: Text(context.l10n.settings_language_appBar_title)),
-      body: ListView.builder(
-        itemCount: supportedLocales.length,
-        itemBuilder: (context, index) {
-          final option = supportedLocales[index];
-          final isSelected = option.code == currentLocale;
-
-          return Semantics(
-            selected: isSelected,
+    return Column(
+      children: [
+        for (final option in LanguageSettingsPage.supportedLocales)
+          Semantics(
+            selected: option.code == currentLocale,
             child: ListTile(
               leading: option.code == 'system'
                   ? const Icon(Icons.phone_android)
@@ -66,30 +86,18 @@ class LanguageSettingsPage extends ConsumerWidget {
               subtitle: option.englishName.isNotEmpty
                   ? Text(option.englishName)
                   : null,
-              trailing: isSelected
-                  ? Icon(
-                      Icons.check,
-                      color: theme.colorScheme.primary,
-                      semanticLabel: context.l10n.settings_language_selected,
-                    )
+              // No semanticLabel: Semantics(selected) above already
+              // announces the row as selected.
+              trailing: option.code == currentLocale
+                  ? Icon(Icons.check, color: theme.colorScheme.primary)
                   : null,
               onTap: () {
                 ref.read(settingsProvider.notifier).setLocale(option.code);
               },
             ),
-          );
-        },
-      ),
+          ),
+      ],
     );
-  }
-
-  static String getDisplayName(AppLocalizations l10n, String localeCode) {
-    final option = supportedLocales.firstWhere(
-      (o) => o.code == localeCode,
-      orElse: () => supportedLocales.first,
-    );
-    if (option.code == 'system') return l10n.settings_language_systemDefault;
-    return option.nativeName;
   }
 }
 
