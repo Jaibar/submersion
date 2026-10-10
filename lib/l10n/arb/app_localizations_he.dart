@@ -45184,6 +45184,11 @@ class AppLocalizationsHe extends AppLocalizations {
   }
 
   @override
+  String backup_operation_createdLocalOnlyLocked(String size) {
+    return 'נוצר גיבוי: $size. הוא נשמר במכשיר זה בלבד: יש להזין את משפט הסיסמה של ההצפנה כדי להעלות גיבויים לענן.';
+  }
+
+  @override
   String backup_operation_backupFailed(String error) {
     return 'הגיבוי נכשל: $error';
   }
