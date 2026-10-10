@@ -9975,6 +9975,11 @@ class AppLocalizationsNl extends AppLocalizations {
   String get divePlanner_action_editTank => 'Fles bewerken';
 
   @override
+  String divePlanner_action_fillBestMix(String depth, String mix) {
+    return 'Beste mengsel voor $depth: $mix';
+  }
+
+  @override
   String get divePlanner_action_moreOptions => 'Meer opties';
 
   @override

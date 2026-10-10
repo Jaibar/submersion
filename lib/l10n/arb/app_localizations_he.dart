@@ -9819,6 +9819,11 @@ class AppLocalizationsHe extends AppLocalizations {
   String get divePlanner_action_editTank => 'ערוך מיכל';
 
   @override
+  String divePlanner_action_fillBestMix(String depth, String mix) {
+    return 'תערובת מיטבית ל-$depth: $mix';
+  }
+
+  @override
   String get divePlanner_action_moreOptions => 'אפשרויות נוספות';
 
   @override

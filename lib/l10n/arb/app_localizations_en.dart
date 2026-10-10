@@ -9880,6 +9880,11 @@ class AppLocalizationsEn extends AppLocalizations {
   String get divePlanner_action_editTank => 'Edit Tank';
 
   @override
+  String divePlanner_action_fillBestMix(String depth, String mix) {
+    return 'Best mix for $depth: $mix';
+  }
+
+  @override
   String get divePlanner_action_moreOptions => 'More options';
 
   @override
