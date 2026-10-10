@@ -95,3 +95,31 @@ LatLngBounds? boundsForPoints(List<LatLng> points) {
   final east = (maxLng + lngPadding).clamp(-180.0, 180.0);
   return LatLngBounds(LatLng(south, west), LatLng(north, east));
 }
+
+/// A drawn download rectangle, moved into one copy of the world.
+///
+/// The region picker scrolls east and west without end, so a corner can sit
+/// at a longitude beyond +-180 (another copy of the world). The tile counter
+/// and the downloader need -180..180. Whole worlds are subtracted so the west
+/// edge lands in [-180, 180), and the east edge is then held to 180: a
+/// rectangle that crosses the date line is cut there. Latitudes are held to
+/// the web Mercator limit.
+({LatLng southWest, LatLng northEast}) clampRegionToWorld(
+  LatLng southWest,
+  LatLng northEast,
+) {
+  const maxLat = 85.0511;
+  final shift = ((southWest.longitude + 180) / 360).floor() * 360.0;
+  final west = southWest.longitude - shift;
+  final east = (northEast.longitude - shift).clamp(-180.0, 180.0).toDouble();
+  return (
+    southWest: LatLng(
+      southWest.latitude.clamp(-maxLat, maxLat).toDouble(),
+      west,
+    ),
+    northEast: LatLng(
+      northEast.latitude.clamp(-maxLat, maxLat).toDouble(),
+      east,
+    ),
+  );
+}
