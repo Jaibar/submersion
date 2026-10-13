@@ -32758,6 +32758,22 @@ class AppLocalizationsHe extends AppLocalizations {
   String get maps_regionSelector_selectRegionButton => 'בחר אזור';
 
   @override
+  String get maps_regionSelector_zoomOut => 'הקטנה';
+
+  @override
+  String get maps_regionSelector_zoomIn => 'הגדלה';
+
+  @override
+  String get maps_regionSelector_modeSelect => 'בחירה';
+
+  @override
+  String get maps_regionSelector_modeMove => 'הזזה';
+
+  @override
+  String get maps_regionSelector_dragToMove =>
+      'גרור כדי להזיז את המפה, צבוט או השתמש ב-+ / - לזום';
+
+  @override
   String get tankPresets_addPreset => 'הוסף תבנית מיכל';
 
   @override
@@ -49909,6 +49925,77 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get diveLog_whatIf_openInPlanner => 'פתח במתכנן';
+
+  @override
+  String get diveLog_gasGfWhatIf_tissueTitle => 'Tissue loading';
+
+  @override
+  String get diveLog_gasGfWhatIf_ceilingTitle => 'Depth and ceiling';
+
+  @override
+  String get diveLog_gasGfWhatIf_maxPpO2 => 'Max ppO2';
+
+  @override
+  String get diveLog_gasGfWhatIf_cnsEnd => 'CNS at end';
+
+  @override
+  String get diveLog_gasGfWhatIf_peakTissue => 'Peak tissue loading';
+
+  @override
+  String get diveLog_gasGfWhatIf_no => 'No';
+
+  @override
+  String get diveLog_gasGfWhatIf_yes => 'Yes';
+
+  @override
+  String get diveLog_gasGfWhatIf_decoObligation => 'Deco obligation';
+
+  @override
+  String get diveLog_gasGfWhatIf_maxCeiling => 'Deepest ceiling';
+
+  @override
+  String get diveLog_gasGfWhatIf_decoShort => 'Deco';
+
+  @override
+  String get diveLog_gasGfWhatIf_minNdl => 'Shortest NDL';
+
+  @override
+  String get diveLog_gasGfWhatIf_metricsTitle => 'How close to deco';
+
+  @override
+  String get diveLog_gasGfWhatIf_reset => 'Reset to logged';
+
+  @override
+  String get diveLog_gasGfWhatIf_firstCylinderNote =>
+      'Oxygen applies to the first cylinder.';
+
+  @override
+  String get diveLog_gasGfWhatIf_gfHighLabel => 'GF high';
+
+  @override
+  String get diveLog_gasGfWhatIf_gfLowLabel => 'GF low';
+
+  @override
+  String get diveLog_gasGfWhatIf_o2Label => 'Oxygen';
+
+  @override
+  String get diveLog_gasGfWhatIf_whatIfLabel => 'What if';
+
+  @override
+  String get diveLog_gasGfWhatIf_loggedLabel => 'Logged';
+
+  @override
+  String get diveLog_gasGfWhatIf_noProfile =>
+      'This dive has no profile to analyse.';
+
+  @override
+  String get diveLog_gasGfWhatIf_title => 'What if: gas and GF';
+
+  @override
+  String get diveLog_detail_menu_gasGfWhatIf => 'What if: gas / GF';
+
+  @override
+  String get diveLog_whatIf_fullProfile => 'Include ascent (whole dive)';
 
   @override
   String diveLog_whatIf_planName(String title) {
