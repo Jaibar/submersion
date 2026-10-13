@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:submersion/core/providers/async_value_extensions.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:submersion/core/constants/sort_options_display.dart';
@@ -19,6 +18,7 @@ import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
 import 'package:submersion/features/courses/domain/constants/course_field.dart';
@@ -138,9 +138,9 @@ class _CourseListContentState extends ConsumerState<CourseListContent> {
 
     final sort = ref.watch(courseSortProvider);
 
-    // List mode filters by status and sorts; the table path uses the raw
-    // list. selectableIds must follow whichever is rendering, or pruning
-    // fights the visible set.
+    // List mode sorts; the table keeps the provider's order. selectableIds
+    // follow whichever is rendering, and the prune below works on membership,
+    // so both modes prune to the same filtered courses.
     final visibleCourses = _visibleCourses(
       coursesAsync.value ?? const [],
       sort,
@@ -148,7 +148,12 @@ class _CourseListContentState extends ConsumerState<CourseListContent> {
     final visibleIds = visibleCourses.map((c) => c.id).toList();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && coursesAsync.hasSettled) _selection.pruneTo(visibleIds);
+      if (mounted) {
+        _selection.pruneToSettled(
+          coursesAsync,
+          (rows) => rows.map((c) => c.id),
+        );
+      }
     });
 
     // Built inside the selection listener below so rows re-render as checks
@@ -384,7 +389,12 @@ class _CourseListContentState extends ConsumerState<CourseListContent> {
         .toList();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && coursesAsync.hasSettled) _selection.pruneTo(visibleIds);
+      if (mounted) {
+        _selection.pruneToSettled(
+          coursesAsync,
+          (rows) => rows.map((c) => c.id),
+        );
+      }
     });
 
     // The scope carries Escape, Ctrl/Cmd-A and the Android back handling, and
@@ -443,6 +453,7 @@ class _CourseListContentState extends ConsumerState<CourseListContent> {
           units: units,
           onSortFieldChanged: notifier.setSortField,
           onResizeColumn: notifier.resizeColumn,
+          onHideColumn: notifier.hideColumn,
           onEntityTapDown: (id) {
             ref.read(highlightedCourseIdProvider.notifier).state = id;
           },
@@ -665,7 +676,10 @@ class _CourseListContentState extends ConsumerState<CourseListContent> {
               color: colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
             ),
           ),
-          if (filter.status == CourseStatusFilter.all) ...[
+          // Hidden beside an open form: it reads as the form's submit button
+          // but only reopens the create form (issue #3192).
+          if (filter.status == CourseStatusFilter.all &&
+              !MasterDetailFormScope.isFormOpenOf(context)) ...[
             const SizedBox(height: 24),
             FilledButton.icon(
               onPressed: () {

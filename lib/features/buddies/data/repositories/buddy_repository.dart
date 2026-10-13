@@ -29,6 +29,8 @@ import 'package:submersion/features/certification_agencies/domain/certification_
 import 'package:submersion/features/certifications/data/repositories/certification_repository.dart';
 import 'package:submersion/features/certifications/domain/certification_primary.dart';
 import 'package:submersion/features/certifications/domain/certification_title.dart';
+import 'package:submersion/features/documents/data/repositories/document_repository.dart';
+import 'package:submersion/features/documents/domain/entities/document.dart';
 
 // Re-export merge types so callers can import from buddy_repository.dart
 export 'package:submersion/features/buddies/data/repositories/buddy_merge_repository.dart'
@@ -154,8 +156,8 @@ class BuddyRepository {
 
     final results = await _db.customSelect('''
       SELECT * FROM buddies
-      WHERE (LOWER(name) LIKE ?
-         OR LOWER(email) LIKE ?
+      WHERE (unicode_lower(name) LIKE ?
+         OR unicode_lower(email) LIKE ?
          OR phone LIKE ?)
       $diverFilter
       ORDER BY name COLLATE NOCASE ASC
@@ -257,7 +259,7 @@ class BuddyRepository {
           .customSelect(
             '''
         SELECT * FROM buddies
-        WHERE LOWER(name) = LOWER(?) $scope
+        WHERE unicode_lower(name) = unicode_lower(?) $scope
         LIMIT 1
       ''',
             variables: [
@@ -365,7 +367,15 @@ class BuddyRepository {
         // deleteCertification() emits an event per cert, which would fire
         // observers mid-transaction. We tombstone here (the FK cascade writes
         // no deletion_log) and emit a single notify after commit instead.
-        for (final cert in await _certRepo.getCertificationsByBuddy(id)) {
+        final certs = await _certRepo.getCertificationsByBuddy(id);
+        // The buddy's documents and their certifications' documents go
+        // with them, tombstoned (issue #2613).
+        final documents = DocumentRepository();
+        await documents.deleteForOwners(DocumentOwnerKind.certification, [
+          for (final cert in certs) cert.id,
+        ]);
+        await documents.deleteForOwner(DocumentOwnerKind.buddy, id);
+        for (final cert in certs) {
           await (_db.delete(
             _db.certifications,
           )..where((t) => t.id.equals(cert.id))).go();
@@ -902,7 +912,8 @@ class BuddyRepository {
       final conditions = <String>[
         if (diverId != null) 'b.diver_id = ?',
         if (query != null && query.isNotEmpty)
-          '(LOWER(b.name) LIKE ? OR LOWER(b.email) LIKE ? OR b.phone LIKE ?)',
+          '(unicode_lower(b.name) LIKE ? OR unicode_lower(b.email) LIKE ? '
+              'OR b.phone LIKE ?)',
       ];
       final where = conditions.isEmpty
           ? ''

@@ -431,6 +431,37 @@ class DiverSettings extends Table {
   // v122: days before a trip to nag about gear due before trip end.
   IntColumn get tripServiceLeadDays =>
       integer().withDefault(const Constant(14))();
+  // v281: calendar months a stretch with no dives must exceed before the
+  // trend charts collapse it into a break (issue #3251); 0 is off. Any
+  // other value reads as 12. Codegen input, never executed.
+  // coverage:ignore-start
+  IntColumn get trendGapCollapseMonths =>
+      integer().withDefault(const Constant(12))();
+  // coverage:ignore-end
+  // v284: per-diver profile metric colours (issue #3012), ARGB ints; null is
+  // the metric's default (or Auto). Codegen input, never executed.
+  // coverage:ignore-start
+  IntColumn get profileColorDepth => integer().nullable()();
+  IntColumn get profileColorTemperature => integer().nullable()();
+  IntColumn get profileColorPressure => integer().nullable()();
+  IntColumn get profileColorHeartRate => integer().nullable()();
+  IntColumn get profileColorSac => integer().nullable()();
+  IntColumn get profileColorMaxDepth => integer().nullable()();
+  IntColumn get profileColorCeiling => integer().nullable()();
+  IntColumn get profileColorNdl => integer().nullable()();
+  IntColumn get profileColorTts => integer().nullable()();
+  IntColumn get profileColorGtr => integer().nullable()();
+  IntColumn get profileColorCns => integer().nullable()();
+  IntColumn get profileColorOtu => integer().nullable()();
+  IntColumn get profileColorPpO2 => integer().nullable()();
+  IntColumn get profileColorPpN2 => integer().nullable()();
+  IntColumn get profileColorPpHe => integer().nullable()();
+  IntColumn get profileColorMod => integer().nullable()();
+  IntColumn get profileColorDensity => integer().nullable()();
+  IntColumn get profileColorGf => integer().nullable()();
+  IntColumn get profileColorSurfaceGf => integer().nullable()();
+  IntColumn get profileColorMeanDepth => integer().nullable()();
+  // coverage:ignore-end
   // Data source badge visibility (v55)
   BoolColumn get showDataSourceBadges =>
       boolean().withDefault(const Constant(true))();
@@ -472,6 +503,10 @@ class DiverSettings extends Table {
   // #3120). Off by default; the app never resets it back to false.
   BoolColumn get hasAcceptedPlanningDisclaimer =>
       boolean().withDefault(const Constant(false))();
+  // v286: the statuses the Equipment list's default view shows (issue
+  // #2628), a JSON array of EquipmentStatus names. Null reads as the factory
+  // default, everything but retired, sold and wanted gear.
+  TextColumn get equipmentDefaultStatuses => text().nullable()();
   IntColumn get createdAt => integer()();
   IntColumn get updatedAt => integer()();
 

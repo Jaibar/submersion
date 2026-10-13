@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:submersion/core/providers/async_value_extensions.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:submersion/core/constants/sort_options_display.dart';
@@ -20,6 +19,7 @@ import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
 import 'package:submersion/features/certifications/domain/constants/certification_field.dart';
@@ -202,13 +202,17 @@ class _CertificationListContentState
     final visibleCerts = applyCertificationSorting(
       certificationsAsync.value ?? const [],
       sort,
+      l10n: context.l10n,
       catalog: context.certificationCatalog,
     );
     final visibleIds = visibleCerts.map((c) => c.id).toList();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && certificationsAsync.hasSettled) {
-        _selection.pruneTo(visibleIds);
+      if (mounted) {
+        _selection.pruneToSettled(
+          certificationsAsync,
+          (rows) => rows.map((c) => c.id),
+        );
       }
     });
 
@@ -221,6 +225,7 @@ class _CertificationListContentState
             final sorted = applyCertificationSorting(
               certifications,
               sort,
+              l10n: context.l10n,
               catalog: context.certificationCatalog,
             );
             return sorted.isEmpty
@@ -424,8 +429,11 @@ class _CertificationListContentState
     // Same pruning the list path does: drop checked certifications that fell
     // out of the visible list, so the count matches what is on screen.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && certificationsAsync.hasSettled) {
-        _selection.pruneTo(visibleIds);
+      if (mounted) {
+        _selection.pruneToSettled(
+          certificationsAsync,
+          (rows) => rows.map((c) => c.id),
+        );
       }
     });
 
@@ -486,6 +494,7 @@ class _CertificationListContentState
           units: units,
           onSortFieldChanged: notifier.setSortField,
           onResizeColumn: notifier.resizeColumn,
+          onHideColumn: notifier.hideColumn,
           onEntityTapDown: (id) {
             ref.read(highlightedCertificationIdProvider.notifier).state = id;
           },
@@ -822,19 +831,23 @@ class _CertificationListContentState
             ),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: () {
-              if (ResponsiveBreakpoints.isMasterDetail(context)) {
-                final routerState = GoRouterState.of(context);
-                context.go('${routerState.uri.path}?mode=new');
-              } else {
-                context.push('/certifications/new');
-              }
-            },
-            icon: const Icon(Icons.add_card),
-            label: Text(context.l10n.certifications_list_empty_button),
-          ),
+          // Hidden beside an open form: it reads as the form's submit button
+          // but only reopens the create form (issue #3192).
+          if (!MasterDetailFormScope.isFormOpenOf(context)) ...[
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              onPressed: () {
+                if (ResponsiveBreakpoints.isMasterDetail(context)) {
+                  final routerState = GoRouterState.of(context);
+                  context.go('${routerState.uri.path}?mode=new');
+                } else {
+                  context.push('/certifications/new');
+                }
+              },
+              icon: const Icon(Icons.add_card),
+              label: Text(context.l10n.certifications_list_empty_button),
+            ),
+          ],
         ],
       ),
     );

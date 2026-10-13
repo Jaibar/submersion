@@ -7,7 +7,6 @@ import 'package:submersion/core/data/visibility/shared_item_policy.dart';
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/models/sort_state.dart';
-import 'package:submersion/core/providers/async_value_extensions.dart';
 import 'package:submersion/core/query/domain/query_node.dart';
 import 'package:submersion/core/query/domain/query_subject.dart';
 import 'package:submersion/core/services/logger_service.dart';
@@ -18,6 +17,7 @@ import 'package:submersion/shared/selection/select_items_menu_entries.dart';
 import 'package:submersion/shared/widgets/master_detail/keyboard_list_navigator.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/shared/widgets/shared_items/shared_item_dialogs.dart';
 import 'package:submersion/shared/widgets/sort_bottom_sheet.dart';
@@ -229,10 +229,15 @@ class _TripListContentState extends ConsumerState<TripListContent> {
     final loadedTrips = tripsAsync.value ?? const <TripWithStats>[];
     final visibleIds = loadedTrips.map((t) => t.trip.id).toList();
 
-    // Drop checked trips that fell out of the filtered list, so a bulk action
-    // can never reach a trip that is not on screen.
+    // Drop checked trips that fell out of the filtered list once its rows
+    // settle, so a bulk action can never reach a trip that is not on screen.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && tripsAsync.hasSettled) _selection.pruneTo(visibleIds);
+      if (mounted) {
+        _selection.pruneToSettled(
+          tripsAsync,
+          (rows) => rows.map((t) => t.trip.id),
+        );
+      }
     });
 
     if (!widget.showAppBar) {
@@ -491,7 +496,12 @@ class _TripListContentState extends ConsumerState<TripListContent> {
     final visibleIds = loadedTrips.map((t) => t.trip.id).toList();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && tripsAsync.hasSettled) _selection.pruneTo(visibleIds);
+      if (mounted) {
+        _selection.pruneToSettled(
+          tripsAsync,
+          (rows) => rows.map((t) => t.trip.id),
+        );
+      }
     });
 
     return SelectableListScope(
@@ -553,6 +563,7 @@ class _TripListContentState extends ConsumerState<TripListContent> {
                 units: units,
                 onSortFieldChanged: notifier.setSortField,
                 onResizeColumn: notifier.resizeColumn,
+                onHideColumn: notifier.hideColumn,
                 onEntityTapDown: (id) {
                   ref.read(highlightedTripIdProvider.notifier).state = id;
                 },
@@ -819,27 +830,17 @@ class _TripListContentState extends ConsumerState<TripListContent> {
                       onCheckChanged: onCheckChanged,
                     ),
                   };
+                  // The banner is the row's header, outside the focus ring,
+                  // so the ring traces the trip's card alone (#3224).
                   return KeyboardListItem(
                     navigationKey: tripWithStats.trip.id,
-                    child: !tripWithStats.trip.isUpcoming
-                        ? selectableTile
-                        : Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  20,
-                                  4,
-                                  20,
-                                  0,
-                                ),
-                                child: UpcomingTripBanner(
-                                  trip: tripWithStats.trip,
-                                ),
-                              ),
-                              selectableTile,
-                            ],
-                          ),
+                    header: tripWithStats.trip.isUpcoming
+                        ? Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+                            child: UpcomingTripBanner(trip: tripWithStats.trip),
+                          )
+                        : null,
+                    child: selectableTile,
                   );
                 },
               ),
@@ -906,19 +907,23 @@ class _TripListContentState extends ConsumerState<TripListContent> {
             ),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: () {
-              if (ResponsiveBreakpoints.isMasterDetail(context)) {
-                final routerState = GoRouterState.of(context);
-                context.go('${routerState.uri.path}?mode=new');
-              } else {
-                context.push('/trips/new');
-              }
-            },
-            icon: const Icon(Icons.add),
-            label: Text(context.l10n.trips_list_empty_button),
-          ),
+          // Hidden beside an open form: it reads as the form's submit button
+          // but only reopens the create form (issue #3192).
+          if (!MasterDetailFormScope.isFormOpenOf(context)) ...[
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              onPressed: () {
+                if (ResponsiveBreakpoints.isMasterDetail(context)) {
+                  final routerState = GoRouterState.of(context);
+                  context.go('${routerState.uri.path}?mode=new');
+                } else {
+                  context.push('/trips/new');
+                }
+              },
+              icon: const Icon(Icons.add),
+              label: Text(context.l10n.trips_list_empty_button),
+            ),
+          ],
         ],
       ),
     );

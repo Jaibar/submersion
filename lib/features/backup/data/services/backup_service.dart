@@ -25,6 +25,7 @@ import 'package:submersion/core/services/sync/post_restore_sync_store.dart';
 import 'package:submersion/core/services/sync/sync_device_metadata.dart';
 import 'package:submersion/core/services/sync/sync_preferences.dart';
 import 'package:submersion/features/backup/data/services/backup_crypto.dart';
+import 'package:submersion/features/backup/data/services/backup_note_stamp.dart';
 import 'package:submersion/features/backup/data/services/backup_encryption_key_store.dart';
 import 'package:submersion/core/services/database_service.dart'
     show DatabaseService;
@@ -162,7 +163,14 @@ class BackupService {
   /// Returns the [BackupRecord] describing the created backup.
   /// If cloud provider is available and cloud backup is enabled,
   /// the backup is also uploaded to cloud storage.
-  Future<BackupRecord> performBackup({bool isAutomatic = false}) async {
+  ///
+  /// [note] is the diver's optional description: it is stamped into the file
+  /// and kept on the record. An automatic backup never carries one, so it is
+  /// ignored when [isAutomatic] is set.
+  Future<BackupRecord> performBackup({
+    bool isAutomatic = false,
+    String? note,
+  }) async {
     _log.info('Starting backup (automatic: $isAutomatic)');
     // Resolve where the backup goes (filesystem dir or Android SAF tree) and
     // arm any security-scoped access; release it once the write+prune are done.
@@ -171,7 +179,11 @@ class BackupService {
       saf: _safPort,
     );
     try {
-      return await _performBackupInto(lease.target, isAutomatic: isAutomatic);
+      return await _performBackupInto(
+        lease.target,
+        isAutomatic: isAutomatic,
+        note: isAutomatic ? null : normalizeBackupNote(note),
+      );
     } finally {
       await lease.release();
     }
@@ -180,6 +192,7 @@ class BackupService {
   Future<BackupRecord> _performBackupInto(
     BackupTarget target, {
     required bool isAutomatic,
+    String? note,
   }) async {
     final filename = await _generateFilename();
     final encKey = await _activeBackupKey();
@@ -193,7 +206,7 @@ class BackupService {
       // URI, and the size comes back with it. A SAF ref has no File length to
       // ask, and the live database file's length is not the answer either: the
       // export is compacted and folds in rows that were still in the WAL.
-      final written = await target.write(_dbAdapter, filename);
+      final written = await target.write(_dbAdapter, filename, note: note);
       ref = written.ref;
       sizeBytes = written.sizeBytes;
     } else {
@@ -210,7 +223,7 @@ class BackupService {
       final tempPlain = p.join(tempDir.path, '$tempPrefix-$filename');
       final tempSbe = p.join(tempDir.path, '$tempPrefix-$storedName');
       try {
-        await _dbAdapter.backup(tempPlain);
+        await _dbAdapter.backup(tempPlain, note: note);
         await BackupCrypto.encryptFile(
           inPath: tempPlain,
           outPath: tempSbe,
@@ -278,6 +291,7 @@ class BackupService {
       cloudFileId: cloudFileId,
       localPath: ref,
       isAutomatic: isAutomatic,
+      note: note,
     );
 
     // Persist record and update last backup time
@@ -294,12 +308,17 @@ class BackupService {
   /// Export a backup to a user-specified file path.
   ///
   /// Records the export in backup history with the actual destination path.
-  Future<BackupRecord> exportBackupToPath(String destinationPath) async {
+  /// [note] is stamped into the file and kept on the record.
+  Future<BackupRecord> exportBackupToPath(
+    String destinationPath, {
+    String? note,
+  }) async {
     _log.info('Exporting backup to: $destinationPath');
+    final normalizedNote = normalizeBackupNote(note);
 
     final encKey = await _activeBackupKey();
     if (encKey == null) {
-      await _dbAdapter.backup(destinationPath);
+      await _dbAdapter.backup(destinationPath, note: normalizedNote);
     } else {
       final tempDir = await resolveSyncTempDir();
       final plainPath = p.join(tempDir.path, 'export_${_uuid.v4()}.db');
@@ -307,7 +326,7 @@ class BackupService {
         // Inside the try so a failed/partial backup still gets its plaintext
         // temp cleaned up in the finally -- never leave an unencrypted DB behind
         // when encryption is enabled.
-        await _dbAdapter.backup(plainPath);
+        await _dbAdapter.backup(plainPath, note: normalizedNote);
         await BackupCrypto.encryptFile(
           inPath: plainPath,
           outPath: destinationPath,
@@ -343,6 +362,7 @@ class BackupService {
       diveCount: counts.diveCount,
       siteCount: counts.siteCount,
       localPath: destinationPath,
+      note: normalizedNote,
     );
 
     await _preferences.addRecord(record);
@@ -356,9 +376,11 @@ class BackupService {
   ///
   /// The file is NOT recorded in backup history since its destination
   /// is ephemeral (share sheet, AirDrop, email, etc.).
-  /// Returns the temporary [File] for use with share sheet.
-  Future<File> exportBackupToTemp() async {
+  /// Returns the temporary [File] for use with share sheet. [note] is
+  /// stamped into the file, the only place it is kept for a share.
+  Future<File> exportBackupToTemp({String? note}) async {
     _log.info('Exporting backup to temp for sharing');
+    final normalizedNote = normalizeBackupNote(note);
 
     final encKey = await _activeBackupKey();
     final filename = await _generateFilename();
@@ -366,7 +388,7 @@ class BackupService {
 
     if (encKey == null) {
       final tempPath = p.join(tempDir.path, filename);
-      await _dbAdapter.backup(tempPath);
+      await _dbAdapter.backup(tempPath, note: normalizedNote);
       _log.info('Temp export completed: $filename');
       return File(tempPath);
     }
@@ -379,7 +401,7 @@ class BackupService {
       // Inside the try so a failed/partial backup still gets its plaintext temp
       // cleaned up in the finally -- never leave an unencrypted DB behind when
       // encryption is enabled.
-      await _dbAdapter.backup(plainPath);
+      await _dbAdapter.backup(plainPath, note: normalizedNote);
       await BackupCrypto.encryptFile(
         inPath: plainPath,
         outPath: sbePath,
@@ -1119,7 +1141,12 @@ class BackupService {
         _log.info('Deleted cloud file: ${record.cloudFileId}');
       } catch (e, stack) {
         _log.error('Failed to delete cloud file', error: e, stackTrace: stack);
-        // Continue with removing the record even if cloud delete fails
+        // A cloud backup the history does not track (a row listed from the
+        // cloud folder, issue #3214) has nothing else to delete: carrying on
+        // would report success while the file stays. A tracked record is
+        // still removed even if cloud delete fails.
+        final tracked = _preferences.getHistory().any((r) => r.id == record.id);
+        if (record.localPath == null && !tracked) rethrow;
       }
     }
 
@@ -1133,6 +1160,48 @@ class BackupService {
 
   /// Unpin a backup record so it is subject to automatic pruning again.
   Future<void> unpinBackup(String id) => _setPinned(id, false);
+
+  /// Pin [record], adopting it into history first when it is a cloud backup
+  /// the history has no record of (a row from `mergeCloudBackups`, issue
+  /// #3214). Adopted pinned, it stays exempt from retention.
+  ///
+  /// Only a record whose cloud copy still exists is adopted: an unknown local
+  /// record is one that has since been deleted or pruned, and a cloud file
+  /// another device deleted after the listing would become a pinned record
+  /// that can never be restored or pruned.
+  Future<void> pinRecord(BackupRecord record) async {
+    final tracked = _preferences.getHistory().any((r) => r.id == record.id);
+    if (tracked) return pinBackup(record.id);
+    final cloudFileId = record.cloudFileId;
+    final provider = _cloudProvider;
+    if (cloudFileId == null || provider == null) return;
+    if (!await provider.fileExists(cloudFileId)) return;
+    await _preferences.addRecord(record.copyWith(pinned: true));
+  }
+
+  /// Whether deleting [record] may destroy another device's only copy.
+  ///
+  /// True for a cloud-only backup whose name does not prove this device wrote
+  /// it: the backup folder is shared by every device on the account, and after
+  /// a reinstall the diver's own earlier backups carry the old install's
+  /// device tag. Deletion stays allowed (on Google Drive the folder is hidden,
+  /// so the app is the only way to remove them), but the confirmation says so.
+  /// An unreadable device id counts as not proven.
+  Future<bool> mayBeAnotherDevicesCopy(BackupRecord record) async {
+    if (record.localPath != null || record.cloudFileId == null) return false;
+    String deviceId;
+    try {
+      deviceId = await _syncRepository.getDeviceId();
+    } catch (e) {
+      _log.warning('Device id unavailable for backup ownership: $e');
+      return true;
+    }
+    return classifyBackupFile(
+          filename: record.filename,
+          thisDeviceId: deviceId,
+        ) !=
+        BackupOwnership.thisDevice;
+  }
 
   Future<void> _setPinned(String id, bool pinned) async {
     final history = _preferences.getHistory();
@@ -1194,10 +1263,16 @@ class BackupService {
   // ===========================================================================
 
   /// List backup files available in cloud storage.
+  ///
+  /// Empty when no provider is connected or it is signed out: the history
+  /// page calls this on every load (issue #3214), and a provider chosen but
+  /// not yet reconnected after a reinstall must not turn that into a failed
+  /// request.
   Future<List<CloudFileInfo>> getCloudBackups() async {
     if (_cloudProvider == null) return [];
 
     try {
+      if (!await _cloudProvider.isAuthenticated()) return [];
       final folderId = await _getOrCreateCloudBackupFolder();
       if (folderId == null) return [];
 

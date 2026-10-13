@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:submersion/features/cylinder_passports/presentation/utils/scan_cylinder_tag.dart';
 import 'package:submersion/features/cylinder_passports/presentation/widgets/scan_tag_menu_entries.dart';
 import 'package:submersion/features/equipment/domain/services/equipment_ownership.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_default_view_empty_state.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_bulk_share.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_bulk_transfer.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_share_providers.dart';
@@ -14,7 +15,6 @@ import 'package:submersion/features/divers/presentation/providers/diver_provider
 import 'package:submersion/features/equipment/presentation/utils/equipment_owner_sections.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_owner_chip.dart';
 import 'package:submersion/core/constants/enums.dart';
-import 'package:submersion/core/providers/async_value_extensions.dart';
 import 'package:submersion/core/theme/status_colors.dart';
 import 'package:submersion/features/cylinder_passports/presentation/utils/print_passport_labels.dart';
 import 'package:submersion/features/equipment/presentation/utils/equipment_type_icon.dart';
@@ -35,6 +35,7 @@ import 'package:submersion/shared/selection/selection_controller.dart';
 import 'package:submersion/shared/selection/selection_state.dart';
 import 'package:submersion/shared/widgets/entity_table/entity_table_view.dart';
 import 'package:submersion/shared/widgets/list_view_mode_toggle.dart';
+import 'package:submersion/shared/widgets/master_detail/master_detail_form_scope.dart';
 import 'package:submersion/shared/widgets/master_detail/responsive_breakpoints.dart';
 import 'package:submersion/shared/widgets/debounced_search_results.dart';
 import 'package:submersion/features/equipment/domain/constants/equipment_field.dart';
@@ -378,7 +379,12 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
     final rowLabels = equipmentRowLabelsOf(context, ref, sortedVisible);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && equipmentAsync.hasSettled) _selection.pruneTo(visibleIds);
+      if (mounted) {
+        _selection.pruneToSettled(
+          equipmentAsync,
+          (rows) => rows.map((e) => e.id),
+        );
+      }
     });
 
     // Built inside the selection listener below so rows re-render as checks
@@ -471,7 +477,7 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
                       icon: const Icon(Icons.more_vert),
                       onSelected: (value) {
                         if (value == scanTagMenuValue) {
-                          unawaited(scanAndOpenCylinderTag(context, ref));
+                          unawaited(scanAndOpenTag(context, ref));
                           return;
                         }
                         if (value.startsWith('view_')) {
@@ -602,8 +608,8 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
         id: 'printLabels',
         icon: Icons.qr_code_2,
         label: context.l10n.passport_tag_printLabels,
-        isEnabled: (ids) =>
-            everyChecked(ids, (e) => e.type == EquipmentType.tank),
+        // Any gear the diver owns takes a label (issue #2652).
+        isEnabled: (ids) => everyChecked(ids, (e) => !e.isWanted),
         onInvoke: () async {
           final ids = _selectedIds.toList();
           final messenger = ScaffoldMessenger.of(context);
@@ -774,7 +780,12 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
     // Same pruning the list path does: drop checked items that fell out of
     // the visible list, so the count always matches what is on screen.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && equipmentAsync.hasSettled) _selection.pruneTo(visibleIds);
+      if (mounted) {
+        _selection.pruneToSettled(
+          equipmentAsync,
+          (rows) => rows.map((e) => e.id),
+        );
+      }
     });
 
     // The scope carries Escape, Ctrl/Cmd-A and the Android back handling, and
@@ -865,6 +876,7 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
           units: units,
           onSortFieldChanged: notifier.setSortField,
           onResizeColumn: notifier.resizeColumn,
+          onHideColumn: notifier.hideColumn,
           onEntityTapDown: (id) {
             ref.read(highlightedEquipmentIdProvider.notifier).state = id;
           },
@@ -926,7 +938,7 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
           padding: dense ? EdgeInsets.zero : const EdgeInsets.all(8),
           onSelected: (value) {
             if (value == scanTagMenuValue) {
-              unawaited(scanAndOpenCylinderTag(context, ref));
+              unawaited(scanAndOpenTag(context, ref));
               return;
             }
             if (value.startsWith('view_')) {
@@ -1270,6 +1282,28 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
   }) {
     final filter = ref.watch(effectiveEquipmentFilterProvider);
 
+    // The default view is the diver's choice (#2628) and can hide all they
+    // own; with no other filter set, that is the only cause left. Wishlist
+    // gear is not owned yet, and gear another diver shares is not theirs
+    // (ownerless gear is, as under the Mine filter), so a diver with only
+    // those still gets the add prompt.
+    final diverId = ref.watch(validatedCurrentDiverIdProvider).value;
+    final ownsHiddenGear =
+        ref
+            .watch(allEquipmentProvider)
+            .value
+            ?.any(
+              (e) =>
+                  e.status != EquipmentStatus.wanted &&
+                  (e.diverId == null ||
+                      diverId == null ||
+                      e.diverId == diverId),
+            ) ??
+        false;
+    if (!filter.hasActiveFilters && ownsHiddenGear) {
+      return const EquipmentDefaultViewEmptyState();
+    }
+
     // Blame the tags (issue #1942) when the category and its conditions left
     // items that none of the selected tags is on: a tag chip on a retired
     // item can land here, since the default view hides retired gear.
@@ -1338,7 +1372,10 @@ class _EquipmentListContentState extends ConsumerState<EquipmentListContent> {
             ),
             textAlign: TextAlign.center,
           ),
-          if (!filter.hasActiveFilters) ...[
+          // Hidden beside an open form: it reads as the form's submit button
+          // but only reopens the create form (issue #3192).
+          if (!filter.hasActiveFilters &&
+              !MasterDetailFormScope.isFormOpenOf(context)) ...[
             const SizedBox(height: 24),
             FilledButton.icon(
               onPressed: () {
