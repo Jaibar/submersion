@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
@@ -25,6 +26,11 @@ import 'package:submersion/l10n/l10n_extension.dart';
 /// beside the dive as logged: shortest NDL, deepest ceiling, peak tissue
 /// loading, CNS, plus the tissue-loading and ceiling charts. The profile is
 /// never re-planned, so every difference comes from the gas/GF change alone.
+///
+/// Layout: the O2 / GF controls (slider plus typed value) and the depth and
+/// ceiling chart are pinned at the top so a change shows on the ceiling with
+/// no scrolling; the logged vs what-if panels scroll below, and the Deco
+/// Status table is last.
 class GasGfWhatIfPage extends ConsumerStatefulWidget {
   const GasGfWhatIfPage({super.key, required this.diveId});
 
@@ -36,6 +42,9 @@ class GasGfWhatIfPage extends ConsumerStatefulWidget {
 
 class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
   static const _o2Presets = [21.0, 28.0, 32.0, 36.0, 40.0];
+
+  /// Height of the pinned depth/ceiling chart.
+  static const _ceilingHeight = 150.0;
 
   /// Null fields = as logged. Committed values; they key the analysis.
   GasGfOverrides _overrides = const GasGfOverrides();
@@ -78,38 +87,57 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
                   ? const CircularProgressIndicator()
                   : Text(l10n.diveLog_gasGfWhatIf_noProfile),
             )
-          : ListView(
-              padding: const EdgeInsets.all(16),
+          : Column(
               children: [
-                _controls(context, dive, loggedAnalysis),
-                const SizedBox(height: 16),
-                if (whatIfAnalysis == null)
-                  const Center(child: CircularProgressIndicator())
-                else ...[
-                  _summary(
-                    context,
-                    loggedAnalysis,
-                    whatIfAnalysis,
-                    points,
-                    units,
+                // Pinned: the sliders and the depth/ceiling chart stay on screen
+                // together, so a GF or O2 change shows on the ceiling at once.
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Column(
+                    children: [
+                      _controls(context, dive, loggedAnalysis),
+                      const SizedBox(height: 8),
+                      if (whatIfAnalysis == null)
+                        const SizedBox(
+                          height: _ceilingHeight,
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      else
+                        _ceilingCard(
+                          context,
+                          loggedAnalysis,
+                          whatIfAnalysis,
+                          points,
+                          units,
+                        ),
+                    ],
                   ),
-                  const SizedBox(height: 16),
-                  _ceilingCard(
-                    context,
-                    loggedAnalysis,
-                    whatIfAnalysis,
-                    points,
-                    units,
+                ),
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      if (whatIfAnalysis != null) ...[
+                        _panels(
+                          context,
+                          dive,
+                          loggedAnalysis,
+                          whatIfAnalysis,
+                          points,
+                        ),
+                        const SizedBox(height: 16),
+                        // Last: the numbers behind the two charts above.
+                        _summary(
+                          context,
+                          loggedAnalysis,
+                          whatIfAnalysis,
+                          points,
+                          units,
+                        ),
+                      ],
+                    ],
                   ),
-                  const SizedBox(height: 16),
-                  _panels(
-                    context,
-                    dive,
-                    loggedAnalysis,
-                    whatIfAnalysis,
-                    points,
-                  ),
-                ],
+                ),
               ],
             ),
     );
@@ -153,17 +181,18 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
       );
     });
 
+    // A slider is imprecise on a phone, so each value also takes typed input.
     Widget slider({
       required String label,
-      required String value,
       required double current,
       required double min,
       required double max,
+      required String suffix,
       required ValueChanged<double> onDrag,
       required ValueChanged<double> onEnd,
     }) => Row(
       children: [
-        SizedBox(width: 72, child: Text(label)),
+        SizedBox(width: 64, child: Text(label)),
         Expanded(
           child: Slider(
             value: current.clamp(min, max),
@@ -174,37 +203,61 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
             onChangeEnd: onEnd,
           ),
         ),
-        SizedBox(width: 48, child: Text(value, textAlign: TextAlign.end)),
+        _ValueField(
+          value: current.round(),
+          min: min.round(),
+          max: max.round(),
+          suffix: suffix,
+          onCommit: (v) => onEnd(v.toDouble()),
+        ),
       ],
     );
 
     return Card(
+      margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 4),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              '${l10n.diveLog_gasGfWhatIf_loggedLabel}: '
-              'O2 ${loggedO2.round()}%, '
-              'GF ${loggedLow.round()}/${loggedHigh.round()}',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
+            Row(
               children: [
-                for (final p in _o2Presets)
-                  ChoiceChip(
-                    label: Text(p == 21 ? 'Air' : 'EAN${p.round()}'),
-                    selected: o2.round() == p.round(),
-                    onSelected: (_) => commitO2(p),
+                Expanded(
+                  child: Text(
+                    '${l10n.diveLog_gasGfWhatIf_loggedLabel}: '
+                    'O2 ${loggedO2.round()}%, '
+                    'GF ${loggedLow.round()}/${loggedHigh.round()}',
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
+                ),
+                TextButton(
+                  onPressed: _overrides.isEmpty
+                      ? null
+                      : () =>
+                            setState(() => _overrides = const GasGfOverrides()),
+                  child: Text(l10n.diveLog_gasGfWhatIf_reset),
+                ),
               ],
+            ),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (final p in _o2Presets)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        label: Text(p == 21 ? 'Air' : 'EAN${p.round()}'),
+                        selected: o2.round() == p.round(),
+                        onSelected: (_) => commitO2(p),
+                      ),
+                    ),
+                ],
+              ),
             ),
             slider(
               label: l10n.diveLog_gasGfWhatIf_o2Label,
-              value: '${o2.round()}%',
+              suffix: '%',
               current: o2,
               min: 15,
               max: 60,
@@ -213,7 +266,7 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
             ),
             slider(
               label: l10n.diveLog_gasGfWhatIf_gfLowLabel,
-              value: '${gfLow.round()}',
+              suffix: '',
               current: gfLow,
               min: 10,
               max: 100,
@@ -222,7 +275,7 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
             ),
             slider(
               label: l10n.diveLog_gasGfWhatIf_gfHighLabel,
-              value: '${gfHigh.round()}',
+              suffix: '',
               current: gfHigh,
               min: 10,
               max: 100,
@@ -232,15 +285,6 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
             Text(
               l10n.diveLog_gasGfWhatIf_firstCylinderNote,
               style: Theme.of(context).textTheme.bodySmall,
-            ),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                onPressed: _overrides.isEmpty
-                    ? null
-                    : () => setState(() => _overrides = const GasGfOverrides()),
-                child: Text(l10n.diveLog_gasGfWhatIf_reset),
-              ),
             ),
           ],
         ),
@@ -302,7 +346,7 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              l10n.diveLog_gasGfWhatIf_metricsTitle,
+              l10n.diveLog_deco_title,
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
@@ -375,21 +419,23 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
     UnitFormatter units,
   ) {
     return Card(
+      margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               context.l10n.diveLog_gasGfWhatIf_ceilingTitle,
-              style: Theme.of(context).textTheme.titleMedium,
+              style: Theme.of(context).textTheme.labelLarge,
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 4),
             GasGfCeilingChart(
               profile: points,
               loggedCeiling: loggedAnalysis.ceilingCurve,
               whatIfCeiling: whatIfAnalysis.ceilingCurve,
               units: units,
+              height: _ceilingHeight,
               selectedIndex: ref.watch(
                 profileTrackingIndexProvider(widget.diveId),
               ),
@@ -559,5 +605,85 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
   String _formatTimestamp(int seconds) {
     final secs = (seconds % 60).toString().padLeft(2, '0');
     return '${seconds ~/ 60}:$secs';
+  }
+}
+
+/// A small whole-number entry box that mirrors a slider: typing a value
+/// commits it on Enter or when focus leaves, clamped to [min]..[max].
+class _ValueField extends StatefulWidget {
+  const _ValueField({
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.suffix,
+    required this.onCommit,
+  });
+
+  final int value;
+  final int min;
+  final int max;
+  final String suffix;
+  final ValueChanged<int> onCommit;
+
+  @override
+  State<_ValueField> createState() => _ValueFieldState();
+}
+
+class _ValueFieldState extends State<_ValueField> {
+  late final TextEditingController _controller = TextEditingController(
+    text: '${widget.value}',
+  );
+  late final FocusNode _focus = FocusNode()..addListener(_onFocus);
+
+  void _onFocus() {
+    if (!_focus.hasFocus) _commit();
+  }
+
+  void _commit() {
+    final typed = int.tryParse(_controller.text.trim());
+    if (typed == null) {
+      _controller.text = '${widget.value}';
+      return;
+    }
+    final v = typed.clamp(widget.min, widget.max);
+    _controller.text = '$v';
+    if (v != widget.value) widget.onCommit(v);
+  }
+
+  @override
+  void didUpdateWidget(_ValueField old) {
+    super.didUpdateWidget(old);
+    // Follow the slider (and the presets), but never fight the typing.
+    if (!_focus.hasFocus && _controller.text != '${widget.value}') {
+      _controller.text = '${widget.value}';
+    }
+  }
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 68,
+      child: TextField(
+        controller: _controller,
+        focusNode: _focus,
+        keyboardType: TextInputType.number,
+        textAlign: TextAlign.end,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+        decoration: InputDecoration(
+          isDense: true,
+          suffixText: widget.suffix.isEmpty ? null : widget.suffix,
+          border: const OutlineInputBorder(),
+        ),
+        onSubmitted: (_) => _commit(),
+        onTapOutside: (_) => _focus.unfocus(),
+      ),
+    );
   }
 }
