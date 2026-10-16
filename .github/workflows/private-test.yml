@@ -1,0 +1,211 @@
+name: Private test build (Dive Lab)
+
+# Fork-only workflow for the custom/** branches: no pull request needed.
+# Runs on every push to custom/** and can also be started by hand from the
+# Actions tab. It
+#   1. formats the code with `dart format` and commits the result back to the
+#      branch (there is no local Dart to do it),
+#   2. analyzes it and runs the tests for the what-if features,
+#   3. builds the Windows release and uploads it as a zip artifact: download it
+#      from the run page, unzip, run submersion.exe. Nothing to install.
+# Never touches upstream: it only exists on this fork's custom/** branches.
+
+on:
+  push:
+    branches: ['custom/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: private-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Read Flutter version
+        id: flutter-ver
+        shell: bash
+        run: echo "version=$(cat .github/flutter-version.txt)" >> "$GITHUB_OUTPUT"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter-ver.outputs.version }}
+          channel: stable
+
+      - name: Install dependencies and run code generation
+        run: |
+          flutter pub get
+          dart run build_runner build --delete-conflicting-outputs
+
+      - name: Format and commit back to the branch
+        shell: bash
+        run: |
+          flutter gen-l10n
+          dart format lib test
+          if [ -n "$(git status --porcelain lib test)" ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add lib test
+            git commit -m "style: apply dart format"
+            git push
+          else
+            echo "Already formatted."
+          fi
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Tests for the Dive Lab
+        run: >
+          flutter test
+          test/features/dive_lab
+          test/features/planner/domain/services/dive_to_plan_converter_test.dart
+
+      - name: Build Windows release
+        run: flutter build windows --release --dart-define=UPDATE_CHANNEL=github
+
+      - name: Zip the build
+        shell: pwsh
+        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath Submersion-lab-windows.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Submersion-lab-windows
+          path: Submersion-lab-windows.zip
+          retention-days: 14
+
+  # Android APK, sideload only. Signed with a STABLE test key kept in the fork
+  # secret ANDROID_TEST_KEYSTORE_B64, so every build has the same signature and
+  # installs over the previous one (and Obtainium can update it). The package
+  # name is changed to app.submersion.custom for this build alone (the repo
+  # files are not edited), so it installs NEXT TO a Play/GitHub Submersion
+  # instead of clashing with its signature, and keeps its own separate data.
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Read Flutter version
+        id: flutter-ver
+        run: echo "version=$(cat .github/flutter-version.txt)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter-ver.outputs.version }}
+          channel: stable
+
+      - name: Add swap for build_runner
+        run: |
+          if sudo fallocate -l 12G /mnt/codegen.swap \
+            && sudo chmod 600 /mnt/codegen.swap \
+            && sudo mkswap /mnt/codegen.swap >/dev/null \
+            && sudo swapon /mnt/codegen.swap; then
+            swapon --show
+          else
+            echo "::warning::Could not add swap"
+          fi
+
+      - name: Install dependencies and run code generation
+        run: |
+          flutter pub get
+          dart run build_runner build --delete-conflicting-outputs
+
+      - name: Install Android SDK platform 37
+        run: |
+          sdkmanager="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools" \
+            -name sdkmanager -type f 2>/dev/null | head -1)"
+          "$sdkmanager" --install "platforms;android-37.0" < /dev/null
+
+      - name: Give this build its own package name and label
+        run: |
+          sed -i 's/applicationId = "app.submersion"/applicationId = "app.submersion.lab"/' android/app/build.gradle.kts
+          sed -i 's/android:label="Submersion"/android:label="Submersion Lab"/' android/app/src/main/AndroidManifest.xml
+          grep -n 'applicationId' android/app/build.gradle.kts
+          grep -n 'android:label="Submersion' android/app/src/main/AndroidManifest.xml
+
+      - name: Sign with the stable test key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_TEST_KEYSTORE_B64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 --decode > android/app/release.keystore
+          cat > android/key.properties <<EOL
+          storePassword=submersion-custom
+          keyPassword=submersion-custom
+          keyAlias=custom
+          storeFile=release.keystore
+          EOL
+
+      - name: Build Android APK
+        run: flutter build apk --release --dart-define=UPDATE_CHANNEL=github
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Submersion-lab-android
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 14
+
+  # Publishes the APK as a GitHub Release on this fork so Obtainium can follow
+  # it (Obtainium reads releases, not workflow artifacts). One release per
+  # successful build, tagged v<pubspec version>-custom.<run number>: the run
+  # number only ever grows, so each build counts as a newer version.
+  release:
+    needs: [android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: Submersion-lab-android
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base="$(grep -m1 '^version:' pubspec.yaml | sed -E 's/^version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+          tag="v${base}-lab.${{ github.run_number }}"
+          mv app-release.apk "Submersion-lab-${tag}.apk"
+          gh release create "$tag" "Submersion-lab-${tag}.apk" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Submersion lab ${tag}" \
+            --notes "Private test build of custom/dive-lab. Sideload only."
+
+  # Tells the owner a new working build exists: an issue on this fork (GitHub
+  # emails it). Runs only when BOTH builds succeeded; a failed run already gets
+  # GitHub's own failure email.
+  notify:
+    needs: [build, android, release]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue with the download link
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          subject="$(printf '%s' "$COMMIT_MSG" | head -n 1)"
+          gh issue create --repo "${{ github.repository }}" \
+            --title "New build ready: ${subject:-custom/dive-lab}" \
+            --body "Windows and Android builds passed. Download them under Artifacts at: $RUN_URL"

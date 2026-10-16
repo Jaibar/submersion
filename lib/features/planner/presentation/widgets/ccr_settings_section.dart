@@ -4,6 +4,8 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/number_input.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
+    as domain;
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/forms/number_field.dart';
@@ -31,10 +33,16 @@ class _CcrSettingsSectionState extends ConsumerState<CcrSettingsSection> {
     // A setpoint is decimal by nature (1,2 bar for a comma-decimal diver), so
     // the seed and the parse both go through the locale helpers (#1091).
     _lowController = TextEditingController(
-      text: formatRoundedForInput(state.setpointLow ?? 0.7, 1),
+      text: formatRoundedForInput(
+        state.setpointLow ?? domain.DivePlan.specSetpointLow,
+        1,
+      ),
     );
     _highController = TextEditingController(
-      text: formatRoundedForInput(state.setpointHigh ?? 1.3, 1),
+      text: formatRoundedForInput(
+        state.setpointHigh ?? domain.DivePlan.specSetpointHigh,
+        1,
+      ),
     );
     _switchController = TextEditingController(
       text: formatRoundedForInput(
@@ -52,6 +60,10 @@ class _CcrSettingsSectionState extends ConsumerState<CcrSettingsSection> {
     super.dispose();
   }
 
+  // Below this width the three fields no longer fit their label without
+  // ellipsis-truncating it (#3130), so they stack instead.
+  static const double _narrowBreakpoint = 360;
+
   @override
   Widget build(BuildContext context) {
     final units = UnitFormatter(ref.watch(settingsProvider));
@@ -64,25 +76,23 @@ class _CcrSettingsSectionState extends ConsumerState<CcrSettingsSection> {
       double Function(double)? toMetric,
       bool allowZero = false,
     }) {
-      return Expanded(
-        child: NumberField(
-          controller: controller,
-          decoration: InputDecoration(
-            labelText: label,
-            isDense: true,
-            border: const OutlineInputBorder(),
-          ),
-          onChanged: (read) {
-            // Blank and unreadable text leave the plan alone; the field shows
-            // why for unreadable text.
-            if (read is! NumberValue) return;
-            final parsed = read.value;
-            // Setpoints must be positive; a switch depth of 0 (surface) is a
-            // valid, useful configuration, so it opts into allowZero.
-            if (allowZero ? parsed < 0 : parsed <= 0) return;
-            onChanged(toMetric != null ? toMetric(parsed) : parsed);
-          },
+      return NumberField(
+        controller: controller,
+        decoration: InputDecoration(
+          labelText: label,
+          isDense: true,
+          border: const OutlineInputBorder(),
         ),
+        onChanged: (read) {
+          // Blank and unreadable text leave the plan alone; the field shows
+          // why for unreadable text.
+          if (read is! NumberValue) return;
+          final parsed = read.value;
+          // Setpoints must be positive; a switch depth of 0 (surface) is a
+          // valid, useful configuration, so it opts into allowZero.
+          if (allowZero ? parsed < 0 : parsed <= 0) return;
+          onChanged(toMetric != null ? toMetric(parsed) : parsed);
+        },
       );
     }
 
@@ -92,31 +102,50 @@ class _CcrSettingsSectionState extends ConsumerState<CcrSettingsSection> {
       return factor > 0 ? display / factor : display;
     }
 
+    final fields = [
+      field(
+        _lowController,
+        context.l10n.plannerCanvas_ccr_setpointLow,
+        (v) => notifier.updateSetpoints(low: v),
+      ),
+      field(
+        _highController,
+        context.l10n.plannerCanvas_ccr_setpointHigh,
+        (v) => notifier.updateSetpoints(high: v),
+      ),
+      field(
+        _switchController,
+        '${context.l10n.plannerCanvas_ccr_switchDepth} '
+        '(${units.depthSymbol})',
+        (v) => notifier.updateSetpoints(switchDepth: v),
+        toMetric: depthToMetric,
+        allowZero: true,
+      ),
+    ];
+
     return Padding(
       padding: const EdgeInsets.only(top: 12),
-      child: Row(
-        children: [
-          field(
-            _lowController,
-            context.l10n.plannerCanvas_ccr_setpointLow,
-            (v) => notifier.updateSetpoints(low: v),
-          ),
-          const SizedBox(width: 8),
-          field(
-            _highController,
-            context.l10n.plannerCanvas_ccr_setpointHigh,
-            (v) => notifier.updateSetpoints(high: v),
-          ),
-          const SizedBox(width: 8),
-          field(
-            _switchController,
-            '${context.l10n.plannerCanvas_ccr_switchDepth} '
-            '(${units.depthSymbol})',
-            (v) => notifier.updateSetpoints(switchDepth: v),
-            toMetric: depthToMetric,
-            allowZero: true,
-          ),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < _narrowBreakpoint) {
+            return Column(
+              children: [
+                for (final (index, f) in fields.indexed) ...[
+                  if (index > 0) const SizedBox(height: 8),
+                  f,
+                ],
+              ],
+            );
+          }
+          return Row(
+            children: [
+              for (final (index, f) in fields.indexed) ...[
+                if (index > 0) const SizedBox(width: 8),
+                Expanded(child: f),
+              ],
+            ],
+          );
+        },
       ),
     );
   }

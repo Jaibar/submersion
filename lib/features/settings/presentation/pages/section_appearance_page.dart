@@ -9,6 +9,7 @@ import 'package:submersion/features/certifications/presentation/providers/certif
 import 'package:submersion/features/courses/presentation/providers/course_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/settings/presentation/widgets/gradient_preset_picker.dart';
+import 'package:submersion/features/settings/presentation/widgets/viewer_fullscreen_mode_tile.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/providers/table_details_pane_provider.dart';
 
@@ -573,6 +574,19 @@ class SectionAppearancePage extends ConsumerWidget {
         },
       ),
       SwitchListTile(
+        title: Text(context.l10n.settings_appearance_lateGasSwitches),
+        subtitle: Text(
+          context.l10n.settings_appearance_lateGasSwitches_subtitle,
+        ),
+        secondary: const Icon(Icons.timer_off_outlined),
+        value: settings.defaultShowLateGasSwitches,
+        onChanged: (value) {
+          ref
+              .read(settingsProvider.notifier)
+              .setDefaultShowLateGasSwitches(value);
+        },
+      ),
+      SwitchListTile(
         title: Text(context.l10n.settings_appearance_gasTimeline),
         subtitle: Text(context.l10n.settings_appearance_gasTimeline_subtitle),
         secondary: const Icon(Icons.timeline),
@@ -595,6 +609,22 @@ class SectionAppearancePage extends ConsumerWidget {
         trailing: const Icon(Icons.chevron_right),
         onTap: () => context.push('/settings/default-metrics'),
       ),
+      ListTile(
+        leading: const Icon(Icons.palette_outlined),
+        title: Text(context.l10n.settings_appearance_metricColors),
+        subtitle: Text(
+          settings.profileMetricColors.isEmpty
+              ? context.l10n.settings_appearance_metricColors_subtitleDefault
+              : context.l10n
+                    .settings_appearance_metricColors_subtitleCustomized(
+                      settings.profileMetricColors.count,
+                    ),
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => context.push('/settings/metric-colors'),
+      ),
+      if (ViewerFullscreenModeTile.isSupported)
+        const ViewerFullscreenModeTile(),
     ];
   }
 
@@ -666,8 +696,8 @@ class SectionAppearancePage extends ConsumerWidget {
       'equipment' => ref.watch(settingsProvider).equipmentListViewMode,
       'buddies' => ref.watch(settingsProvider).buddyListViewMode,
       'diveCenters' => ref.watch(settingsProvider).diveCenterListViewMode,
-      'certifications' => ref.watch(certificationListViewModeProvider),
-      'courses' => ref.watch(courseListViewModeProvider),
+      'certifications' => ref.watch(settingsProvider).certificationListViewMode,
+      'courses' => ref.watch(settingsProvider).courseListViewMode,
       _ => ListViewMode.detailed,
     };
   }
@@ -693,10 +723,10 @@ class SectionAppearancePage extends ConsumerWidget {
         ref.read(settingsProvider.notifier).setDiveCenterListViewMode(mode);
         ref.read(diveCenterListViewModeProvider.notifier).state = mode;
       case 'certifications':
-        // Runtime-only, not persisted
+        ref.read(settingsProvider.notifier).setCertificationListViewMode(mode);
         ref.read(certificationListViewModeProvider.notifier).state = mode;
       case 'courses':
-        // Runtime-only, not persisted
+        ref.read(settingsProvider.notifier).setCourseListViewMode(mode);
         ref.read(courseListViewModeProvider.notifier).state = mode;
     }
   }

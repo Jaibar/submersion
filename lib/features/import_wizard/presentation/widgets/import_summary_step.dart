@@ -16,8 +16,11 @@ import 'package:submersion/features/import_wizard/presentation/widgets/import_su
 import 'package:submersion/features/import_wizard/presentation/widgets/missing_dives_card.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/undo_fills_button.dart';
 import 'package:submersion/features/nav_track/presentation/pages/nav_track_import_review_page.dart';
+import 'package:submersion/core/services/suunto_cloud/suunto_json_file_reader.dart';
+import 'package:submersion/features/import_wizard/presentation/suunto_file_import_navigation.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/tile_subtitle_action.dart';
 
 /// The summary step shown after the import completes.
 ///
@@ -273,11 +276,15 @@ class _SuccessView extends StatelessWidget {
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.rule),
                     title: Text(l10n.dataQuality_summary_flagged(count)),
-                    trailing: TextButton(
+                    // The action sits on its own line under the label rather
+                    // than in trailing: a ListTile measures trailing before
+                    // the title, so a text button there squeezes the label
+                    // in a longer translation (issue #2717).
+                    subtitle: TileSubtitleAction(
                       onPressed: () => context.push(
                         '/dives/quality?dive=${importedDiveIds.join(',')}',
                       ),
-                      child: Text(l10n.dataQuality_summary_review),
+                      label: l10n.dataQuality_summary_review,
                     ),
                   );
                 },
@@ -393,6 +400,8 @@ class _SuccessView extends StatelessWidget {
         return Icons.school;
       case ImportEntityType.media:
         return Icons.photo_library;
+      case ImportEntityType.fills:
+        return Icons.propane_tank_outlined;
     }
   }
 
@@ -422,6 +431,8 @@ class _SuccessView extends StatelessWidget {
         return l10n.diveImport_uddf_tabCourses;
       case ImportEntityType.media:
         return l10n.diveImport_uddf_media;
+      case ImportEntityType.fills:
+        return l10n.diveImport_uddf_fills;
     }
   }
 }
@@ -517,6 +528,14 @@ _FileNoticeWording? _fileNoticeWording(
         route: '/transmitters',
       ),
     ),
+    ImportNoticeKind.transmitterNameRoles => (
+      title: l10n.universalImport_summary_noticeTransmitterNameRolesTitle,
+      body: l10n.universalImport_summary_noticeTransmitterNameRolesBody,
+      action: (
+        label: l10n.universalImport_summary_noticeAssignTransmitters,
+        route: '/transmitters',
+      ),
+    ),
     ImportNoticeKind.columnsNotImported => (
       title: l10n.universalImport_summary_noticeColumnsNotImportedTitle,
       body: l10n.universalImport_summary_noticeColumnsNotImportedBody(names),
@@ -532,6 +551,16 @@ _FileNoticeWording? _fileNoticeWording(
     ImportNoticeKind.photosSkipped => (
       title: l10n.universalImport_summary_noticePhotosSkippedTitle,
       body: l10n.universalImport_summary_noticePhotosSkippedBody(notice.count),
+      action: null,
+    ),
+    ImportNoticeKind.logbookImagesNotImported => (
+      title: l10n.universalImport_summary_noticeLogbookImagesTitle,
+      body: l10n.universalImport_summary_noticeLogbookImagesBody(notice.count),
+      action: null,
+    ),
+    ImportNoticeKind.tripsNotImported => (
+      title: l10n.universalImport_summary_noticeTripsNotImportedTitle,
+      body: l10n.universalImport_summary_noticeTripsNotImportedBody(names),
       action: null,
     ),
     ImportNoticeKind.macdiveXmlOmitsCertsAndService => (
@@ -697,6 +726,8 @@ class _FileOutcomeRow extends StatelessWidget {
 
     final canImportAsRoute =
         outcome.isNavTrackRoute && outcome.filePath != null;
+    final canImportWithSuunto =
+        outcome.isSuuntoJson && outcome.filePath != null;
     // Why a file failed, verbatim from its parser. Only failures carry one.
     final reason = outcome.status == ImportFileOutcomeStatus.parseFailed
         ? outcome.error
@@ -732,7 +763,15 @@ class _FileOutcomeRow extends StatelessWidget {
                 TextButton(
                   key: const ValueKey('import-summary-import-as-route'),
                   onPressed: () => _importAsRoute(context),
-                  child: Text(l10n.universalImport_summary_importAsRoute),
+                  child: Text(
+                    l10n.universalImport_summary_importAsUnderwaterTrack,
+                  ),
+                ),
+              if (canImportWithSuunto)
+                TextButton(
+                  key: const ValueKey('import-summary-import-with-suunto'),
+                  onPressed: () => _importWithSuunto(context),
+                  child: Text(l10n.universalImport_summary_importWithSuunto),
                 ),
             ],
           ),
@@ -753,6 +792,27 @@ class _FileOutcomeRow extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// Re-reads an excluded Suunto JSON export from its stored path and opens
+  /// the Suunto importer with it (issue #1445), for the same reason as
+  /// [_importAsRoute]: the batch pipeline keeps no bytes to hand over.
+  Future<void> _importWithSuunto(BuildContext context) async {
+    final path = outcome.filePath;
+    if (path == null) return;
+    final l10n = context.l10n;
+    try {
+      final bytes = await File(path).readAsBytes();
+      if (!context.mounted) return;
+      await openSuuntoFileImport(context, [
+        SuuntoJsonFile(name: outcome.fileName, bytes: bytes),
+      ]);
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.dropTarget_error_readFailed)));
+    }
   }
 
   /// Re-reads the excluded file from its stored path and hands it to the

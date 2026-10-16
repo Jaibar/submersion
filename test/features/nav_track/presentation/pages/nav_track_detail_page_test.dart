@@ -9,8 +9,9 @@ import 'package:go_router/go_router.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
-import 'package:submersion/features/dive_log/presentation/widgets/pickers/site_picker_sheet.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_picker/site_picker_sheet.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/models/new_site_seed.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
@@ -34,11 +35,28 @@ class _RecordingNavTrackRepository extends NavTrackRepository {
   String? linkedRouteId;
   String? linkedDiveId;
   NavTrackLinkMode? linkMode;
+  String? setSiteRouteId;
+  String? setSiteId;
+  GeoPoint? setSiteAnchor;
+  bool? setSiteClearAnchor;
 
   @override
   Future<void> rename(String routeId, String? name) async {
     renamedId = routeId;
     newName = name;
+  }
+
+  @override
+  Future<void> setSite(
+    String routeId,
+    String? siteId, {
+    GeoPoint? anchor,
+    bool clearAnchor = false,
+  }) async {
+    setSiteRouteId = routeId;
+    setSiteId = siteId;
+    setSiteAnchor = anchor;
+    setSiteClearAnchor = clearAnchor;
   }
 
   @override
@@ -54,7 +72,7 @@ class _RecordingNavTrackRepository extends NavTrackRepository {
   }
 
   @override
-  Future<void> unlink(String routeId) async {
+  Future<void> unlink(String routeId, {String? onlyFromDiveId}) async {
     unlinkedId = routeId;
   }
 
@@ -97,13 +115,16 @@ Future<_RecordingNavTrackRepository> _pump(
   DiveSite? site,
   GoRouter? router,
   List<Dive>? allDives,
+  List<DiveSite>? allSites,
+  Locale? locale,
+  _RecordingNavTrackRepository? repository,
 }) async {
   final overrides = await getBaseOverrides();
-  final repository = _RecordingNavTrackRepository();
+  final effectiveRepository = repository ?? _RecordingNavTrackRepository();
   final effectiveOverrides = [
     ...overrides,
     navTrackByIdProvider(route.id).overrideWith((ref) async => route),
-    navTrackRepositoryProvider.overrideWithValue(repository),
+    navTrackRepositoryProvider.overrideWithValue(effectiveRepository),
     if (linkedDive != null)
       diveProvider(linkedDive.id).overrideWith((ref) async => linkedDive),
     if (equipment != null)
@@ -112,6 +133,7 @@ Future<_RecordingNavTrackRepository> _pump(
       ).overrideWith((ref) async => equipment),
     if (site != null) siteProvider(site.id).overrideWith((ref) async => site),
     if (allDives != null) divesProvider.overrideWith((ref) async => allDives),
+    if (allSites != null) sitesProvider.overrideWith((ref) async => allSites),
   ];
   if (router != null) {
     await tester.pumpWidget(
@@ -129,6 +151,7 @@ Future<_RecordingNavTrackRepository> _pump(
       ProviderScope(
         overrides: effectiveOverrides,
         child: MaterialApp(
+          locale: locale,
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
           home: NavTrackDetailPage(trackId: route.id),
@@ -137,7 +160,7 @@ Future<_RecordingNavTrackRepository> _pump(
     );
   }
   await tester.pumpAndSettle();
-  return repository;
+  return effectiveRepository;
 }
 
 void main() {
@@ -147,6 +170,57 @@ void main() {
     expect(find.byKey(const ValueKey('nav-track-no-dive')), findsOneWidget);
     expect(find.text('No dive linked'), findsOneWidget);
     expect(find.text('Choose dive'), findsOneWidget);
+  });
+
+  group('on a narrow phone in German (#2692)', () {
+    // A ListTile measures its trailing widget against the full tile width
+    // first, so a translated action button there ("Tauchgang wählen",
+    // "Tauchplatz wählen") starved the card's label down to one fragment per
+    // line. The action belongs below the label instead.
+    Future<void> pumpNarrow(WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await _pump(tester, route: _route(), locale: const Locale('de'));
+    }
+
+    void expectReadableAboveAction(
+      WidgetTester tester, {
+      required String label,
+      required Finder action,
+    }) {
+      final labelRect = tester.getRect(find.text(label));
+      final actionRect = tester.getRect(action);
+      expect(
+        labelRect.width,
+        greaterThan(150),
+        reason:
+            '"$label" collapsed to ${labelRect.width}px wide on a 360px '
+            'screen; the action button is starving the ListTile text column.',
+      );
+      expect(actionRect.top, greaterThanOrEqualTo(labelRect.bottom));
+    }
+
+    testWidgets('the "no dive linked" card keeps its label readable', (
+      tester,
+    ) async {
+      await pumpNarrow(tester);
+
+      expectReadableAboveAction(
+        tester,
+        label: 'Kein Tauchgang verknüpft',
+        action: find.widgetWithText(TextButton, 'Tauchgang wählen'),
+      );
+    });
+
+    testWidgets('the site card keeps its label readable', (tester) async {
+      await pumpNarrow(tester);
+
+      expectReadableAboveAction(
+        tester,
+        label: 'Kein Tauchplatz',
+        action: find.byKey(const ValueKey('nav-track-change-site')),
+      );
+    });
   });
 
   testWidgets('shows the linked dive for a linked route', (tester) async {
@@ -163,6 +237,19 @@ void main() {
 
     expect(find.byKey(const ValueKey('nav-track-linked-dive')), findsOneWidget);
     expect(find.textContaining('#412'), findsOneWidget);
+  });
+
+  testWidgets('a linked dive without a number is labelled by its id, not as a '
+      'numbered dive (matching the routes list chip)', (tester) async {
+    final dive = Dive(id: 'dive-1', dateTime: DateTime(2026, 8, 22, 10, 8));
+    await _pump(
+      tester,
+      route: _route(diveId: 'dive-1'),
+      linkedDive: dive,
+    );
+
+    expect(find.text('Dive dive-1'), findsOneWidget);
+    expect(find.text('Dive #dive-1'), findsNothing);
   });
 
   testWidgets('tapping "Choose dive" and picking one links the route to it', (
@@ -189,6 +276,35 @@ void main() {
     expect(repository.linkedDiveId, 'dive-9');
     expect(repository.linkMode, NavTrackLinkMode.manual);
   });
+
+  testWidgets(
+    '"Choose dive" pre-selects the sole time-overlapping dive (#2394)',
+    (tester) async {
+      // Entry time equals the route's own startTime (1755856800000ms), so
+      // this is the sole dive NavTrackMatcher.candidatesFor overlaps --
+      // no fake match service needed, the pre-selection is computed
+      // directly from the dives already fetched for the sheet.
+      final candidate = Dive(
+        id: 'dive-9',
+        diveNumber: 9,
+        dateTime: DateTime.fromMillisecondsSinceEpoch(1755856800000),
+        entryTime: DateTime.fromMillisecondsSinceEpoch(1755856800000),
+      );
+      await _pump(tester, route: _route(), allDives: [candidate]);
+
+      await tester.tap(find.text('Choose dive'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<ListTile>(
+              find.byKey(const ValueKey('nav-track-dive-choice-dive-9')),
+            )
+            .selected,
+        isTrue,
+      );
+    },
+  );
 
   testWidgets('shows the no-correction sentence when nothing was aligned', (
     tester,
@@ -287,6 +403,148 @@ void main() {
 
       expect(find.byType(SitePickerSheet), findsOneWidget);
     });
+
+    testWidgets('picking an existing site in the picker assigns it to the '
+        'route', (tester) async {
+      const oldSite = DiveSite(
+        id: 'site-1',
+        name: 'Test Site',
+        location: GeoPoint(47.1, 8.3),
+      );
+      const newSite = DiveSite(
+        id: 'site-2',
+        name: 'Other Site',
+        location: GeoPoint(47.2, 8.4),
+      );
+      final repository = await _pump(
+        tester,
+        route: _route(siteId: 'site-1'),
+        site: oldSite,
+        allSites: [oldSite, newSite],
+      );
+
+      await tester.tap(find.byKey(const ValueKey('nav-track-change-site')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(newSite.name));
+      await tester.pumpAndSettle();
+
+      expect(repository.setSiteRouteId, 'r1');
+      expect(repository.setSiteId, 'site-2');
+      expect(repository.setSiteAnchor, const GeoPoint(47.2, 8.4));
+    });
+
+    testWidgets(
+      'creating a new site in the picker pushes /sites/new and assigns the '
+      'saved site to the route',
+      (tester) async {
+        final route = _route();
+        const newSite = DiveSite(
+          id: 'site-new',
+          name: 'Brand New Site',
+          location: GeoPoint(47.5, 8.6),
+        );
+        final router = GoRouter(
+          initialLocation: '/tracks/underwater/${route.id}',
+          routes: [
+            GoRoute(
+              path: '/tracks/underwater/:id',
+              builder: (context, state) =>
+                  NavTrackDetailPage(trackId: state.pathParameters['id']!),
+            ),
+            GoRoute(
+              path: '/sites/new',
+              builder: (context, state) => Scaffold(
+                body: TextButton(
+                  onPressed: () => context.pop(newSite.id),
+                  child: const Text('save new site'),
+                ),
+              ),
+            ),
+          ],
+        );
+        final repository = await _pump(
+          tester,
+          route: route,
+          router: router,
+          site: newSite,
+          allSites: const [],
+        );
+
+        await tester.tap(find.byKey(const ValueKey('nav-track-change-site')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('New Dive Site'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('save new site'), findsOneWidget);
+        await tester.tap(find.text('save new site'));
+        await tester.pumpAndSettle();
+
+        expect(repository.setSiteRouteId, 'r1');
+        expect(repository.setSiteId, 'site-new');
+        expect(repository.setSiteAnchor, const GeoPoint(47.5, 8.6));
+      },
+    );
+
+    testWidgets(
+      'creating a new site seeds the form with the route anchor and keeps a '
+      'hand-placed anchor',
+      (tester) async {
+        final route = _route(anchorLatitude: 47.3, anchorLongitude: 8.5);
+        const newSite = DiveSite(
+          id: 'site-new',
+          name: 'Brand New Site',
+          location: GeoPoint(47.3, 8.5),
+        );
+        Object? seededLocation;
+        final router = GoRouter(
+          initialLocation: '/tracks/underwater/${route.id}',
+          routes: [
+            GoRoute(
+              path: '/tracks/underwater/:id',
+              builder: (context, state) =>
+                  NavTrackDetailPage(trackId: state.pathParameters['id']!),
+            ),
+            GoRoute(
+              path: '/sites/new',
+              builder: (context, state) {
+                seededLocation = state.extra;
+                return Scaffold(
+                  body: TextButton(
+                    onPressed: () => context.pop(newSite.id),
+                    child: const Text('save new site'),
+                  ),
+                );
+              },
+            ),
+          ],
+        );
+        final repository = await _pump(
+          tester,
+          route: route,
+          router: router,
+          site: newSite,
+          allSites: const [],
+        );
+
+        await tester.tap(find.byKey(const ValueKey('nav-track-change-site')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('New Dive Site'));
+        await tester.pumpAndSettle();
+
+        expect(
+          seededLocation,
+          const NewSiteSeed(location: GeoPoint(47.3, 8.5)),
+        );
+        await tester.tap(find.text('save new site'));
+        await tester.pumpAndSettle();
+
+        // The anchor was placed by hand (no old site), so the site change
+        // must not rewrite it.
+        expect(repository.setSiteId, 'site-new');
+        expect(repository.setSiteAnchor, isNull);
+        expect(repository.setSiteClearAnchor, isFalse);
+      },
+    );
   });
 
   testWidgets('shows a loading indicator while the route resolves', (
@@ -339,7 +597,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Could not load this route.'), findsOneWidget);
+    expect(find.text('Could not load this track.'), findsOneWidget);
   });
 
   testWidgets('shows "Route not found" when the route no longer exists', (
@@ -361,7 +619,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Route not found.'), findsOneWidget);
+    expect(find.text('Track not found.'), findsOneWidget);
   });
 
   testWidgets('shows the "set start point" placeholder when unanchored', (
@@ -463,13 +721,13 @@ void main() {
             path: '/',
             builder: (context, state) => Scaffold(
               body: TextButton(
-                onPressed: () => context.push('/nav-routes/${route.id}'),
+                onPressed: () => context.push('/tracks/underwater/${route.id}'),
                 child: const Text('open'),
               ),
             ),
           ),
           GoRoute(
-            path: '/nav-routes/:id',
+            path: '/tracks/underwater/:id',
             builder: (context, state) =>
                 NavTrackDetailPage(trackId: state.pathParameters['id']!),
           ),
@@ -498,7 +756,7 @@ void main() {
       await tester.tap(find.text('Delete'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Delete route?'), findsOneWidget);
+      expect(find.text('Delete track?'), findsOneWidget);
       // Two "Delete" texts now exist: the dialog title's button and the
       // menu item underneath; tap the dialog's action explicitly.
       await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
@@ -514,20 +772,20 @@ void main() {
       final overrides = await getBaseOverrides();
       final route = _route();
       final router = GoRouter(
-        initialLocation: '/nav-routes/${route.id}',
+        initialLocation: '/tracks/underwater/${route.id}',
         routes: [
           GoRoute(
-            path: '/nav-routes/:id',
+            path: '/tracks/underwater/:id',
             builder: (context, state) =>
                 NavTrackDetailPage(trackId: state.pathParameters['id']!),
           ),
           GoRoute(
-            path: '/nav-routes/:id/align',
+            path: '/tracks/underwater/:id/align',
             builder: (context, state) =>
                 const Scaffold(body: Text('ALIGN_PAGE')),
           ),
           GoRoute(
-            path: '/nav-routes/:id/3d',
+            path: '/tracks/underwater/:id/3d',
             builder: (context, state) =>
                 const Scaffold(body: Text('SEASCAPE_PAGE')),
           ),
@@ -557,15 +815,15 @@ void main() {
       final overrides = await getBaseOverrides();
       final route = _route();
       final router = GoRouter(
-        initialLocation: '/nav-routes/${route.id}',
+        initialLocation: '/tracks/underwater/${route.id}',
         routes: [
           GoRoute(
-            path: '/nav-routes/:id',
+            path: '/tracks/underwater/:id',
             builder: (context, state) =>
                 NavTrackDetailPage(trackId: state.pathParameters['id']!),
           ),
           GoRoute(
-            path: '/nav-routes/:id/3d',
+            path: '/tracks/underwater/:id/3d',
             builder: (context, state) =>
                 const Scaffold(body: Text('SEASCAPE_PAGE')),
           ),
@@ -646,4 +904,29 @@ void main() {
       );
     });
   });
+
+  testWidgets(
+    'a track with no name or source file is titled Underwater track',
+    (tester) async {
+      await _pump(
+        tester,
+        route: NavTrack(
+          id: 'r1',
+          source: NavTrackSource.seacraftEnc,
+          startTime: 1755856800000,
+          endTime: 1755860400000,
+          pointCount: 0,
+          createdAt: DateTime(2026, 8, 22),
+          updatedAt: DateTime(2026, 8, 22),
+        ),
+      );
+      expect(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.text('Underwater track'),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
 }

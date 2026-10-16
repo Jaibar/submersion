@@ -18,12 +18,13 @@ void main() {
       ('buddies', '/buddies'),
       ('dive-centers', '/dive-centers'),
       ('certifications', '/certifications'),
+      ('documents', '/documents'),
       ('courses', '/courses'),
       ('species', '/species'),
       ('insights', '/insights'),
       ('planning', '/planning'),
       ('transfer', '/transfer'),
-      ('gps-log', '/gps-log'),
+      ('tracks', '/tracks'),
       ('settings', '/settings'),
     ];
     expect(rail.length, expected.length);

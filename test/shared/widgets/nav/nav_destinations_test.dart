@@ -11,7 +11,7 @@ void main() {
     });
 
     test('has exactly 17 entries (16 routable + more sentinel)', () {
-      expect(kNavDestinations.length, 17);
+      expect(kNavDestinations.length, 18);
     });
 
     test('exactly two entries are pinned (dashboard and more)', () {
@@ -43,15 +43,22 @@ void main() {
         'buddies',
         'dive-centers',
         'certifications',
+        'documents',
         'courses',
         'species',
         'insights',
         'planning',
         'transfer',
-        'gps-log',
+        'tracks',
         'settings',
         'more',
       ]);
+    });
+
+    test('Tracks takes GPS Log\'s place and route', () {
+      final tracks = kNavDestinations.firstWhere((d) => d.id == 'tracks');
+      expect(tracks.route, '/tracks');
+      expect(kNavDestinations.map((d) => d.id), isNot(contains('gps-log')));
     });
 
     test(
@@ -79,18 +86,19 @@ void main() {
         'buddies',
         'dive-centers',
         'certifications',
+        'documents',
         'courses',
         'species',
         'insights',
         'planning',
         'transfer',
-        'gps-log',
+        'tracks',
         'settings',
       ]);
     });
 
     test('has exactly 15 entries', () {
-      expect(movableNavIds.length, 15);
+      expect(movableNavIds.length, 16);
     });
 
     test('Connections lives in Insights, not in the nav', () {

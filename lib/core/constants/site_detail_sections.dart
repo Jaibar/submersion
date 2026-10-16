@@ -20,6 +20,10 @@ enum SiteDetailSectionId {
   diveStatistics,
   description,
   location,
+
+  /// The site's underwater terrain in 3D, inline. Declared right after
+  /// [location] so an order saved before this card existed gains it there.
+  seascape,
   depth,
   altitude,
   features,
@@ -32,7 +36,10 @@ enum SiteDetailSectionId {
   rating,
   hazards,
   access,
-  notes;
+  notes,
+
+  /// Documents filed under the site (issue #2613).
+  documents;
 
   /// Icon standing in for the card in the display-options menu and, in the
   /// list layout, on the card's folded header row.
@@ -41,6 +48,7 @@ enum SiteDetailSectionId {
       diveStatistics => Icons.scuba_diving,
       description => Icons.description_outlined,
       location => Icons.public,
+      seascape => Icons.view_in_ar,
       depth => Icons.vertical_align_bottom,
       altitude => Icons.terrain,
       features => Icons.place_outlined,
@@ -54,6 +62,7 @@ enum SiteDetailSectionId {
       hazards => Icons.warning_amber,
       access => Icons.directions,
       notes => Icons.notes,
+      documents => Icons.folder_copy_outlined,
     };
   }
 
@@ -63,6 +72,7 @@ enum SiteDetailSectionId {
       diveStatistics => l10n.diveSites_detail_section_divesAtSite,
       description => l10n.diveSites_detail_section_description,
       location => l10n.diveSites_detail_section_location,
+      seascape => l10n.dive3d_seascape_siteTitle,
       depth => l10n.diveSites_detail_section_depthRange,
       altitude => l10n.diveSites_detail_section_altitude,
       features => l10n.siteFeature_sectionTitle,
@@ -76,6 +86,7 @@ enum SiteDetailSectionId {
       hazards => l10n.diveSites_detail_section_hazards,
       access => l10n.diveSites_detail_section_access,
       notes => l10n.diveSites_detail_section_notes,
+      documents => l10n.documents_section_title,
     };
   }
 
@@ -85,6 +96,7 @@ enum SiteDetailSectionId {
       diveStatistics => l10n.siteDetailSection_diveStatistics_description,
       description => l10n.siteDetailSection_description_description,
       location => l10n.siteDetailSection_location_description,
+      seascape => l10n.siteDetailSection_seascape_description,
       depth => l10n.siteDetailSection_depth_description,
       altitude => l10n.siteDetailSection_altitude_description,
       features => l10n.siteDetailSection_features_description,
@@ -98,6 +110,7 @@ enum SiteDetailSectionId {
       hazards => l10n.siteDetailSection_hazards_description,
       access => l10n.siteDetailSection_access_description,
       notes => l10n.siteDetailSection_notes_description,
+      documents => l10n.siteDetailSection_documents_description,
     };
   }
 }
@@ -162,6 +175,7 @@ class SiteDetailSectionConfig {
     ),
     SiteDetailSectionConfig(id: SiteDetailSectionId.description, visible: true),
     SiteDetailSectionConfig(id: SiteDetailSectionId.location, visible: true),
+    SiteDetailSectionConfig(id: SiteDetailSectionId.seascape, visible: true),
     SiteDetailSectionConfig(id: SiteDetailSectionId.depth, visible: true),
     SiteDetailSectionConfig(id: SiteDetailSectionId.altitude, visible: true),
     SiteDetailSectionConfig(id: SiteDetailSectionId.features, visible: true),
@@ -175,6 +189,7 @@ class SiteDetailSectionConfig {
     SiteDetailSectionConfig(id: SiteDetailSectionId.hazards, visible: true),
     SiteDetailSectionConfig(id: SiteDetailSectionId.access, visible: true),
     SiteDetailSectionConfig(id: SiteDetailSectionId.notes, visible: true),
+    SiteDetailSectionConfig(id: SiteDetailSectionId.documents, visible: true),
   ];
 
   /// [sections] reordered as if [rendered] had its [oldIndex] entry dropped
