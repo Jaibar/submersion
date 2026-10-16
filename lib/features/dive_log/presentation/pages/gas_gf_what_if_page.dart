@@ -49,6 +49,12 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
   /// Null fields = as logged. Committed values; they key the analysis.
   GasGfOverrides _overrides = const GasGfOverrides();
 
+  /// The last finished what-if run. While a changed value re-runs the analysis
+  /// the provider has no value for its new key, and an empty page would shrink
+  /// the list and throw its scroll position back to the top, so the previous
+  /// result stays on screen until the new one arrives.
+  ProfileAnalysis? _lastWhatIf;
+
   /// Live slider positions while dragging; the analysis only re-runs on
   /// release.
   double? _dragO2;
@@ -76,7 +82,8 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
 
     final dive = diveAsync.value;
     final loggedAnalysis = logged.value;
-    final whatIfAnalysis = whatIf.value;
+    final whatIfAnalysis = whatIf.value ?? _lastWhatIf;
+    if (whatIf.value != null) _lastWhatIf = whatIf.value;
     final points = seriesAsync.value?.points;
 
     return Scaffold(
