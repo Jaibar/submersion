@@ -44,7 +44,7 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
   static const _o2Presets = [21.0, 28.0, 32.0, 36.0, 40.0];
 
   /// Height of the pinned depth/ceiling chart.
-  static const _ceilingHeight = 150.0;
+  static const _ceilingHeight = 120.0;
 
   /// Null fields = as logged. Committed values; they key the analysis.
   GasGfOverrides _overrides = const GasGfOverrides();
@@ -92,11 +92,11 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
                 // Pinned: the sliders and the depth/ceiling chart stay on screen
                 // together, so a GF or O2 change shows on the ceiling at once.
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
                   child: Column(
                     children: [
                       _controls(context, dive, loggedAnalysis),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 4),
                       if (whatIfAnalysis == null)
                         const SizedBox(
                           height: _ceilingHeight,
@@ -117,6 +117,8 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
                   child: ListView(
                     padding: const EdgeInsets.all(16),
                     children: [
+                      _loggedCaption(context, dive, loggedAnalysis),
+                      const SizedBox(height: 12),
                       if (whatIfAnalysis != null) ...[
                         _panels(
                           context,
@@ -190,47 +192,76 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
       required String suffix,
       required ValueChanged<double> onDrag,
       required ValueChanged<double> onEnd,
-    }) => Row(
-      children: [
-        SizedBox(width: 64, child: Text(label)),
-        Expanded(
-          child: Slider(
-            value: current.clamp(min, max),
-            min: min,
-            max: max,
-            divisions: (max - min).round(),
-            onChanged: onDrag,
-            onChangeEnd: onEnd,
+    }) => SizedBox(
+      height: 34,
+      child: Row(
+        children: [
+          SizedBox(width: 56, child: Text(label)),
+          Expanded(
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 3,
+                thumbShape: const RoundSliderThumbShape(
+                  enabledThumbRadius: 8,
+                ),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+              ),
+              child: Slider(
+                value: current.clamp(min, max),
+                min: min,
+                max: max,
+                divisions: (max - min).round(),
+                onChanged: onDrag,
+                onChangeEnd: onEnd,
+              ),
+            ),
           ),
-        ),
-        _ValueField(
-          value: current.round(),
-          min: min.round(),
-          max: max.round(),
-          suffix: suffix,
-          onCommit: (v) => onEnd(v.toDouble()),
-        ),
-      ],
+          _ValueField(
+            value: current.round(),
+            min: min.round(),
+            max: max.round(),
+            suffix: suffix,
+            onCommit: (v) => onEnd(v.toDouble()),
+          ),
+        ],
+      ),
     );
 
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 8, 4),
+        padding: const EdgeInsets.fromLTRB(12, 4, 8, 0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
                 Expanded(
-                  child: Text(
-                    '${l10n.diveLog_gasGfWhatIf_loggedLabel}: '
-                    'O2 ${loggedO2.round()}%, '
-                    'GF ${loggedLow.round()}/${loggedHigh.round()}',
-                    style: Theme.of(context).textTheme.bodySmall,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (final p in _o2Presets)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: ChoiceChip(
+                              visualDensity: VisualDensity.compact,
+                              materialTapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                              label: Text(p == 21 ? 'Air' : 'EAN${p.round()}'),
+                              selected: o2.round() == p.round(),
+                              onSelected: (_) => commitO2(p),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
                 TextButton(
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
                   onPressed: _overrides.isEmpty
                       ? null
                       : () =>
@@ -238,22 +269,6 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
                   child: Text(l10n.diveLog_gasGfWhatIf_reset),
                 ),
               ],
-            ),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  for (final p in _o2Presets)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(
-                        label: Text(p == 21 ? 'Air' : 'EAN${p.round()}'),
-                        selected: o2.round() == p.round(),
-                        onSelected: (_) => commitO2(p),
-                      ),
-                    ),
-                ],
-              ),
             ),
             slider(
               label: l10n.diveLog_gasGfWhatIf_o2Label,
@@ -282,13 +297,25 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
               onDrag: (v) => setState(() => _dragGfHigh = v),
               onEnd: (v) => commitGf(high: v),
             ),
-            Text(
-              l10n.diveLog_gasGfWhatIf_firstCylinderNote,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _loggedCaption(
+    BuildContext context,
+    Dive dive,
+    ProfileAnalysis loggedAnalysis,
+  ) {
+    final l10n = context.l10n;
+    final loggedO2 = firstTank(dive)?.gasMix.o2 ?? 21.0;
+    final low = (loggedAnalysis.gfSource?.low ?? 30).round();
+    final high = (loggedAnalysis.gfSource?.high ?? 70).round();
+    return Text(
+      '${l10n.diveLog_gasGfWhatIf_loggedLabel}: O2 ${loggedO2.round()}%, '
+      'GF $low/$high. ${l10n.diveLog_gasGfWhatIf_firstCylinderNote}',
+      style: Theme.of(context).textTheme.bodySmall,
     );
   }
 
@@ -421,15 +448,10 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              context.l10n.diveLog_gasGfWhatIf_ceilingTitle,
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
-            const SizedBox(height: 4),
             GasGfCeilingChart(
               profile: points,
               loggedCeiling: loggedAnalysis.ceilingCurve,
@@ -669,7 +691,8 @@ class _ValueFieldState extends State<_ValueField> {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 68,
+      width: 64,
+      height: 30,
       child: TextField(
         controller: _controller,
         focusNode: _focus,
@@ -678,6 +701,10 @@ class _ValueFieldState extends State<_ValueField> {
         inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         decoration: InputDecoration(
           isDense: true,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 6,
+            vertical: 6,
+          ),
           suffixText: widget.suffix.isEmpty ? null : widget.suffix,
           border: const OutlineInputBorder(),
         ),
