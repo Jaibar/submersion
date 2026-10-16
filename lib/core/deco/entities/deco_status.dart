@@ -51,6 +51,7 @@ class DecoStatus extends Equatable {
   /// mid-dive state (`BuhlmannAlgorithm.restoreState`). Null when the status
   /// was not produced by a profile walk (hand-built statuses, older callers).
   final double? gfLowCeilingAnchor;
+
   /// Inspired N2 partial pressure in bar (alveolar, after water vapour) of the
   /// gas being breathed at this instant, or null when unknown. On a rebreather
   /// this is the loop's, not the diluent's at ambient.
