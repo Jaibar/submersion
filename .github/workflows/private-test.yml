@@ -49,6 +49,7 @@ jobs:
       - name: Format and commit back to the branch
         shell: bash
         run: |
+          flutter gen-l10n
           dart format lib test
           if [ -n "$(git status --porcelain lib test)" ]; then
             git config user.name "github-actions"
