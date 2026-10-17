@@ -53572,4 +53572,8 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'العناصر المضمنة المخفية';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'تتجاوز المنطقة خط التاريخ الدولي. ابقَ في جانب واحد أو ارسم منطقتين.';
 }

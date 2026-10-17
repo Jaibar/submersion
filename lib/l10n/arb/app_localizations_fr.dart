@@ -53034,4 +53034,8 @@ class AppLocalizationsFr extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'Entrées intégrées masquées';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'La zone traverse la ligne de changement de date. Restez d\'un seul côté ou dessinez deux zones.';
 }

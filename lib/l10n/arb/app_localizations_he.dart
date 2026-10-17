@@ -51817,4 +51817,8 @@ class AppLocalizationsHe extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'פריטים מובנים מוסתרים';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'האזור חוצה את קו התאריך. הישאר בצד אחד או צייר שני אזורים.';
 }

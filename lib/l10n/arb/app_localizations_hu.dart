@@ -52643,4 +52643,8 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'Elrejtett beépített elemek';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'A terület átlépi a dátumválasztó vonalat. Maradjon az egyik oldalon, vagy rajzoljon két területet.';
 }

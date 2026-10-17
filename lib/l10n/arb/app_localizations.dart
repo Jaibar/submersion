@@ -84071,6 +84071,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Hidden built-in entries'**
   String get settings_conflict_field_hiddenBuiltInIds;
+
+  /// No description provided for @maps_regionSelector_dateLine.
+  ///
+  /// In en, this message translates to:
+  /// **'The box crosses the date line. Keep it on one side, or draw two boxes.'**
+  String get maps_regionSelector_dateLine;
 }
 
 class _AppLocalizationsDelegate

@@ -52582,4 +52582,8 @@ class AppLocalizationsNl extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'Verborgen ingebouwde items';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'Het gebied overschrijdt de datumgrens. Blijf aan één kant of teken twee gebieden.';
 }

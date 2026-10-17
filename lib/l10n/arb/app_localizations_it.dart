@@ -52918,4 +52918,8 @@ class AppLocalizationsIt extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'Voci integrate nascoste';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'L\'area attraversa la linea del cambio di data. Restane su un lato o disegna due aree.';
 }

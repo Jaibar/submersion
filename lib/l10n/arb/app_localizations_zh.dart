@@ -49718,4 +49718,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settings_conflict_field_hiddenBuiltInIds => '已隐藏的内置项目';
+
+  @override
+  String get maps_regionSelector_dateLine => '该区域跨越了国际日期变更线。请保持在一侧，或分别绘制两个区域。';
 }

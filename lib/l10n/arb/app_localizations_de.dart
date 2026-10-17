@@ -52805,4 +52805,8 @@ class AppLocalizationsDe extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'Ausgeblendete integrierte Einträge';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'Der Bereich überschreitet die Datumsgrenze. Bleiben Sie auf einer Seite oder zeichnen Sie zwei Bereiche.';
 }

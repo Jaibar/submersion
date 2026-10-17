@@ -52966,4 +52966,8 @@ class AppLocalizationsEs extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'Entradas integradas ocultas';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'El área cruza la línea de fecha. Mantenla a un lado o dibuja dos áreas.';
 }

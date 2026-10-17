@@ -52097,4 +52097,8 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get settings_conflict_field_hiddenBuiltInIds =>
       'Hidden built-in entries';
+
+  @override
+  String get maps_regionSelector_dateLine =>
+      'The box crosses the date line. Keep it on one side, or draw two boxes.';
 }
