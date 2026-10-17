@@ -46,7 +46,7 @@ import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
 import 'package:submersion/features/maps/presentation/widgets/locked_map_scroll_passthrough.dart';
 import 'package:submersion/features/maps/presentation/providers/map_tile_providers.dart';
 import 'package:submersion/features/maps/presentation/widgets/map_attribution.dart';
-import 'package:submersion/features/maps/presentation/widgets/map_style_button.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_corner_controls.dart';
 import 'package:submersion/features/maps/presentation/widgets/trackpad_zoom_map.dart';
 import 'package:submersion/features/marine_life/presentation/widgets/site_marine_life_section.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -1015,7 +1015,6 @@ class _SiteDetailContentState extends ConsumerState<_SiteDetailContent> {
                 ],
               ),
             ),
-            const Positioned(right: 48, top: 8, child: MapStyleButton()),
             Positioned(
               right: 8,
               top: 8,
@@ -1041,6 +1040,8 @@ class _SiteDetailContentState extends ConsumerState<_SiteDetailContent> {
                 ),
               ),
             ),
+            // Map style switcher, below the fullscreen button.
+            const Positioned(right: 8, top: 48, child: MapCornerControls()),
           ],
         ),
       ),
@@ -2377,12 +2378,15 @@ class _FullscreenSiteScapePageState
                 ],
               ),
             ),
-            const Positioned(right: 8, top: 8, child: MapStyleButton()),
+            // Map style switcher. No compass: this map does not rotate.
+            const Positioned(top: 8, right: 8, child: MapCornerControls()),
+            // Stops short of the right edge so the style switcher stays
+            // reachable while placing a feature.
             if (_placing)
               Positioned(
                 top: 8,
                 left: 56,
-                right: 52,
+                right: 60,
                 child: Material(
                   key: const ValueKey('siteFeaturePlaceBanner'),
                   color: colorScheme.secondaryContainer,

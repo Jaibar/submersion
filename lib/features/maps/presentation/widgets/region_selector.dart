@@ -1,47 +1,46 @@
-import 'dart:math' as math;
-
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' hide Path;
+import 'package:submersion/features/maps/domain/map_utils.dart';
+import 'package:submersion/features/maps/presentation/widgets/region_selection.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Callback for when a region is selected.
 typedef RegionSelectedCallback =
     void Function(LatLng southWest, LatLng northEast);
 
-/// Widget for selecting a rectangular region on a map.
+/// The gesture layer and the action buttons for choosing a rectangle on a map.
+///
+/// The rectangle itself is [selection]: this widget changes it, and
+/// [RegionSelectionLayer] draws it inside the map.
 ///
 /// Two modes, switched by [selecting]:
 /// - Select (true): a drag on the map draws a new rectangle, unless it starts
 ///   on one of the rectangle's four corner handles, in which case that corner
-///   follows the finger and the opposite corner stays put. The drawing layer
+///   follows the finger and the opposite corner stays put. The gesture layer
 ///   sits above the map, so the map itself cannot be panned in this mode.
+/// - Move (false): the gesture layer is removed, so drags and pinches reach the
+///   map and it can be panned and zoomed. The rectangle stays drawn and follows
+///   the map.
 ///
 /// Mouse: the cursor turns into a crosshair in select mode and into a grab hand
 /// over a corner handle, the corner grab area is smaller for a mouse than for a
 /// finger, and the middle button pans the map even in select mode.
-///
-/// - Move (false): the drawing layer is removed, so drags and pinches reach the
-///   map and it can be panned and zoomed. The rectangle stays drawn and follows
-///   the map (it is stored as coordinates, and [cameraTick] makes it repaint).
 class RegionSelector extends StatefulWidget {
   final MapController mapController;
+  final RegionSelection selection;
   final RegionSelectedCallback? onRegionSelected;
   final VoidCallback? onCancel;
   final bool selecting;
 
-  /// Changes whenever the map camera moves, so the rectangle is repainted at
-  /// its new screen position.
-  final int cameraTick;
-
   const RegionSelector({
     super.key,
     required this.mapController,
+    required this.selection,
     this.onRegionSelected,
     this.onCancel,
     this.selecting = true,
-    this.cameraTick = 0,
   });
 
   @override
@@ -57,51 +56,72 @@ class _RegionSelectorState extends State<RegionSelector> {
   /// it impossible to start a new rectangle near an existing corner.
   static const double _cornerGrabRadiusMouse = 14;
 
-  LatLng? _startPoint;
-  LatLng? _endPoint;
   bool _isDragging = false;
 
   /// Mouse is over a corner handle (changes the cursor to a grab hand).
   bool _hoverCorner = false;
 
   /// The middle mouse button is held and moving: pan the map by hand, because
-  /// the drawing layer above the map takes the primary-button drags.
+  /// the gesture layer above the map takes the primary-button drags.
   bool _middlePanning = false;
 
-  LatLng? get _southWest {
-    if (_startPoint == null || _endPoint == null) return null;
+  RegionSelection get _selection => widget.selection;
+
+  /// The map position under [offset], with a longitude that keeps counting
+  /// past +-180.
+  ///
+  /// The map repeats the world, and the camera's own conversion
+  /// (`screenOffsetToLatLng`) clamps the longitude at +-180, so a point on
+  /// another copy of the world would collapse onto the date line. The
+  /// longitude is worked out from the world pixel instead, so a rectangle
+  /// drawn on any copy, or across the date line, has the longitudes it shows;
+  /// `clampRegionToWorld` brings it back into one world when it is reported.
+  LatLng _latLngAt(Offset offset) {
+    final camera = widget.mapController.camera;
+    final worldWidth = camera.getWorldWidthAtZoom(camera.zoom);
+    final x =
+        camera.projectAtZoom(camera.center).dx +
+        (offset.dx - camera.nonRotatedSize.width / 2);
     return LatLng(
-      math.min(_startPoint!.latitude, _endPoint!.latitude),
-      math.min(_startPoint!.longitude, _endPoint!.longitude),
+      camera.screenOffsetToLatLng(offset).latitude,
+      x / worldWidth * 360 - 180,
     );
   }
 
-  LatLng? get _northEast {
-    if (_startPoint == null || _endPoint == null) return null;
-    return LatLng(
-      math.max(_startPoint!.latitude, _endPoint!.latitude),
-      math.max(_startPoint!.longitude, _endPoint!.longitude),
-    );
-  }
-
-  /// The four corners as (corner, opposite corner) pairs. Dragging a corner
-  /// keeps its opposite fixed, whichever way the rectangle is then pulled.
-  List<(LatLng, LatLng)> _cornerPairs() {
-    final sw = _southWest!;
-    final ne = _northEast!;
+  /// The four corners as (corner, opposite corner) pairs, each moved by whole
+  /// worlds so that it sits on the copy of the world nearest the screen
+  /// position [near]. Dragging a corner keeps its opposite fixed, whichever
+  /// way the rectangle is then pulled.
+  List<(LatLng, LatLng)> _cornerPairs(Offset near) {
+    final camera = widget.mapController.camera;
+    final worldWidth = camera.getWorldWidthAtZoom(camera.zoom);
+    final sw = _selection.southWest!;
+    final ne = _selection.northEast!;
     final nw = LatLng(ne.latitude, sw.longitude);
     final se = LatLng(sw.latitude, ne.longitude);
-    return [(sw, ne), (ne, sw), (nw, se), (se, nw)];
+
+    (LatLng, LatLng) onNearestWorld((LatLng, LatLng) pair) {
+      final x = camera.latLngToScreenOffset(pair.$1).dx;
+      final worlds = ((near.dx - x) / worldWidth).round();
+      LatLng shift(LatLng p) =>
+          LatLng(p.latitude, p.longitude + 360.0 * worlds);
+      return (shift(pair.$1), shift(pair.$2));
+    }
+
+    return [
+      for (final pair in [(sw, ne), (ne, sw), (nw, se), (se, nw)])
+        onNearestWorld(pair),
+    ];
   }
 
   /// The corner pair whose handle is nearest [localPos] and within the grab
   /// radius, or null when the press is not on a handle.
   (LatLng, LatLng)? _cornerNear(Offset localPos, double radius) {
-    if (_southWest == null || _northEast == null) return null;
+    if (!_selection.hasSelection) return null;
     final camera = widget.mapController.camera;
     (LatLng, LatLng)? best;
     var bestDistance = radius;
-    for (final pair in _cornerPairs()) {
+    for (final pair in _cornerPairs(localPos)) {
       final distance =
           (camera.latLngToScreenOffset(pair.$1) - localPos).distance;
       if (distance <= bestDistance) {
@@ -119,30 +139,24 @@ class _RegionSelectorState extends State<RegionSelector> {
         ? _cornerGrabRadiusMouse
         : _cornerGrabRadius;
     final corner = _cornerNear(localPos, radius);
-    setState(() {
-      if (corner != null) {
-        // Grab the corner where it is (no jump), pinned to its opposite.
-        _startPoint = corner.$2;
-        _endPoint = corner.$1;
-      } else {
-        final point = widget.mapController.camera.screenOffsetToLatLng(
-          localPos,
-        );
-        _startPoint = point;
-        _endPoint = point;
-      }
-      _isDragging = true;
-    });
+    if (corner != null) {
+      // Grab the corner where it is (no jump), pinned to its opposite.
+      _selection.grab(fixed: corner.$2, moving: corner.$1);
+    } else {
+      _selection.begin(_latLngAt(localPos));
+    }
+    _isDragging = true;
   }
 
   void _onPanUpdate(DragUpdateDetails details) {
     if (!_isDragging) return;
     final renderBox = context.findRenderObject() as RenderBox;
     final localPos = renderBox.globalToLocal(details.globalPosition);
-    final point = widget.mapController.camera.screenOffsetToLatLng(localPos);
-    setState(() {
-      _endPoint = point;
-    });
+    _selection.moveTo(_latLngAt(localPos));
+  }
+
+  void _onPanEnd(DragEndDetails details) {
+    _isDragging = false;
   }
 
   void _onHover(PointerHoverEvent event) {
@@ -172,44 +186,30 @@ class _RegionSelectorState extends State<RegionSelector> {
     _middlePanning = false;
   }
 
-  void _onPanEnd(DragEndDetails details) {
-    setState(() {
-      _isDragging = false;
-    });
-  }
-
   void _confirmSelection() {
-    if (_southWest != null && _northEast != null) {
-      widget.onRegionSelected?.call(_southWest!, _northEast!);
-    }
+    if (!_selection.hasSelection) return;
+    final region = clampRegionToWorld(
+      _selection.southWest!,
+      _selection.northEast!,
+    );
+    // A box across the date line is not downloadable as drawn; the button is
+    // disabled for it, this only guards the call.
+    if (region.crossesDateLine) return;
+    widget.onRegionSelected?.call(region.southWest, region.northEast);
   }
 
   void _clearSelection() {
-    setState(() {
-      _startPoint = null;
-      _endPoint = null;
-    });
+    _selection.clear();
     widget.onCancel?.call();
   }
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final hasSelection = _southWest != null && _northEast != null;
     final l10n = context.l10n;
-
-    final String instruction;
-    if (!widget.selecting) {
-      instruction = l10n.maps_regionSelector_dragToMove;
-    } else if (hasSelection) {
-      instruction = l10n.maps_regionSelector_dragToAdjust;
-    } else {
-      instruction = l10n.maps_regionSelector_dragToSelect;
-    }
 
     return Stack(
       children: [
-        // Drawing layer: only in select mode, otherwise it would swallow the
+        // Gesture layer: only in select mode, otherwise it would swallow the
         // drags the map needs for panning.
         if (widget.selecting)
           Positioned.fill(
@@ -236,143 +236,38 @@ class _RegionSelectorState extends State<RegionSelector> {
             ),
           ),
 
-        // Selection rectangle overlay. IgnorePointer: it is only a picture and
-        // must never block touches meant for the map or the drawing layer.
-        if (hasSelection)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: _SelectionPainter(
-                  southWest: _southWest!,
-                  northEast: _northEast!,
-                  mapController: widget.mapController,
-                  color: colorScheme.primary,
-                  cameraTick: widget.cameraTick,
-                ),
-              ),
-            ),
-          ),
-
-        // Instructions overlay
-        Positioned(
-          top: 16,
-          left: 16,
-          right: 16,
-          child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Icon(Icons.touch_app, color: colorScheme.primary),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      instruction,
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-
         // Action buttons
         Positioned(
           bottom: 24,
           left: 16,
           right: 16,
-          child: Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _clearSelection,
-                  child: Text(context.l10n.common_action_cancel),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: FilledButton(
-                  onPressed: hasSelection ? _confirmSelection : null,
-                  child: Text(
-                    context.l10n.maps_regionSelector_selectRegionButton,
+          child: ListenableBuilder(
+            listenable: _selection,
+            builder: (context, _) => Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: _clearSelection,
+                    child: Text(context.l10n.common_action_cancel),
                   ),
                 ),
-              ),
-            ],
+                const SizedBox(width: 16),
+                Expanded(
+                  child: FilledButton(
+                    onPressed:
+                        _selection.hasSelection && !_selection.crossesDateLine
+                        ? _confirmSelection
+                        : null,
+                    child: Text(
+                      context.l10n.maps_regionSelector_selectRegionButton,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ],
     );
-  }
-}
-
-/// Painter for the selection rectangle.
-class _SelectionPainter extends CustomPainter {
-  final LatLng southWest;
-  final LatLng northEast;
-  final MapController mapController;
-  final Color color;
-  final int cameraTick;
-
-  _SelectionPainter({
-    required this.southWest,
-    required this.northEast,
-    required this.mapController,
-    required this.color,
-    required this.cameraTick,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final camera = mapController.camera;
-
-    final swPoint = camera.latLngToScreenOffset(southWest);
-    final nePoint = camera.latLngToScreenOffset(northEast);
-
-    final rect = Rect.fromPoints(
-      Offset(swPoint.dx, nePoint.dy),
-      Offset(nePoint.dx, swPoint.dy),
-    );
-
-    // Fill
-    final fillPaint = Paint()
-      ..color = color.withValues(alpha: 0.2)
-      ..style = PaintingStyle.fill;
-    canvas.drawRect(rect, fillPaint);
-
-    // Border
-    final borderPaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3;
-    canvas.drawRect(rect, borderPaint);
-
-    // Corner handles: drawn large with a white ring so they read as grabbable.
-    final handlePaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill;
-    final ringPaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
-    const handleRadius = 9.0;
-
-    for (final corner in [
-      rect.topLeft,
-      rect.topRight,
-      rect.bottomLeft,
-      rect.bottomRight,
-    ]) {
-      canvas.drawCircle(corner, handleRadius, handlePaint);
-      canvas.drawCircle(corner, handleRadius, ringPaint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _SelectionPainter oldDelegate) {
-    return southWest != oldDelegate.southWest ||
-        northEast != oldDelegate.northEast ||
-        cameraTick != oldDelegate.cameraTick;
   }
 }
