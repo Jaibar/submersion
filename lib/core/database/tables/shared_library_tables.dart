@@ -46,6 +46,13 @@ class SharedLibraries extends Table {
   TextColumn get spareKeyId => text().nullable()();
   TextColumn get spareKey => text().nullable()();
 
+  /// The library's description from its `info.json` (issue #3389).
+  TextColumn get description => text().nullable()();
+
+  /// The owner-signed member removals last read from the folder (issue
+  /// #3481), as a JSON list; only records an owner's key verified.
+  TextColumn get removalsJson => text().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }

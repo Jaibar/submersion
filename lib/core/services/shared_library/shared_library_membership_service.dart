@@ -11,6 +11,7 @@ import 'package:submersion/core/services/shared_library/crypto/library_cipher.da
 import 'package:submersion/core/services/shared_library/crypto/library_recovery.dart';
 import 'package:submersion/core/services/shared_library/crypto/library_signer.dart';
 import 'package:submersion/core/services/shared_library/crypto/roles_trust.dart';
+import 'package:submersion/core/services/shared_library/member_removal.dart';
 import 'package:submersion/core/services/sync/crypto/keyslots.dart';
 import 'package:submersion/core/services/shared_library/shared_library_membership_errors.dart';
 import 'package:submersion/core/services/shared_library/shared_library_models.dart';
@@ -143,16 +144,18 @@ class SharedLibraryMembershipService with _MembershipOwnership {
     required String secret,
   }) async {
     final t = await _transportFor(account: account, prefix: prefix);
-    final found = await _probeWith(t);
+    final found = await probeWith(t);
     if (!found.encrypted) return found;
     await _unlock(t, secret);
+    final details = await t.readDetails();
     return LibraryProbe(
       exists: true,
       id: found.id,
-      name: await t.readName(),
+      name: details?.name,
       formatVersion: found.formatVersion,
       encrypted: true,
       keyId: found.keyId,
+      description: details?.description,
     );
   }
 
@@ -184,9 +187,11 @@ class SharedLibraryMembershipService with _MembershipOwnership {
   Future<LibraryProbe> probe({
     required domain.ConnectedAccount account,
     required String prefix,
-  }) async => _probeWith(await _transportFor(account: account, prefix: prefix));
+  }) async => probeWith(await _transportFor(account: account, prefix: prefix));
 
-  static Future<LibraryProbe> _probeWith(SharedLibraryTransport t) async {
+  /// What the folder [t] reaches holds, read from its manifest (and its
+  /// `info.json` when readable).
+  static Future<LibraryProbe> probeWith(SharedLibraryTransport t) async {
     final manifest = await t.readManifest();
     if (manifest == null) return const LibraryProbe(exists: false);
     final version = (manifest['formatVersion'] as num?)?.toInt() ?? 1;
@@ -196,8 +201,11 @@ class SharedLibraryMembershipService with _MembershipOwnership {
       final String n => n,
       _ => null,
     };
+    String? description;
     if (version >= SharedLibraryLayout.minFormatVersion && !encrypted) {
-      name = await t.readName() ?? name;
+      final details = await t.readDetails();
+      name = details?.name ?? name;
+      description = details?.description;
     }
     return LibraryProbe(
       exists: true,
@@ -206,6 +214,7 @@ class SharedLibraryMembershipService with _MembershipOwnership {
       formatVersion: version,
       encrypted: encrypted,
       keyId: keyId is String ? keyId : null,
+      description: description,
     );
   }
 
@@ -316,7 +325,7 @@ class SharedLibraryMembershipService with _MembershipOwnership {
   }) async {
     // One transport for the whole join: each resolves its folders afresh.
     final t = await _transportFor(account: account, prefix: prefix);
-    final found = await _probeWith(t);
+    final found = await probeWith(t);
     final cipher = found.encrypted ? await _unlock(t, secret) : null;
     if (!found.exists ||
         found.id == null ||
@@ -387,6 +396,8 @@ class SharedLibraryMembershipService with _MembershipOwnership {
       lastAutoBackupAt: held?.lastAutoBackupAt,
       encrypted: found.encrypted,
       keyId: cipher?.keyId,
+      // As the probe read it; a sealed one comes with the first sync.
+      description: found.description ?? held?.description,
     );
     // Connecting on another device finds the profile's membership already
     // synced in: keep its id, or the profile ends up with two and leaving
@@ -703,6 +714,7 @@ class SharedLibraryMembershipService with _MembershipOwnership {
       roles: signed,
       rolesRejected: false,
     );
+    await _carryRemovals(library.id, t, trusted, signed, signer, signingKey);
     // As when a sync takes new roles: an approval makes held edits count,
     // a rejection makes them repair, so documents already read are read
     // again (the next sync finds these roles already trusted).
@@ -714,6 +726,7 @@ class SharedLibraryMembershipService with _MembershipOwnership {
 
   /// The signing key of the local profile that is [memberId] in
   /// [libraryId].
+  @override
   Future<LibrarySigningKey> _keyOfMember(
     String libraryId,
     String memberId,

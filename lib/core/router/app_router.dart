@@ -28,7 +28,9 @@ import 'package:submersion/features/setup_wizard/presentation/pages/setup_wizard
 import 'package:submersion/features/buddies/presentation/pages/buddy_detail_page.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_edit_page.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_merge_page.dart';
-import 'package:submersion/features/certifications/presentation/pages/certification_list_page.dart';
+import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
+import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
+import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
 import 'package:submersion/features/documents/domain/entities/document.dart';
 import 'package:submersion/features/documents/presentation/pages/document_detail_page.dart';
 import 'package:submersion/features/documents/presentation/pages/document_edit_page.dart';
@@ -42,7 +44,6 @@ import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_session
 import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_sessions_page.dart';
 import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_template_edit_page.dart';
 import 'package:submersion/features/pre_dive/presentation/pages/pre_dive_templates_page.dart';
-import 'package:submersion/features/courses/presentation/pages/course_list_page.dart';
 import 'package:submersion/features/courses/presentation/pages/course_detail_page.dart';
 import 'package:submersion/features/courses/presentation/pages/course_edit_page.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_detail_page.dart';
@@ -111,6 +112,7 @@ import 'package:submersion/features/backup/presentation/pages/backup_settings_pa
 import 'package:submersion/features/settings/presentation/pages/manage_currency_rules_page.dart';
 import 'package:submersion/features/settings/presentation/pages/hidden_items_page.dart';
 import 'package:submersion/features/settings/presentation/pages/cloud_sync_page.dart';
+import 'package:submersion/features/shared_library/presentation/pages/change_library_connection_page.dart';
 import 'package:submersion/features/shared_library/presentation/pages/connect_shared_library_page.dart';
 import 'package:submersion/features/shared_library/presentation/pages/library_backups_page.dart';
 import 'package:submersion/features/shared_library/presentation/pages/shared_libraries_page.dart';
@@ -153,6 +155,8 @@ import 'package:submersion/features/settings/presentation/pages/safety_review_se
 import 'package:submersion/features/settings/presentation/pages/language_settings_page.dart';
 import 'package:submersion/features/settings/presentation/pages/nav_customization_page.dart';
 import 'package:submersion/features/settings/presentation/pages/theme_gallery_page.dart';
+import 'package:submersion/features/settings/presentation/pages/data_tools_page.dart';
+import 'package:submersion/features/settings/presentation/pages/import_options_page.dart';
 import 'package:submersion/features/settings/presentation/pages/storage_settings_page.dart';
 import 'package:submersion/features/backup/presentation/pages/unrecognized_backups_page.dart';
 import 'package:submersion/features/settings/presentation/pages/storage_usage_page.dart';
@@ -191,6 +195,8 @@ import 'package:submersion/features/nav_track/presentation/pages/nav_track_detai
 import 'package:submersion/features/nav_track/presentation/pages/nav_track_seascape_page.dart';
 import 'package:submersion/features/gps_log/presentation/pages/gps_track_detail_page.dart';
 import 'package:submersion/core/router/track_locations.dart';
+import 'package:submersion/core/router/training_locations.dart';
+import 'package:submersion/features/training/presentation/pages/training_page.dart';
 import 'package:submersion/features/tracks/domain/track_kind.dart';
 import 'package:submersion/features/tracks/presentation/pages/tracks_map_page.dart';
 import 'package:submersion/features/tracks/presentation/pages/tracks_page.dart';
@@ -216,6 +222,8 @@ import 'package:submersion/features/import_wizard/data/adapters/garmin_cloud_ada
 import 'package:submersion/features/import_wizard/data/adapters/suunto_cloud_adapter.dart';
 import 'package:submersion/features/import_wizard/data/adapters/suunto_file_adapter.dart';
 import 'package:submersion/core/services/suunto_cloud/suunto_json_file_reader.dart';
+import 'package:submersion/features/import_wizard/data/adapters/suunto_buddy_writer.dart';
+import 'package:submersion/features/import_wizard/data/adapters/suunto_journal_writer.dart';
 import 'package:submersion/features/import_wizard/data/adapters/suunto_route_writer.dart';
 import 'package:submersion/features/nav_track/presentation/providers/nav_track_providers.dart';
 import 'package:submersion/features/dashboard/presentation/pages/dashboard_page.dart';
@@ -829,13 +837,21 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             ],
           ),
 
+          // Training is the nav entry for the Certifications and Courses
+          // tabs (#3437); its own address opens Certifications.
+          GoRoute(
+            path: kTrainingLocation,
+            redirect: (_, _) => TrainingTab.certifications.path,
+          ),
+
           // Certifications
           GoRoute(
             path: '/certifications',
             name: 'certifications',
-            pageBuilder: (context, state) => NoTransitionPage(
-              key: state.pageKey,
-              child: const CertificationListPage(),
+            // Both Training tabs build one host under one page key, so it
+            // stays mounted across a switch (#3437).
+            pageBuilder: (context, state) => trainingHostPage(
+              const TrainingPage(tab: TrainingTab.certifications),
             ),
             routes: [
               GoRoute(
@@ -917,14 +933,12 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             ],
           ),
 
-          // Training Courses
+          // Training Courses, the second Training tab
           GoRoute(
             path: '/courses',
             name: 'courses',
-            pageBuilder: (context, state) => NoTransitionPage(
-              key: state.pageKey,
-              child: const CourseListPage(),
-            ),
+            pageBuilder: (context, state) =>
+                trainingHostPage(const TrainingPage(tab: TrainingTab.courses)),
             routes: [
               GoRoute(
                 path: 'new',
@@ -1350,6 +1364,16 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 builder: (context, state) => const StorageSettingsPage(),
               ),
               GoRoute(
+                path: 'import-options',
+                name: 'importOptions',
+                builder: (context, state) => const ImportOptionsPage(),
+              ),
+              GoRoute(
+                path: 'data-tools',
+                name: 'dataTools',
+                builder: (context, state) => const DataToolsPage(),
+              ),
+              GoRoute(
                 path: 'storage-usage',
                 name: 'storageUsage',
                 builder: (context, state) => const StorageUsagePage(),
@@ -1585,6 +1609,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                         builder: (context, state) => LibraryBackupsPage(
                           libraryId: state.pathParameters['libraryId']!,
                         ),
+                      ),
+                      GoRoute(
+                        path: 'connection',
+                        name: 'sharedLibraryConnection',
+                        builder: (context, state) =>
+                            ChangeLibraryConnectionPage(
+                              libraryId: state.pathParameters['libraryId']!,
+                            ),
                       ),
                     ],
                   ),
@@ -2246,6 +2278,14 @@ class _SuuntoCloudImportWizardRoute extends ConsumerWidget {
         diverId: diverId,
         routeWriter: SuuntoRouteWriter(
           repository: ref.watch(navTrackRepositoryProvider),
+        ),
+        buddyWriter: SuuntoBuddyWriter(
+          repository: ref.watch(buddyRepositoryProvider),
+        ),
+        journalWriter: SuuntoJournalWriter(
+          centers: ref.watch(diveCenterRepositoryProvider),
+          dives: diveRepo,
+          species: ref.watch(speciesRepositoryProvider),
         ),
         ref: ref,
       ),

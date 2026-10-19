@@ -37,7 +37,9 @@ class _FakeMembershipService extends SharedLibraryMembershipService {
   Future<LibraryProbe> probe({
     required ConnectedAccount account,
     required String prefix,
-  }) async => probes[prefix] ?? const LibraryProbe(exists: false);
+  }) async => prefix == 'boom'
+      ? throw const CloudStorageException('probe failed')
+      : probes[prefix] ?? const LibraryProbe(exists: false);
 
   /// A library made by Create; null refuses it as already there.
   CreatedLibrary? created;
@@ -229,6 +231,55 @@ void main() {
     );
   });
 
+  testWidgets('the join preview shows the library description', (tester) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: [
+          ...await getBaseOverrides(),
+          eligibleLibraryAccountsProvider.overrideWith(
+            (ref) async => [_bucket()],
+          ),
+          sharedLibraryMembershipServiceProvider.overrideWithValue(
+            _FakeMembershipService(const {
+              'site-sync': LibraryProbe(
+                exists: true,
+                id: 'L',
+                name: 'Reef Survey',
+                description: 'Sites our group dives',
+              ),
+            }),
+          ),
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => 'd'),
+          currentDiverProvider.overrideWith((ref) async => null),
+        ],
+        locale: const Locale('en'),
+        child: const ConnectSharedLibraryPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('library-prefix')),
+      'site-sync',
+    );
+    await tester.tap(find.text('Check'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sites our group dives'), findsOneWidget);
+  });
+
+  testWidgets('editing the location clears an earlier error', (tester) async {
+    await tester.pumpWidget(
+      _connectApp(await getBaseOverrides(), () => [_bucket()]),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('library-prefix')), 'boom');
+    await tester.tap(find.text('Check'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('probe failed'), findsOneWidget);
+    await tester.enterText(find.byKey(const Key('library-prefix')), 'reef');
+    await tester.pumpAndSettle();
+    expect(find.textContaining('probe failed'), findsNothing);
+  });
+
   testWidgets('without an eligible account the hint shows', (tester) async {
     await tester.pumpWidget(
       testApp(
@@ -320,10 +371,8 @@ void main() {
 
     expect(setup.s3.single.bucket, 'submersion-sync');
     expect(setup.folders, ['reef']);
-    expect(
-      find.text('submersion-sync @ s3.eu-west-1.amazonaws.com'),
-      findsOneWidget,
-    );
+    // The picker names the account by its short name (issue #3522).
+    expect(find.text('submersion-sync @ Amazon S3'), findsOneWidget);
     expect(find.byKey(const Key('library-prefix')), findsOneWidget);
     expect(find.text('Save account'), findsNothing);
   });
