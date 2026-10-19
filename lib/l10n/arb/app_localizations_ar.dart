@@ -2505,9 +2505,6 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String get backup_appBar_title => 'النسخ الاحتياطي والاستعادة';
-
-  @override
   String get backup_backingUp => 'جاري النسخ الاحتياطي...';
 
   @override
@@ -3483,6 +3480,9 @@ class AppLocalizationsAr extends AppLocalizations {
   String get currencyRule_tdi_refresher_name => 'دورة تنشيطية TDI';
 
   @override
+  String get currencyRule_iart_refresher_name => 'دورة تنشيطية IART';
+
+  @override
   String get currencyRule_first_aid_24mo_name =>
       'تجديد الإسعافات الأولية والإنعاش القلبي الرئوي';
 
@@ -3524,6 +3524,10 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get currencyRule_tdi_refresher_advisory =>
       'تقترح TDI دورة تنشيطية بعد ستة إلى اثني عشر شهرًا دون غوص تقني.';
+
+  @override
+  String get currencyRule_iart_refresher_advisory =>
+      'تقترح IART دورة تنشيطية بعد ستة إلى اثني عشر شهرًا دون غوص تقني.';
 
   @override
   String get currencyRule_first_aid_advisory =>
@@ -3952,6 +3956,21 @@ class AppLocalizationsAr extends AppLocalizations {
   String get certifications_edit_group_tdiProfessional => 'احترافي';
 
   @override
+  String get certifications_edit_group_iartOpenCircuit => 'دائرة مفتوحة';
+
+  @override
+  String get certifications_edit_group_iartRebreather => 'جهاز إعادة التنفس';
+
+  @override
+  String get certifications_edit_group_iartOverhead => 'بيئة السقف';
+
+  @override
+  String get certifications_edit_group_iartService => 'الخدمة';
+
+  @override
+  String get certifications_edit_group_iartProfessional => 'احترافي';
+
+  @override
   String get certifications_edit_help_expiryDate =>
       'اتركه فارغاً للشهادات التي لا تنتهي صلاحيتها';
 
@@ -4204,6 +4223,18 @@ class AppLocalizationsAr extends AppLocalizations {
   String get certifications_list_fab_addCertification => 'إضافة شهادة';
 
   @override
+  String get certifications_list_groupBy => 'التجميع حسب';
+
+  @override
+  String get certifications_list_groupBy_agency => 'الجهة';
+
+  @override
+  String get certifications_list_groupBy_none => 'بلا';
+
+  @override
+  String get certifications_list_groupBy_status => 'الحالة';
+
+  @override
   String get certifications_list_section_expired => 'منتهية الصلاحية';
 
   @override
@@ -4301,6 +4332,12 @@ class AppLocalizationsAr extends AppLocalizations {
   String get certifications_share_title => 'مشاركة الشهادة';
 
   @override
+  String get certifications_sortSheet_view_list => 'قائمة';
+
+  @override
+  String get certifications_sortSheet_view_wallet => 'محفظة الشهادات';
+
+  @override
   String get certifications_summary_header_subtitle =>
       'اختر شهادة من القائمة لعرض التفاصيل';
 
@@ -4357,6 +4394,9 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get certifications_wallet_tooltip_share => 'مشاركة الشهادة';
+
+  @override
+  String get certifications_wallet_tooltip_sort => 'ترتيب';
 
   @override
   String get checklists_section_title => 'قائمة التحقق';
@@ -5150,7 +5190,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get connections_empty_buddies =>
-      'لا يوجد رفقاء مرتبطون بالغوصات بعد. أضف رفقاء إلى غوصاتك أو حوّل أسماء الرفقاء القديمة من الإعدادات، أدوات البيانات.';
+      'لا يوجد رفقاء مرتبطون بالغوصات بعد. أضف رفقاء إلى غوصاتك أو حوّل أسماء الرفقاء القديمة من الإعدادات > البيانات > أدوات البيانات.';
 
   @override
   String get connections_empty_sites => 'لا توجد غوصة لها موقع بعد.';
@@ -12504,6 +12544,9 @@ class AppLocalizationsAr extends AppLocalizations {
   String get enum_certificationAgency_tdi => 'TDI';
 
   @override
+  String get enum_certificationAgency_iart => 'IART';
+
+  @override
   String get enum_certificationLevel_advancedNitrox => 'نيتروكس متقدم';
 
   @override
@@ -19145,9 +19188,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get nav_courses => 'الدورات';
 
   @override
-  String get nav_coursesSubtitle => 'التدريب والتعليم';
-
-  @override
   String get nav_diveCenters => 'مراكز الغوص';
 
   @override
@@ -19584,6 +19624,12 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get nav_tracksSubtitle => 'مسارات GPS والمسارات تحت الماء';
+
+  @override
+  String get nav_training => 'التدريب';
+
+  @override
+  String get nav_trainingSubtitle => 'الشهادات والدورات';
 
   @override
   String get nav_transfer => 'نقل البيانات';
@@ -21025,6 +21071,10 @@ class AppLocalizationsAr extends AppLocalizations {
       'أيقونات فقط، حتى عند توفر مساحة للتسميات';
 
   @override
+  String get settings_navCustomization_alwaysHideLabels_subtitleDesktop =>
+      'الحالة الابتدائية للشريط الجانبي؛ لا يزال بإمكان السهم توسيعه أو طيّه لهذه الجلسة';
+
+  @override
   String get settings_navCustomization_descriptionDesktop =>
       'اسحب العناصر لإعادة ترتيب الشريط الجانبي. تبقى الصفحة الرئيسية دائمًا في الأعلى.';
 
@@ -21176,10 +21226,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get settings_backToSettings_tooltip => 'العودة إلى الإعدادات';
 
   @override
-  String get settings_cloudSync_appBar_title =>
-      'المزامنة السحابية لقاعدة البيانات';
-
-  @override
   String get settings_cloudSync_autoSync => 'المزامنة التلقائية';
 
   @override
@@ -21209,15 +21255,7 @@ class AppLocalizationsAr extends AppLocalizations {
       'المزامنة السحابية معطلة';
 
   @override
-  String get settings_cloudSync_entry_subtitle =>
-      'المزامنة عبر التخزين السحابي';
-
-  @override
   String get sharedLibrary_settings_title => 'مكتبات المواقع المشتركة';
-
-  @override
-  String get sharedLibrary_settings_subtitle =>
-      'مواقع غوص تُدار مع غواصين آخرين';
 
   @override
   String get sharedLibrary_list_empty =>
@@ -21324,6 +21362,33 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get sharedLibrary_members_removeRole => 'إزالة الدور';
+
+  @override
+  String get sharedLibrary_members_remove => 'إزالة من المكتبة';
+
+  @override
+  String sharedLibrary_members_removeTitle(String name) {
+    return 'إزالة $name؟';
+  }
+
+  @override
+  String sharedLibrary_members_removeBody(String name) {
+    return 'لن يتمكن $name بعد الآن من تعديل المواقع أو اقتراح تغييرات. تبقى المواقع والتعديلات التي ساهم بها في المكتبة.\n\nيظل قادرًا على قراءة المكتبة حتى تغيّر مفاتيح التخزين الخاصة بها، وعبارة المرور إن كانت مشفّرة.';
+  }
+
+  @override
+  String get sharedLibrary_members_removeConfirm => 'إزالة';
+
+  @override
+  String get sharedLibrary_members_removedHeader => 'تمت إزالتهم';
+
+  @override
+  String sharedLibrary_members_removedOn(String date) {
+    return 'أُزيل في $date';
+  }
+
+  @override
+  String get sharedLibrary_members_allowBack => 'السماح بالعودة';
 
   @override
   String get sharedLibrary_owner_onlyOne =>
@@ -21640,6 +21705,10 @@ class AppLocalizationsAr extends AppLocalizations {
       'تسمح بيانات اعتمادك بالقراءة فقط. يمكنك اقتراح تغييرات ويقوم مرجع بتطبيقها.';
 
   @override
+  String get sharedLibrary_library_removedBanner =>
+      'أزالك مرجع من هذه المكتبة. تبقى مواقعها على هذا الجهاز، لكن لم يعد بإمكانك تغييرها. عند مغادرة المكتبة تحتفظ بنسخ شخصية من المواقع التي غصت فيها.';
+
+  @override
   String sharedLibrary_library_errorBanner(String error) {
     return 'فشلت آخر مزامنة: $error';
   }
@@ -21848,6 +21917,88 @@ class AppLocalizationsAr extends AppLocalizations {
       'إضافة إلى مكتبة المواقع المشتركة';
 
   @override
+  String get sharedLibrary_about_title => 'حول';
+
+  @override
+  String get sharedLibrary_about_edit_title => 'تعديل تفاصيل المكتبة';
+
+  @override
+  String get sharedLibrary_about_name_label => 'اسم المكتبة';
+
+  @override
+  String get sharedLibrary_about_description_label => 'الوصف';
+
+  @override
+  String get sharedLibrary_about_description_help =>
+      'ما تحتويه هذه المكتبة ولمن هي. يراه جميع الأعضاء.';
+
+  @override
+  String get sharedLibrary_about_nameRequired => 'أدخل اسمًا';
+
+  @override
+  String get sharedLibrary_connection_title => 'الاتصال على هذا الجهاز';
+
+  @override
+  String get sharedLibrary_connection_s3 => 'حساب S3';
+
+  @override
+  String sharedLibrary_connection_s3Bucket(String bucket) {
+    return 'حساب S3، الحاوية $bucket';
+  }
+
+  @override
+  String get sharedLibrary_connection_webdav => 'حساب WebDAV';
+
+  @override
+  String sharedLibrary_connection_webdavServer(String server) {
+    return 'حساب WebDAV، $server';
+  }
+
+  @override
+  String get sharedLibrary_connection_accountMissing =>
+      'لم يعد هذا الحساب على هذا الجهاز';
+
+  @override
+  String get sharedLibrary_connection_folder => 'المجلد';
+
+  @override
+  String get sharedLibrary_connection_change => 'تغيير الاتصال';
+
+  @override
+  String get sharedLibrary_connection_check => 'التحقق من الموقع';
+
+  @override
+  String sharedLibrary_connection_same(String name) {
+    return 'تم العثور على $name هنا. إنها المكتبة نفسها.';
+  }
+
+  @override
+  String get sharedLibrary_connection_save => 'حفظ الاتصال';
+
+  @override
+  String get sharedLibrary_connection_olderCopy =>
+      'تبدو هذه النسخة أقدم من النسخة التي كنت تزامن معها.';
+
+  @override
+  String get sharedLibrary_connection_saveAnyway => 'حفظ على أي حال';
+
+  @override
+  String sharedLibrary_connection_different(String name) {
+    return 'يحتوي هذا المجلد على مكتبة أخرى ($name). لم يتغير اتصالك.';
+  }
+
+  @override
+  String get sharedLibrary_connection_differentUnnamed =>
+      'يحتوي هذا المجلد على مكتبة أخرى. لم يتغير اتصالك.';
+
+  @override
+  String get sharedLibrary_connection_none =>
+      'لم يتم العثور على مكتبة في هذا المجلد. لم يتغير اتصالك.';
+
+  @override
+  String get sharedLibrary_connection_saved => 'تم تحديث الاتصال';
+
+  @override
   String get settings_cloudSync_adopt_confirm => 'اعتماد المكتبة المستعادة';
 
   @override
@@ -21948,7 +22099,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get settings_cloudSync_firstSync_replaceHint =>
-      'إذا كنت تريد بدلاً من ذلك أن تحل مكتبة هذا الجهاز محل ما في السحابة، فألغِ العملية واستخدم الإعدادات > مزامنة السحابة > استبدال مكتبة السحابة.';
+      'إذا كنت تريد بدلاً من ذلك أن تحل مكتبة هذا الجهاز محل ما في السحابة، فألغِ العملية واستخدم الإعدادات > البيانات > المزامنة بين الأجهزة > استبدال مكتبة السحابة.';
 
   @override
   String settings_cloudSync_firstSync_dialogContent(
@@ -22718,6 +22869,9 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get settings_conflict_field_connectedAccounts_kind => 'الخدمة';
+
+  @override
+  String get settings_conflict_field_connectedAccounts_nickname => 'الاسم';
 
   @override
   String get settings_conflict_field_connectionType => 'الاتصال';
@@ -24699,6 +24853,127 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
+  String get documents_export_action => 'تصدير جميع المستندات';
+
+  @override
+  String get documents_export_title => 'تصدير المستندات';
+
+  @override
+  String documents_export_summary(int documents, int files) {
+    return 'المستندات: $documents، الملفات: $files';
+  }
+
+  @override
+  String get documents_export_password => 'كلمة المرور';
+
+  @override
+  String get documents_export_confirmPassword => 'تأكيد كلمة المرور';
+
+  @override
+  String get documents_export_showPassword => 'إظهار كلمة المرور';
+
+  @override
+  String get documents_export_hidePassword => 'إخفاء كلمة المرور';
+
+  @override
+  String get documents_export_passwordTooShort => 'استخدم 8 أحرف على الأقل';
+
+  @override
+  String get documents_export_passwordCharacters =>
+      'استخدم فقط الحروف اللاتينية من A إلى Z والأرقام والمسافات والرموز الشائعة، حتى يُفتح ملف ZIP على أي حاسوب';
+
+  @override
+  String get documents_export_passwordMismatch => 'كلمتا المرور غير متطابقتين';
+
+  @override
+  String get documents_export_note =>
+      'لا يمكن استعادة كلمة المرور هذه. يُفتح ملف ZIP بالنقر المزدوج على الحاسوب، وليس على الهاتف. تمنع الحماية التطفل العابر لكنها ليست تشفيرًا قويًا، وتبقى أسماء الملفات والمجلدات مقروءة دون كلمة المرور.';
+
+  @override
+  String get documents_export_start => 'تصدير';
+
+  @override
+  String get documents_export_cancel => 'إلغاء';
+
+  @override
+  String documents_export_progress(int done, int total) {
+    return 'الملف $done من $total';
+  }
+
+  @override
+  String get documents_export_nothing => 'لا توجد مستندات للتصدير';
+
+  @override
+  String get documents_export_done => 'تم تصدير المستندات';
+
+  @override
+  String documents_export_failed(String error) {
+    return 'فشل التصدير: $error';
+  }
+
+  @override
+  String get documents_export_cancelled => 'تم إلغاء التصدير';
+
+  @override
+  String get documents_export_fileNamePrefix => 'مستندات Submersion';
+
+  @override
+  String get documents_export_unknownRecord => 'غير معروف';
+
+  @override
+  String get documents_export_front => 'الوجه الأمامي';
+
+  @override
+  String get documents_export_back => 'الوجه الخلفي';
+
+  @override
+  String documents_export_page(int n) {
+    return 'الصفحة $n';
+  }
+
+  @override
+  String get documents_export_manifest_title => 'العنوان';
+
+  @override
+  String get documents_export_manifest_type => 'النوع';
+
+  @override
+  String get documents_export_manifest_kind => 'مصنف تحت (الفئة)';
+
+  @override
+  String get documents_export_manifest_filedUnder => 'مصنف تحت';
+
+  @override
+  String get documents_export_manifest_issuer => 'الجهة المصدرة';
+
+  @override
+  String get documents_export_manifest_reference => 'الرقم المرجعي';
+
+  @override
+  String get documents_export_manifest_issueDate => 'تاريخ الإصدار';
+
+  @override
+  String get documents_export_manifest_expiryDate => 'تاريخ الانتهاء';
+
+  @override
+  String get documents_export_manifest_notes => 'ملاحظات';
+
+  @override
+  String get documents_export_manifest_emergencyPhone => 'هاتف الطوارئ';
+
+  @override
+  String get documents_export_manifest_phone => 'الهاتف';
+
+  @override
+  String get documents_export_manifest_page => 'الصفحة';
+
+  @override
+  String get documents_export_manifest_side => 'الوجه';
+
+  @override
+  String get documents_export_manifest_path => 'المسار داخل ZIP';
+
+  @override
   String get documents_filter_all => 'الكل';
 
   @override
@@ -25198,12 +25473,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get settings_data_appDefaultLocation => 'موقع التطبيق الافتراضي';
 
   @override
-  String get settings_data_backup => 'نسخ احتياطي واستعادة';
-
-  @override
-  String get settings_data_backup_subtitle => 'إنشاء نسخة احتياطية من بياناتك';
-
-  @override
   String get settings_data_customFolder => 'مجلد مخصص';
 
   @override
@@ -25213,15 +25482,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String settings_data_export_failed(Object error) {
     return 'فشل التصدير: $error';
   }
-
-  @override
-  String get settings_data_header_backupSync => 'النسخ الاحتياطي والمزامنة';
-
-  @override
-  String get settings_data_header_import => 'الاستيراد';
-
-  @override
-  String get settings_data_header_storage => 'التخزين';
 
   @override
   String get settings_data_offlineMaps => 'الخرائط غير المتصلة';
@@ -25246,6 +25506,353 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String settings_data_syncTime_minutesAgo(Object count) {
     return 'منذ $countد';
+  }
+
+  @override
+  String get dataHealth_feature_backup => 'النسخ الاحتياطية';
+
+  @override
+  String get dataHealth_feature_sync => 'المزامنة';
+
+  @override
+  String get dataHealth_feature_libraries => 'المكتبات';
+
+  @override
+  String get dataHealth_level_healthy => 'سليم';
+
+  @override
+  String get dataHealth_level_attention => 'يحتاج إلى انتباه';
+
+  @override
+  String get dataHealth_level_failing => 'متعطل';
+
+  @override
+  String get dataHealth_level_notSetUp => 'غير مُعد';
+
+  @override
+  String dataHealth_semantics(String feature, String status) {
+    return '$feature: $status';
+  }
+
+  @override
+  String get dataHealth_backup_autoOff =>
+      'موصى به: فعّل النسخ الاحتياطي التلقائي';
+
+  @override
+  String dataHealth_backup_failed(String when) {
+    return 'فشل آخر نسخ احتياطي: $when';
+  }
+
+  @override
+  String dataHealth_backup_overdue(String when) {
+    return 'النسخ الاحتياطي متأخر (آخر نسخة: $when)';
+  }
+
+  @override
+  String get dataHealth_backup_never => 'لا توجد نسخة احتياطية بعد';
+
+  @override
+  String get dataHealth_backup_cloudCopyMissing =>
+      'لم يصل آخر نسخ احتياطي إلى السحابة';
+
+  @override
+  String get dataHealth_backup_noOffDeviceCopy =>
+      'لا توجد نسخة خارج هذا الجهاز';
+
+  @override
+  String get dataHealth_sync_off => 'موصى به: فعّل المزامنة السحابية';
+
+  @override
+  String get dataHealth_sync_needsPassphrase =>
+      'المزامنة متوقفة مؤقتًا: أدخل عبارة المرور';
+
+  @override
+  String get dataHealth_sync_awaitingAdoption =>
+      'المزامنة متوقفة مؤقتًا: تم استبدال المكتبة السحابية';
+
+  @override
+  String get dataHealth_sync_signedOut =>
+      'المزامنة متوقفة مؤقتًا: سجّل الدخول مجددًا';
+
+  @override
+  String dataHealth_sync_failed(String when) {
+    return 'فشلت آخر مزامنة: $when';
+  }
+
+  @override
+  String dataHealth_sync_offline(String when) {
+    return 'غير متصل (آخر مزامنة: $when)';
+  }
+
+  @override
+  String dataHealth_sync_conflicts(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count تعارض مزامنة بحاجة إلى حل',
+      many: '$count تعارضًا في المزامنة بحاجة إلى حل',
+      few: '$count تعارضات مزامنة بحاجة إلى حل',
+      two: 'تعارضا مزامنة بحاجة إلى حل',
+      one: '$count تعارض مزامنة بحاجة إلى حل',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get dataHealth_sync_peersHeld =>
+      'جهاز آخر يحتاج إلى انتباه قبل أن يتمكن من المزامنة';
+
+  @override
+  String get dataHealth_sync_autoOff => 'موصى به: فعّل المزامنة التلقائية';
+
+  @override
+  String get dataHealth_sync_neverSynced => 'لم تتم المزامنة بعد';
+
+  @override
+  String get settings_data_header_yourData => 'بياناتك';
+
+  @override
+  String get settings_data_header_advanced => 'متقدم';
+
+  @override
+  String get settings_data_setUp => 'إعداد';
+
+  @override
+  String get settings_data_importOptions => 'خيارات الاستيراد';
+
+  @override
+  String get settings_data_importOptions_subtitle =>
+      'مطابقة المواقع، الضغط عند الصعود، الوسوم التلقائية';
+
+  @override
+  String get settings_data_dataTools => 'أدوات البيانات';
+
+  @override
+  String get settings_data_dataTools_subtitle =>
+      'تصحيح أوقات الغوص، ربط الرفقاء، إعادة تصنيف المعدات، جودة البيانات';
+
+  @override
+  String get settings_sync_title => 'المزامنة بين الأجهزة';
+
+  @override
+  String get settings_backups_title => 'النسخ الاحتياطية';
+
+  @override
+  String get settings_photosVideos_title => 'الصور والفيديوهات';
+
+  @override
+  String get settings_section_data_tagline =>
+      'النسخ الاحتياطية والمزامنة والصور';
+
+  @override
+  String get dataHealth_feature_photos => 'الصور';
+
+  @override
+  String get settings_data_backups_status_never => 'لم يتم النسخ الاحتياطي بعد';
+
+  @override
+  String settings_data_backups_status_local(String when) {
+    return 'تم النسخ الاحتياطي $when، على هذا الجهاز فقط';
+  }
+
+  @override
+  String settings_data_backups_status_cloud(String when, String account) {
+    return 'تم النسخ الاحتياطي $when، نسخة في $account';
+  }
+
+  @override
+  String settings_data_backups_status_cloudUnknown(String when) {
+    return 'تم النسخ الاحتياطي $when، نسخة في السحابة';
+  }
+
+  @override
+  String get settings_data_time_justNow => 'الآن';
+
+  @override
+  String get settings_data_status_checking => 'جارٍ التحقق…';
+
+  @override
+  String settings_data_accounts_status_list(String accounts) {
+    return '$accounts';
+  }
+
+  @override
+  String settings_data_backups_status_folder(String when) {
+    return 'تم النسخ الاحتياطي $when، نسخة في مجلد النسخ الاحتياطي';
+  }
+
+  @override
+  String get settings_data_sync_status_off => 'على هذا الجهاز فقط';
+
+  @override
+  String settings_data_sync_status_synced(String when) {
+    return 'تمت المزامنة $when';
+  }
+
+  @override
+  String get settings_data_sync_status_folder =>
+      'تُبقيها خدمة المزامنة الخاصة بمجلدك محدّثة';
+
+  @override
+  String settings_data_backups_status_plain(String when) {
+    return 'تم النسخ الاحتياطي $when';
+  }
+
+  @override
+  String settings_data_setUpFeature(String feature) {
+    return 'إعداد $feature';
+  }
+
+  @override
+  String settings_data_sync_status_one(String device, String when) {
+    return 'متزامن مع $device، $when';
+  }
+
+  @override
+  String settings_data_sync_status_many(int count, String when) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'متزامن مع $count جهاز، $when',
+      many: 'متزامن مع $count جهازًا، $when',
+      few: 'متزامن مع $count أجهزة، $when',
+      two: 'متزامن مع جهازين، $when',
+      one: 'متزامن مع جهاز واحد، $when',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get settings_data_photos_status_off =>
+      'لا يتم الاحتفاظ بنسخ في السحابة';
+
+  @override
+  String settings_data_photos_status_on(String store) {
+    return 'نسخ محفوظة في $store';
+  }
+
+  @override
+  String get settings_data_photos_status_onUnknown => 'نسخ محفوظة في السحابة';
+
+  @override
+  String get settings_data_libraries_status_none => 'لم تنضم إلى أي مكتبة';
+
+  @override
+  String settings_data_libraries_status_some(int count, String when) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count مكتبة، آخر مزامنة $when',
+      many: '$count مكتبة، آخر مزامنة $when',
+      few: '$count مكتبات، آخر مزامنة $when',
+      two: 'مكتبتان، آخر مزامنة $when',
+      one: 'مكتبة واحدة، آخر مزامنة $when',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String settings_data_libraries_status_someNever(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count مكتبة، لم تتم مزامنتها بعد',
+      many: '$count مكتبة، لم تتم مزامنتها بعد',
+      few: '$count مكتبات، لم تتم مزامنتها بعد',
+      two: 'مكتبتان، لم تتم مزامنتهما بعد',
+      one: 'مكتبة واحدة، لم تتم مزامنتها بعد',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get settings_data_accounts_status_none => 'لا يوجد بعد';
+
+  @override
+  String settings_data_accounts_status_needSignIn(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count حساب يحتاج إلى تسجيل الدخول',
+      many: '$count حسابًا يحتاج إلى تسجيل الدخول',
+      few: '$count حسابات تحتاج إلى تسجيل الدخول',
+      two: 'حسابان يحتاجان إلى تسجيل الدخول',
+      one: 'حساب واحد يحتاج إلى تسجيل الدخول',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String dataHealth_libraries_failed(String name) {
+    return '$name: فشلت المزامنة';
+  }
+
+  @override
+  String dataHealth_libraries_failedMany(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'تعذرت مزامنة $count مكتبة',
+      many: 'تعذرت مزامنة $count مكتبة',
+      few: 'تعذرت مزامنة $count مكتبات',
+      two: 'تعذرت مزامنة مكتبتين',
+      one: 'تعذرت مزامنة $count مكتبة',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String dataHealth_libraries_editsHeld(String name) {
+    return '$name: تعديلاتك معلّقة';
+  }
+
+  @override
+  String get dataHealth_media_finishSetup => 'الصور: أكمل إعداد هذا الجهاز';
+
+  @override
+  String get dataHealth_media_transfersPaused =>
+      'عمليات نقل الصور متوقفة مؤقتًا';
+
+  @override
+  String dataHealth_facts_dives(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count غوصة',
+      many: '$count غوصة',
+      few: '$count غوصات',
+      two: 'غوصتان',
+      one: '$count غوصة',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String dataHealth_facts_sites(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count موقع',
+      many: '$count موقعًا',
+      few: '$count مواقع',
+      two: 'موقعان',
+      one: '$count موقع',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String dataHealth_facts_media(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count صورة ومقطع فيديو',
+      many: '$count صورة ومقطع فيديو',
+      few: '$count صور ومقاطع فيديو',
+      two: 'صورتان أو مقطعا فيديو',
+      one: '$count صورة أو فيديو',
+    );
+    return '$_temp0';
   }
 
   @override
@@ -26387,10 +26994,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get settings_section_appearance_title => 'المظهر';
 
   @override
-  String get settings_section_data_subtitle =>
-      'النسخ الاحتياطي والاستعادة والتخزين';
-
-  @override
   String get settings_section_data_title => 'البيانات';
 
   @override
@@ -26636,7 +27239,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get settings_storage_customFolder_deviceOnly_noCloudSync =>
-      'المزامنة السحابية التي يديرها التطبيق معطَّلة ما دامت قاعدة البيانات موجودة على وحدة تخزين في الجهاز. لا يمكن لأي خدمة مزامنة الوصول إلى هذا المجلد على Android، لذا استخدم النسخ الاحتياطي والاستعادة للاحتفاظ بنسخ في مكان آخر.';
+      'المزامنة السحابية التي يديرها التطبيق معطَّلة ما دامت قاعدة البيانات موجودة على وحدة تخزين في الجهاز. لا يمكن لأي خدمة مزامنة الوصول إلى هذا المجلد على Android، لذا استخدم النسخ الاحتياطية للاحتفاظ بنسخ في مكان آخر.';
 
   @override
   String get settings_storage_dismissError_tooltip => 'تجاهل الخطأ';
@@ -26701,7 +27304,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get settings_storage_resetDialog_body =>
-      'سيؤدي هذا إلى حذف جميع البيانات الموجودة على هذا الجهاز نهائياً، بما في ذلك الغوصات والمواقع والمعدات والإعدادات. سيتم إنشاء نسخة احتياطية تلقائياً قبل إعادة التعيين.\n\nلن تُحذف مكتبتك السحابية، وتحتفظ الأجهزة الأخرى ببياناتها. سيتم فصل مزامنة السحابة حتى لا يُلغى أثر إعادة التعيين؛ يمكنك إعادة توصيلها من الإعدادات > مزامنة السحابة.';
+      'سيؤدي هذا إلى حذف جميع البيانات الموجودة على هذا الجهاز نهائياً، بما في ذلك الغوصات والمواقع والمعدات والإعدادات. سيتم إنشاء نسخة احتياطية تلقائياً قبل إعادة التعيين.\n\nلن تُحذف مكتبتك السحابية، وتحتفظ الأجهزة الأخرى ببياناتها. سيتم فصل مزامنة السحابة حتى لا يُلغى أثر إعادة التعيين؛ يمكنك إعادة توصيلها من الإعدادات > البيانات > المزامنة بين الأجهزة.';
 
   @override
   String get settings_storage_resetDialog_confirmWord => 'حذف';
@@ -26723,7 +27326,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get settings_storage_resetComplete_description =>
-      'تم مسح بيانات هذا الجهاز وحفظ نسخة احتياطية. أصبحت مزامنة السحابة الآن غير متصلة حتى لا يُلغى أثر إعادة التعيين؛ يمكنك إعادة توصيلها من الإعدادات > مزامنة السحابة. اضغط على متابعة لإعادة تحميل التطبيق.';
+      'تم مسح بيانات هذا الجهاز وحفظ نسخة احتياطية. أصبحت مزامنة السحابة الآن غير متصلة حتى لا يُلغى أثر إعادة التعيين؛ يمكنك إعادة توصيلها من الإعدادات > البيانات > المزامنة بين الأجهزة. اضغط على متابعة لإعادة تحميل التطبيق.';
 
   @override
   String get settings_summary_activeDiver => 'الغواص النشط';
@@ -30461,11 +31064,10 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get transfer_export_aboutContent =>
-      'قم بتصدير بيانات الغوص بصيغ متعددة. ينشئ PDF سجل غوص قابل للطباعة. UDDF هو تنسيق عالمي متوافق مع معظم برامج تسجيل الغوص. يمكن فتح ملفات CSV وExcel في تطبيقات جداول البيانات. يمكنك أيضًا نسخ قاعدة بياناتك بالكامل احتياطيًا من الإعدادات > نسخ احتياطي واستعادة.';
+      'قم بتصدير بيانات الغوص بصيغ متعددة. ينشئ PDF سجل غوص قابل للطباعة. UDDF هو تنسيق عالمي متوافق مع معظم برامج تسجيل الغوص. يمكن فتح ملفات CSV وExcel في تطبيقات جداول البيانات. يمكنك أيضًا نسخ قاعدة بياناتك بالكامل احتياطيًا من الإعدادات > البيانات > النسخ الاحتياطية.';
 
   @override
-  String get transfer_export_backupLink =>
-      'انتقال إلى النسخ الاحتياطي والاستعادة';
+  String get transfer_export_backupLink => 'انتقال إلى النسخ الاحتياطية';
 
   @override
   String get transfer_export_aboutTitle => 'حول التصدير';
@@ -30478,6 +31080,13 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get transfer_export_csvTitle => 'تصدير CSV';
+
+  @override
+  String get transfer_export_documentsSubtitle =>
+      'جميع مستنداتك في ملف ZIP محمي بكلمة مرور';
+
+  @override
+  String get transfer_export_documentsTitle => 'المستندات';
 
   @override
   String get transfer_export_excelSubtitle =>
@@ -35448,6 +36057,9 @@ class AppLocalizationsAr extends AppLocalizations {
       'تم استبدال بيانات المصدر';
 
   @override
+  String get universalImport_label_timesCorrected => 'تم تصحيح أوقات الغطس';
+
+  @override
   String get universalImport_label_consolidated => 'مدمجة';
 
   @override
@@ -35934,7 +36546,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get db_location_backup_note =>
-      'لا يمكن لنظام Android تشغيل قاعدة البيانات من مجلد مُزامَن مع السحابة. للاحتفاظ بنسخة في Dropbox أو Nextcloud أو Google Drive، حدِّد موقع النسخة الاحتياطية ضمن النسخ الاحتياطي والاستعادة.';
+      'لا يمكن لنظام Android تشغيل قاعدة البيانات من مجلد مُزامَن مع السحابة. للاحتفاظ بنسخة في Dropbox أو Nextcloud أو Google Drive، حدِّد مجلدًا للنسخ الاحتياطي ضمن النسخ الاحتياطية.';
 
   @override
   String diveLog_bulkEdit_membership_onAll(int count) {
@@ -36122,6 +36734,18 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
+  String get settings_mediaStorage_verify_deferred =>
+      'لم يُحذف أي شيء: تنتظر عمليات الحذف حتى ينتهي هذا الجهاز من المزامنة.';
+
+  @override
+  String get settings_mediaStorage_verify_unregistered =>
+      'لم يُحذف أي شيء: أعد توصيل مخزن الوسائط ليعرف سجل الغوص هذا أي الملفات تخصه.';
+
+  @override
+  String get settings_mediaStorage_verify_uploads =>
+      'لم يُحذف أي شيء: تنتظر عمليات الحذف حتى تنتهي عمليات الرفع.';
+
+  @override
   String get settings_mediaStorage_backfill_action => 'رفع المكتبة الحالية';
 
   @override
@@ -36148,7 +36772,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get settings_mediaStorage_connect_dropbox_hint =>
-      'يستخدم اتصال Dropbox من مزامنة السحابة. تُخزن الوسائط في مجلد التطبيق في Dropbox.';
+      'يستخدم اتصال Dropbox من المزامنة بين الأجهزة. تُخزن الوسائط في مجلد التطبيق في Dropbox.';
 
   @override
   String get settings_mediaStorage_connect_gdrive_hint =>
@@ -36741,19 +37365,10 @@ class AppLocalizationsAr extends AppLocalizations {
   String get settings_setup_dismiss => 'تجاهل';
 
   @override
-  String get settings_photosMedia_title => 'الصور والوسائط';
-
-  @override
-  String get settings_photosMedia_subtitle => 'المصادر والتخزين والحسابات';
-
-  @override
   String get settings_photosMedia_sourcesHeader => 'من أين تأتي الصور';
 
   @override
   String get settings_photosMedia_storageHeader => 'أين تُحفظ النسخ';
-
-  @override
-  String get settings_photosMedia_accountsHeader => 'الحسابات';
 
   @override
   String get settings_photosMedia_displayHeader => 'العرض';
@@ -36779,10 +37394,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get settings_connectedAccounts_title => 'الحسابات المتصلة';
 
   @override
-  String get settings_connectedAccounts_subtitle =>
-      'تسجيلات الدخول المستخدمة للمزامنة وتخزين الوسائط والمكتبات المشتركة';
-
-  @override
   String get settings_connectedAccounts_empty => 'لا توجد حسابات متصلة بعد';
 
   @override
@@ -36802,6 +37413,20 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get settings_connectedAccounts_removeFromLibrary => 'إزالة من المكتبة';
+
+  @override
+  String get settings_connectedAccounts_rename => 'إعادة التسمية';
+
+  @override
+  String get settings_connectedAccounts_renameTitle => 'إعادة تسمية الحساب';
+
+  @override
+  String get settings_connectedAccounts_renameField => 'الاسم';
+
+  @override
+  String settings_connectedAccounts_renameDefault(String name) {
+    return 'اتركه فارغًا لاستخدام $name';
+  }
 
   @override
   String get settings_connectedAccounts_removeConfirmTitle => 'إزالة الحساب؟';
@@ -39486,6 +40111,18 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String dataQuality_msg_tankInactive(String drop) {
     return 'فقدت هذه الأسطوانة $drop بينما يشير الخط الزمني للغاز إلى أنها لم تكن قيد الاستخدام';
+  }
+
+  @override
+  String get dataQuality_detector_transmitter_role => 'دور جهاز الإرسال';
+
+  @override
+  String dataQuality_msg_transmitterRoleBailout(
+    int tankNumber,
+    String role,
+    String ocDrop,
+  ) {
+    return 'الأسطوانة $tankNumber معلَّمة على أنها $role بناءً على اسم جهاز الإرسال، لكنها فقدت $ocDrop بعد التحويل إلى الدائرة المفتوحة ولم تفقد شيئًا تقريبًا على الدائرة المغلقة، لذا يبدو أنها أسطوانة غاز الطوارئ. لا يمكن بهذه الطريقة اكتشاف غاز طوارئ لم يُتنفَّس منه، أو استُخدم دون تبديل الغاز على الكمبيوتر.';
   }
 
   @override
@@ -47187,9 +47824,6 @@ class AppLocalizationsAr extends AppLocalizations {
       'أصلح مزامنة متوقفة أو حرّر مساحة سحابية';
 
   @override
-  String get settings_data_header_dataTools => 'أدوات البيانات';
-
-  @override
   String get settings_decompression_ascentGasLabel => 'خطّط الصعود باستخدام';
 
   @override
@@ -48925,7 +49559,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get startup_recovery_encryptedBackup_body =>
-      'هذه النسخة الاحتياطية مشفَّرة. لا يستطيع Submersion فتح نسخة مشفَّرة إلا بعد تشغيل التطبيق، لذا استخدم إحدى الطرق الأخرى هنا أولًا ثم استعِدها من الإعدادات ضمن النسخ الاحتياطي والاستعادة.';
+      'هذه النسخة الاحتياطية مشفَّرة. لا يستطيع Submersion فتح نسخة مشفَّرة إلا بعد تشغيل التطبيق، لذا استخدم إحدى الطرق الأخرى هنا أولًا ثم استعِدها من الإعدادات > البيانات > النسخ الاحتياطية.';
 
   @override
   String get startup_recovery_useDefault_title =>
@@ -50977,6 +51611,91 @@ class AppLocalizationsAr extends AppLocalizations {
       'ملفات الاستيراد الأصلية';
 
   @override
+  String settings_storageUsage_totalSplit(String device, String cloud) {
+    return '$device على هذا الجهاز، $cloud في السحابة';
+  }
+
+  @override
+  String settings_storageUsage_reclaimTitle(String size) {
+    return 'يمكن استرداد نحو $size';
+  }
+
+  @override
+  String get settings_storageUsage_reclaimNothing =>
+      'لا يوجد ما يمكن استرداده الآن';
+
+  @override
+  String settings_storageUsage_reclaimLast(String size, String when) {
+    return 'آخر استرداد $size، $when';
+  }
+
+  @override
+  String settings_storageUsage_reclaimWaiting(String size) {
+    return 'سيصبح $size إضافية قابلة للاسترداد بعد فترة الانتظار الآمنة';
+  }
+
+  @override
+  String settings_storageUsage_reclaimWaitingSync(String size) {
+    return 'سيصبح $size إضافية قابلة للاسترداد بعد أن ينتهي هذا الجهاز من المزامنة';
+  }
+
+  @override
+  String settings_storageUsage_reclaimWaitingUnregistered(String size) {
+    return 'سيصبح $size إضافية قابلة للاسترداد بعد إعادة توصيل مخزن الوسائط';
+  }
+
+  @override
+  String settings_storageUsage_reclaimWaitingUploads(String size) {
+    return 'سيصبح $size إضافية قابلة للاسترداد بعد انتهاء عمليات الرفع';
+  }
+
+  @override
+  String get settings_storageUsage_reclaimAction => 'استرداد مساحة التخزين';
+
+  @override
+  String settings_storageUsage_reclaimDone(String size) {
+    return 'تم استرداد $size';
+  }
+
+  @override
+  String settings_storageUsage_reclaimDoneDeferred(String size) {
+    return 'تم استرداد $size. ينتظر تنظيف السحابة حتى ينتهي هذا الجهاز من المزامنة.';
+  }
+
+  @override
+  String settings_storageUsage_reclaimDoneUnregistered(String size) {
+    return 'تم استرداد $size. أعد توصيل مخزن الوسائط لتنظيف السحابة.';
+  }
+
+  @override
+  String settings_storageUsage_reclaimDoneUploads(String size) {
+    return 'تم استرداد $size. ينتظر تنظيف السحابة حتى تنتهي عمليات الرفع.';
+  }
+
+  @override
+  String get settings_storageUsage_group_cloud => 'في السحابة';
+
+  @override
+  String get settings_storageUsage_cloud_media => 'مخزن الوسائط';
+
+  @override
+  String get settings_storageUsage_cloud_sync => 'مزامنة قاعدة البيانات';
+
+  @override
+  String get settings_storageUsage_cloud_libraries => 'مكتبات المواقع المشتركة';
+
+  @override
+  String settings_storageUsage_cloud_scanned(String when) {
+    return 'تم الفحص $when';
+  }
+
+  @override
+  String get settings_storageUsage_cloud_notScanned => 'لم يتم الفحص بعد';
+
+  @override
+  String get settings_storageUsage_cloud_rescan => 'إعادة الفحص';
+
+  @override
   String get profilePhoto_sheet_title => 'صورة الملف الشخصي';
 
   @override
@@ -51138,7 +51857,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get startup_interruptedRestore_recoverNote =>
-      'يُحتفظ بالملف الموجود مكانه الآن، ولا يُحذف. يمكنك استعادته أو حذفه لاحقًا من نسخ احتياطي واستعادة في الإعدادات.';
+      'يُحتفظ بالملف الموجود مكانه الآن، ولا يُحذف. يمكنك استعادته أو حذفه لاحقًا من الإعدادات > البيانات > النسخ الاحتياطية.';
 
   @override
   String get startup_interruptedRestore_keepAction =>
@@ -51146,7 +51865,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get startup_interruptedRestore_keepNote =>
-      'يُحتفظ بسجل الغوص السابق، ولا يُحذف. يمكنك استعادته أو حذفه لاحقًا من نسخ احتياطي واستعادة في الإعدادات.';
+      'يُحتفظ بسجل الغوص السابق، ولا يُحذف. يمكنك استعادته أو حذفه لاحقًا من الإعدادات > البيانات > النسخ الاحتياطية.';
 
   @override
   String get startup_interruptedRestore_failed =>
@@ -51492,6 +52211,42 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String dataQuality_msg_unknownTransmitter(String serial) {
     return 'جهاز الإرسال $serial غير معيّن لأسطوانة';
+  }
+
+  @override
+  String get dataQuality_repairLabel_useAsBailout => 'استخدام كغاز طوارئ';
+
+  @override
+  String get dataQuality_useAsBailout_title => 'جعل هذه الأسطوانة غاز الطوارئ؟';
+
+  @override
+  String dataQuality_useAsBailout_merge(int tankNumber) {
+    return 'يزيل أسطوانة غاز الطوارئ المكررة (تنتقل تبديلات الغاز إلى الأسطوانة $tankNumber)';
+  }
+
+  @override
+  String dataQuality_useAsBailout_register(String role) {
+    return 'تسجيل جهاز الإرسال هذا أيضًا بدور $role';
+  }
+
+  @override
+  String dataQuality_useAsBailout_mixesKept(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'احتفظت $count غطسة أخرى بمزيج الغاز الخاص بها. يُرجى التحقق منها.',
+      many: 'احتفظت $count غطسة أخرى بمزيج الغاز الخاص بها. يُرجى التحقق منها.',
+      few: 'احتفظت $count غطسات أخرى بمزيج الغاز الخاص بها. يُرجى التحقق منها.',
+      two: 'احتفظت غطستان أخريان بمزيج الغاز الخاص بهما. يُرجى التحقق منهما.',
+      one: 'احتفظت غطسة أخرى واحدة بمزيج الغاز الخاص بها. يُرجى التحقق منها.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String dataQuality_useAsBailout_registered(String role) {
+    return 'تم تسجيل جهاز الإرسال بدور $role. التراجع يغيّر هذه الغطسة فقط.';
   }
 
   @override
