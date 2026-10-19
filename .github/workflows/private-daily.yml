@@ -7,6 +7,10 @@ name: Private daily status
 #   - newest official upstream release
 #   - this fork: newest build and release, and how far custom/v1.8 is behind
 # Read-only against upstream. Runs from the default branch (custom/v1.8).
+#
+# Expires: after EXPIRES (3 weeks from 2026-10-19) the first run disables this
+# workflow itself, so it stops without anyone having to remember. To extend it,
+# move EXPIRES and re-enable the workflow in the Actions tab.
 
 on:
   schedule:
@@ -16,13 +20,28 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: write
 
 jobs:
   status:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Stop after the expiry date
+        id: expiry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPIRES: '2026-11-09'
+        run: |
+          if [[ "$(date -u +%F)" > "$EXPIRES" ]]; then
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/private-daily.yml/disable"
+            echo "expired=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "expired=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build the report and open the issue
+        if: steps.expiry.outputs.expired == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           UP: submersion-app/submersion
