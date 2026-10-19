@@ -1,0 +1,66 @@
+name: Private daily status
+
+# Fork-only. Once a day (and on demand from the Actions tab) opens an issue on
+# this fork with the state of the things being watched; GitHub emails it.
+#   - upstream PR #3262 (offline map picker) and #2407 (Dive Lab): state, last
+#     activity, newest comment or review from anyone but the author
+#   - newest official upstream release
+#   - this fork: newest build and release, and how far custom/v1.8 is behind
+# Read-only against upstream. Runs from the default branch (custom/v1.8).
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Build the report and open the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UP: submersion-app/submersion
+        run: |
+          set -u
+          pr() {
+            gh api "repos/$UP/pulls/$1" --jq \
+              '"\(.state)\(if .merged then " (merged)" else "" end)\(if .draft then ", draft" else "" end), \(.commits) commits, updated \(.updated_at), merge state \(.mergeable_state // "unknown")"'
+            gh api "repos/$UP/issues/$1/comments?per_page=100" --jq \
+              '[.[] | select(.user.type != "Bot")] | last // empty | "Latest comment: \(.created_at) by \(.user.login): \(.body | gsub("\n"; " ") | .[0:200])"'
+            gh api "repos/$UP/pulls/$1/reviews" --jq \
+              '[.[] | select(.user.type != "Bot")] | last // empty | "Latest review: \(.submitted_at) by \(.user.login): \(.state)"'
+          }
+
+          git init -q . && git remote add up "https://github.com/$UP.git"
+          git fetch -q --depth=1 up main
+          git remote add me "https://github.com/${{ github.repository }}.git"
+          git fetch -q me custom/v1.8
+          behind="$(git rev-list --count me/custom/v1.8..up/main 2>/dev/null || echo '?')"
+
+          {
+            echo "## Upstream"
+            echo "- Newest official release: $(gh api "repos/$UP/releases?per_page=1" --jq '.[0] | "\(.tag_name) (\(.published_at))"')"
+            echo "- custom/v1.8 is $behind commits behind upstream main (the next sync merges them)"
+            echo
+            echo "## PR 3262, offline map picker"
+            pr 3262 | sed 's/^/- /'
+            echo
+            echo "## PR 2407, Dive Lab"
+            pr 2407 | sed 's/^/- /'
+            echo
+            echo "## This fork"
+            gh api "repos/${{ github.repository }}/actions/runs?branch=custom/v1.8&per_page=3" --jq \
+              '.workflow_runs[] | "- \(.created_at) \(.name): \(.status) \(.conclusion // "")"'
+            gh api "repos/${{ github.repository }}/releases?per_page=1" --jq \
+              '.[0] | "- Newest release: \(.tag_name) (\(.published_at))"'
+          } > report.md
+          cat report.md
+
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Daily status $(date -u +%F)" --body-file report.md
