@@ -6,7 +6,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/maps/data/services/tile_cache_service.dart';
 import 'package:submersion/features/maps/presentation/providers/map_tile_providers.dart';
 import 'package:submersion/features/maps/presentation/widgets/map_attribution.dart';
-import 'package:submersion/features/maps/presentation/widgets/map_style_button.dart';
+import 'package:submersion/features/maps/presentation/widgets/map_corner_controls.dart';
 import 'package:submersion/features/maps/presentation/widgets/region_download_dialog.dart';
 import 'package:submersion/features/maps/presentation/widgets/region_selection.dart';
 import 'package:submersion/features/maps/presentation/widgets/region_selector.dart';
@@ -191,10 +191,11 @@ class _RegionPickerPageState extends ConsumerState<RegionPickerPage> {
               onRegionSelected: _onRegionSelected,
               selecting: _selecting,
             ),
-            // Map style (Street / Topo / Satellite), anchored to the top-right
-            // corner. It changes the app-wide style, so the tiles here and
-            // the tiles a download fetches are the same style.
-            const Positioned(top: 16, right: 16, child: MapStyleButton()),
+            // The standard corner controls (the map style button; no compass,
+            // since this map does not rotate), anchored to the top-right
+            // corner. The style is app-wide, so the tiles here and the tiles
+            // a download fetches are the same style.
+            const Positioned(top: 16, right: 16, child: MapCornerControls()),
             // Instruction card, then the mode toggle under it. They take the
             // width left of the style button, in a column, so a long
             // translation grows the card without overlapping the controls.
