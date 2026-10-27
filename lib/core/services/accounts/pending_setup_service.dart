@@ -10,6 +10,7 @@ import 'package:submersion/core/services/accounts/account_provider_adapter.dart'
 import 'package:submersion/core/services/accounts/account_provider_registry.dart';
 import 'package:submersion/core/services/accounts/account_usage_service.dart';
 import 'package:submersion/core/services/media_store/media_store_attach_state.dart';
+import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
 import 'package:submersion/features/media_store/data/media_stores_repository.dart';
 
 /// What a device still needs to set up to match the library's synced
@@ -30,6 +31,14 @@ class PendingSetupItem {
   /// For accountSignIn: the account's kind.
   final AccountKind? accountKind;
 
+  /// For accountSignIn: the roster row that needs signing in.
+  final String? accountId;
+
+  /// For accountSignIn: what uses this account on this device, so a reader
+  /// can say which features stop until it is signed in again. [route] names
+  /// only the first page that can sign it in.
+  final Set<AccountUsageKind> usages;
+
   /// The settings page that actually resolves this item. Computed by the
   /// service, which knows what the account drives (sync selection, media
   /// store descriptor, connector) - the card just navigates.
@@ -46,6 +55,8 @@ class PendingSetupItem {
     required this.label,
     required this.route,
     this.accountKind,
+    this.accountId,
+    this.usages = const {},
     this.dismissed = false,
   });
 }
@@ -74,6 +85,7 @@ class PendingSetupService {
         AccountUsageService(
           attachState: _attachState,
           syncRepository: syncRepository,
+          backupPreferences: BackupPreferences(prefs),
         );
   }
 
@@ -89,8 +101,10 @@ class PendingSetupService {
   bool _isDismissed(String key) =>
       _prefs.getBool('$_dismissedPrefix$key') ?? false;
 
-  Future<void> dismiss(String key) async {
-    await _prefs.setBool('$_dismissedPrefix$key', true);
+  /// Records [key] as dismissed on this device. Needs no repositories, so a
+  /// card can dismiss an item without building the whole service.
+  static Future<void> dismissKey(SharedPreferences prefs, String key) async {
+    await prefs.setBool('$_dismissedPrefix$key', true);
   }
 
   Future<List<PendingSetupItem>> compute() async {
@@ -109,7 +123,7 @@ class PendingSetupService {
             kind: SetupItemKind.mediaStoreAttach,
             key: key,
             label: shortStorageLabel(store.displayHint),
-            route: '/settings/media-storage',
+            route: '/settings/photos-media',
           ),
         );
       }
@@ -129,7 +143,7 @@ class PendingSetupService {
             kind: SetupItemKind.mediaStoreReconnect,
             key: key,
             label: shortStorageLabel(store.displayHint),
-            route: '/settings/media-storage',
+            route: '/settings/photos-media',
           ),
         );
       }
@@ -140,6 +154,13 @@ class PendingSetupService {
     // here and are skipped.
     final usage = await _usage.load();
     for (final account in await _accounts.getAll()) {
+      // Only accounts this device needs: its sync account, its media store's
+      // account and its libraries' accounts. A row nothing here uses
+      // (another device's server or folder) asks for no sign-in (spec
+      // section 7.2), and is never probed. A Lightroom row always counts as
+      // used: the connector's usage is per kind, not per device.
+      final uses = {for (final u in usage.usagesOf(account)) u.kind};
+      if (uses.isEmpty) continue;
       final adapter = _registry.capabilityFor<AccountProviderAdapter>(
         account.kind,
       );
@@ -154,7 +175,9 @@ class PendingSetupService {
           key: key,
           label: account.displayName,
           accountKind: account.kind,
-          route: _routeFor(account, usage: usage, store: store),
+          accountId: account.id,
+          usages: Set.unmodifiable(uses),
+          route: _routeFor(account, uses),
           dismissed: _isDismissed(key),
         ),
       );
@@ -165,15 +188,13 @@ class PendingSetupService {
   /// The settings page that can actually sign this account in, from what
   /// the account drives on this device ([AccountUsageService], shared with
   /// the Connected Accounts page). Connectors have their own pages; the sync
-  /// account belongs to Cloud Sync; the attached media account, or one
-  /// matching the announced store's provider on a device not attached yet,
-  /// belongs to Media Storage; anything else defaults to Cloud Sync.
+  /// account belongs to Cloud Sync; the attached media account to Media
+  /// Storage; a library's account to its own account page, whose Sign in
+  /// again covers every kind.
   String _routeFor(
-    domain.ConnectedAccount account, {
-    required AccountUsageSnapshot usage,
-    required MediaStoreDescriptor? store,
-  }) {
-    final kinds = {for (final u in usage.usagesOf(account)) u.kind};
+    domain.ConnectedAccount account,
+    Set<AccountUsageKind> kinds,
+  ) {
     if (kinds.contains(AccountUsageKind.lightroom)) {
       return '/settings/lightroom';
     }
@@ -181,12 +202,11 @@ class PendingSetupService {
       return '/settings/cloud-sync';
     }
     if (kinds.contains(AccountUsageKind.mediaStorage)) {
-      return '/settings/media-storage';
+      return '/settings/photos-media';
     }
-    if (store != null &&
-        account.kind.cloudProviderType?.name == store.providerType) {
-      return '/settings/media-storage';
+    if (kinds.contains(AccountUsageKind.backupCopy)) {
+      return '/settings/backup';
     }
-    return '/settings/cloud-sync';
+    return '/settings/connected-accounts/${account.id}';
   }
 }

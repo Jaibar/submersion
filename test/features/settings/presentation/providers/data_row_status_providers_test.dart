@@ -31,7 +31,7 @@ import 'package:submersion/features/settings/presentation/providers/data_health_
 import 'package:submersion/features/settings/presentation/providers/data_row_status_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
-import 'package:submersion/features/settings/presentation/widgets/pending_setup_card.dart';
+import 'package:submersion/features/settings/presentation/providers/pending_setup_items_provider.dart';
 
 const _r2Host = '149b84f66d5479265f3e4d4ad4740926.r2.cloudflarestorage.com';
 
@@ -85,8 +85,13 @@ class _FakeStores extends Fake implements MediaStoresRepository {
   Future<MediaStoreDescriptor?> getActive() async =>
       active == null ? null : _descriptor(active!, hints[active!] ?? '');
 
-  MediaStoreDescriptor _descriptor(String id, String hint) =>
-      (id: id, providerType: 's3', displayHint: hint, lastSweepAt: null);
+  MediaStoreDescriptor _descriptor(String id, String hint) => (
+    id: id,
+    providerType: 's3',
+    displayHint: hint,
+    lastSweepAt: null,
+    accountId: null,
+  );
 }
 
 class _FakeAccounts extends Fake implements ConnectedAccountsRepository {
@@ -533,7 +538,7 @@ void main() {
               kind: SetupItemKind.mediaStoreAttach,
               key: 'store_1',
               label: 'photos @ nas',
-              route: '/settings/media-storage',
+              route: '/settings/photos-media',
             ),
           ],
         ),

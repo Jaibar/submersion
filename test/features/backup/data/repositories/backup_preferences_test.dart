@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:submersion/core/services/accounts/account_kind.dart';
 import 'package:submersion/features/backup/data/repositories/backup_preferences.dart';
 import 'package:submersion/features/backup/domain/entities/backup_record.dart';
 import 'package:submersion/features/backup/domain/entities/backup_settings.dart';
@@ -78,6 +79,32 @@ void main() {
         LastBackupDestination.device,
       );
       expect(backupPreferences.getSettings().lastBackupCloudAccountId, isNull);
+    });
+
+    test('copy destination defaults null and round-trips', () async {
+      expect(backupPreferences.getSettings().copyAccountId, isNull);
+      await backupPreferences.setCopyDestination(
+        accountId: 'acct-b',
+        kind: AccountKind.webdav,
+      );
+      final read = backupPreferences.getSettings();
+      expect(read.copyAccountId, 'acct-b');
+      expect(read.copyAccountKind, AccountKind.webdav);
+
+      await backupPreferences.setCopyDestination(accountId: null, kind: null);
+      expect(backupPreferences.getSettings().copyAccountId, isNull);
+      expect(backupPreferences.getSettings().copyAccountKind, isNull);
+    });
+
+    test('an unknown stored copy kind reads as no destination', () async {
+      SharedPreferences.setMockInitialValues({
+        'backup_copy_account_id': 'acct-x',
+        'backup_copy_account_kind': 'ftp',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final read = BackupPreferences(prefs).getSettings();
+      expect(read.copyAccountId, isNull);
+      expect(read.copyAccountKind, isNull);
     });
 
     test('an unknown stored destination reads as null', () async {
@@ -158,6 +185,32 @@ void main() {
 
       final settings = bp.getSettings();
       expect(settings.frequency, BackupFrequency.weekly);
+    });
+  });
+
+  group('BackupPreferences cross-device retention (#3503)', () {
+    test('is off by default', () {
+      final settings = backupPreferences.getSettings();
+      expect(settings.crossDeviceRetentionAccount, isNull);
+      expect(settings.crossDeviceRetentionFor('acct'), isFalse);
+      expect(settings.crossDeviceRetentionFor(''), isFalse);
+    });
+
+    test('is on only for the folder key it was confirmed for', () async {
+      await backupPreferences.setCrossDeviceRetentionAccount('acct');
+      final settings = backupPreferences.getSettings();
+      expect(settings.crossDeviceRetentionFor('acct'), isTrue);
+      expect(settings.crossDeviceRetentionFor('other'), isFalse);
+      expect(settings.crossDeviceRetentionFor('provider:fake'), isFalse);
+    });
+
+    test('null turns it off', () async {
+      await backupPreferences.setCrossDeviceRetentionAccount('acct');
+      await backupPreferences.setCrossDeviceRetentionAccount(null);
+      expect(
+        backupPreferences.getSettings().crossDeviceRetentionFor('acct'),
+        isFalse,
+      );
     });
   });
 

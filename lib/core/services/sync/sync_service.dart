@@ -6,12 +6,15 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
-import 'package:drift/drift.dart' show Variable;
+import 'package:drift/drift.dart' show TableUpdate, Variable;
 
 import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/core/database/computer_tissue_scalar_move.dart';
+import 'package:submersion/core/database/device_gear_heal.dart';
 import 'package:submersion/core/database/database.dart'
     show AppDatabase, SyncRecord, DeletionLogData;
 import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/cloud_storage/deferred_write_provider.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/child_column_clears.dart';
@@ -58,7 +61,11 @@ import 'package:submersion/core/services/sync/tag_fill_copy_merge.dart';
 import 'package:submersion/core/services/sync/sync_initializer.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
+import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
 import 'package:uuid/uuid.dart';
+
+part 'sync_service_replace_join.dart';
 
 /// Sync operation result
 enum SyncResultStatus {
@@ -558,7 +565,18 @@ class SyncService {
     return resultMessages;
   }
 
+  /// One sync run. Whatever happens inside, deferred writes are pushed
+  /// before it returns (see [_flushAfterRun]).
   Future<SyncResult> performSync() async {
+    DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
+    try {
+      return await _performSyncRun();
+    } finally {
+      await _flushAfterRun('sync');
+    }
+  }
+
+  Future<SyncResult> _performSyncRun() async {
     final provider = _cloudProvider;
     if (provider == null) {
       return SyncResult(
@@ -873,6 +891,29 @@ class SyncService {
         }
       }
 
+      // A peer's computer or transmitter may have arrived without its
+      // Equipment item, or an older peer may have deleted one as "unlink
+      // only" (issue #3676). Give each its item back BEFORE the tombstone GC
+      // below, while the deleted id's tombstone still steers the re-mint.
+      // Ids are deterministic; what it writes keeps a NULL hlc, so the next
+      // sync publishes it.
+      try {
+        final db = DatabaseService.instance.database;
+        final healed = await ensureDeviceGearLinks(db);
+        // The heal writes raw SQL, which Drift's streams do not see; tell
+        // open screens, so a computer that just got its item appears.
+        if (healed.computersLinked + healed.transmittersLinked > 0) {
+          db.notifyUpdates({
+            TableUpdate.onTable(db.equipment),
+            TableUpdate.onTable(db.diveComputers),
+            TableUpdate.onTable(db.transmitters),
+            TableUpdate.onTable(db.diveEquipment),
+          });
+        }
+      } catch (e) {
+        _log.warning('Device gear heal failed (non-fatal): $e');
+      }
+
       // Advance state only on a clean apply (idempotent re-pull otherwise).
       final now = DateTime.now();
       if (recordsFailed == 0) {
@@ -1154,6 +1195,16 @@ class SyncService {
   Future<SyncResult> rebuildBackendFromThisDevice({
     SyncCleanupProgress? onProgress,
   }) async {
+    try {
+      return await _rebuildBackendFromThisDeviceRun(onProgress: onProgress);
+    } finally {
+      await _flushAfterRun('backend rebuild');
+    }
+  }
+
+  Future<SyncResult> _rebuildBackendFromThisDeviceRun({
+    SyncCleanupProgress? onProgress,
+  }) async {
     final provider = _cloudProvider;
     if (provider == null) {
       return SyncResult(
@@ -1304,9 +1355,35 @@ class SyncService {
     // courseId points at a course in the same payload) fail immediately and
     // the affected rows never reach the receiving DB. See
     // docs/design/findings/2026-06-02-icloud-sync-diagnosis.md.
-    return _serializer.applyInDeferredFkTransaction(
-      () => _applyRemotePayloadInner(remotePayload, localLastSync),
-    );
+    return _serializer.applyInDeferredFkTransaction(() async {
+      final result = await _applyRemotePayloadInner(
+        remotePayload,
+        localLastSync,
+      );
+      await _moveLegacyComputerTissueScalars();
+      return result;
+    });
+  }
+
+  /// A peer below v318 still publishes the CNS, OTU and deco model inside a
+  /// dive's computer tissue snapshot, with the dive's own columns empty
+  /// (issue #2555). This database ran the v318 rung before that row
+  /// arrived, so run the same move over what was just applied: it reads
+  /// only snapshots that still name one of those keys, so it is a cheap
+  /// no-op once every peer is on v318. Leaves the sync stamp alone, as the
+  /// rung does: the sending peer makes the same move when it upgrades.
+  Future<void> _moveLegacyComputerTissueScalars() async {
+    try {
+      await moveComputerTissueScalars(DatabaseService.instance.database);
+    } catch (e, st) {
+      // The applied rows are already in place; losing this move costs only
+      // the old values, never the sync.
+      _log.warning(
+        'Moving legacy computer tissue values failed (non-fatal)',
+        error: e,
+        stackTrace: st,
+      );
+    }
   }
 
   Future<_MergeResult> _applyRemotePayloadInner(
@@ -1422,8 +1499,18 @@ class SyncService {
             hasUpdatedAt: true,
           ),
           (
+            type: 'checklistTemplateSections',
+            records: data.checklistTemplateSections,
+            hasUpdatedAt: true,
+          ),
+          (
             type: 'checklistTemplateItems',
             records: data.checklistTemplateItems,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'tripChecklistSections',
+            records: data.tripChecklistSections,
             hasUpdatedAt: true,
           ),
           (
@@ -1437,6 +1524,11 @@ class SyncService {
             hasUpdatedAt: true,
           ),
           (
+            type: 'preDiveChecklistTemplateSections',
+            records: data.preDiveChecklistTemplateSections,
+            hasUpdatedAt: true,
+          ),
+          (
             type: 'preDiveChecklistTemplateItems',
             records: data.preDiveChecklistTemplateItems,
             hasUpdatedAt: true,
@@ -1444,6 +1536,11 @@ class SyncService {
           (
             type: 'preDiveSessions',
             records: data.preDiveSessions,
+            hasUpdatedAt: true,
+          ),
+          (
+            type: 'preDiveSessionSections',
+            records: data.preDiveSessionSections,
             hasUpdatedAt: true,
           ),
           (
@@ -1620,6 +1717,16 @@ class SyncService {
             records: data.savedQueries,
             hasUpdatedAt: true,
           ),
+          // Logbook rules (#3513) reference tags, types and gear only
+          // inside their JSON, by id, so they carry no FK but the diver.
+          // A run comes before its changes, whose run_id must resolve.
+          (type: 'rules', records: data.rules, hasUpdatedAt: true),
+          (type: 'ruleRuns', records: data.ruleRuns, hasUpdatedAt: true),
+          (
+            type: 'ruleRunChanges',
+            records: data.ruleRunChanges,
+            hasUpdatedAt: true,
+          ),
           // Observation dismissals (#2381) carry a diver FK only, and their
           // deterministic ids make a plain last-writer-wins upsert safe.
           (
@@ -1768,6 +1875,9 @@ class SyncService {
           // After their parents (trips, sites and divers), issue #2594.
           (type: 'tripHides', records: data.tripHides, hasUpdatedAt: false),
           (type: 'siteHides', records: data.siteHides, hasUpdatedAt: false),
+          // After their parents (trips, sites and divers), issue #2151.
+          (type: 'tripShares', records: data.tripShares, hasUpdatedAt: false),
+          (type: 'siteShares', records: data.siteShares, hasUpdatedAt: false),
           (
             type: 'equipmentOwnershipEvents',
             records: data.equipmentOwnershipEvents,
@@ -1821,6 +1931,12 @@ class SyncService {
             records: data.documentPages,
             hasUpdatedAt: true,
           ),
+          // After both parents (documents and tags), issue #1970.
+          (
+            type: 'documentTags',
+            records: data.documentTags,
+            hasUpdatedAt: false,
+          ),
           (
             type: 'serviceRecords',
             records: data.serviceRecords,
@@ -1861,6 +1977,8 @@ class SyncService {
             hasUpdatedAt: true,
           ),
           (type: 'media', records: data.media, hasUpdatedAt: false),
+          // After both parents (media and tags), issue #1970.
+          (type: 'mediaTags', records: data.mediaTags, hasUpdatedAt: false),
           (
             type: 'mediaEnrichment',
             records: data.mediaEnrichment,
@@ -2066,6 +2184,7 @@ class SyncService {
     } finally {
       await client?.dispose();
     }
+    await _moveLegacyComputerTissueScalars();
     progress.done();
     _log.info(
       'Peer base applied in ${stopwatch.elapsed.inSeconds}s: '
@@ -2682,11 +2801,15 @@ class SyncService {
     'tripCylinders': true,
     'tripCylinderEvents': true,
     'checklistTemplates': true,
+    'checklistTemplateSections': true,
     'checklistTemplateItems': true,
+    'tripChecklistSections': true,
     'tripChecklistItems': true,
     'preDiveChecklistTemplates': true,
+    'preDiveChecklistTemplateSections': true,
     'preDiveChecklistTemplateItems': true,
     'preDiveSessions': true,
+    'preDiveSessionSections': true,
     'preDiveSessionItems': true,
     'gpsTracks': true,
     'navTracks': true,
@@ -2724,6 +2847,9 @@ class SyncService {
     'cylinderFills': true,
     'connectionMaps': true,
     'savedQueries': true,
+    'rules': true,
+    'ruleRuns': true,
+    'ruleRunChanges': true,
     'insightObservationDismissals': true,
     'species': false,
     'tags': true,
@@ -2759,10 +2885,14 @@ class SyncService {
     'diveBuddyRoles': false,
     'siteTags': false,
     'equipmentTags': false,
+    'mediaTags': false,
+    'documentTags': false,
     'equipmentShares': false,
     'tripEquipment': false,
     'tripHides': false,
     'siteHides': false,
+    'tripShares': false,
+    'siteShares': false,
     'equipmentOwnershipEvents': false,
     'equipmentLocations': true,
     'equipmentLocationMoves': false,
@@ -3054,6 +3184,8 @@ class SyncService {
     'cylinderFills': [
       (field: 'equipmentId', parent: 'equipment', nullable: true),
     ],
+    // v301: a rule run's change belongs to its run (issue #3513).
+    'ruleRunChanges': [(field: 'runId', parent: 'ruleRuns', nullable: false)],
     // v202: a child item (O2 cell, battery) points at the item it is installed
     // in. Nullable: deleting the parent orphans the child, never drops it.
     'equipment': [
@@ -3186,6 +3318,15 @@ class SyncService {
       (field: 'equipmentId', parent: 'equipment', nullable: false),
       (field: 'tagId', parent: 'tags', nullable: false),
     ],
+    // v309: a photo's or video's tags and a document's tags (issue #1970).
+    'mediaTags': [
+      (field: 'mediaId', parent: 'media', nullable: false),
+      (field: 'tagId', parent: 'tags', nullable: false),
+    ],
+    'documentTags': [
+      (field: 'documentId', parent: 'documents', nullable: false),
+      (field: 'tagId', parent: 'tags', nullable: false),
+    ],
     // v234: equipment sharing (issue #2046). The diver keys are left to
     // repairDanglingForeignKeys like every diverId (see the note above).
     'equipmentShares': [
@@ -3202,6 +3343,15 @@ class SyncService {
       (field: 'diverId', parent: 'divers', nullable: false),
     ],
     'siteHides': [
+      (field: 'siteId', parent: 'diveSites', nullable: false),
+      (field: 'diverId', parent: 'divers', nullable: false),
+    ],
+    // v311: the profiles a trip or site is shared with (issue #2151).
+    'tripShares': [
+      (field: 'tripId', parent: 'trips', nullable: false),
+      (field: 'diverId', parent: 'divers', nullable: false),
+    ],
+    'siteShares': [
       (field: 'siteId', parent: 'diveSites', nullable: false),
       (field: 'diverId', parent: 'divers', nullable: false),
     ],
@@ -3230,15 +3380,45 @@ class SyncService {
       (field: 'tripCylinderId', parent: 'tripCylinders', nullable: false),
       (field: 'diveCenterId', parent: 'diveCenters', nullable: true),
     ],
-    'checklistTemplateItems': [
+    // Checklist sections (issue #3360). A section table's own parent ref is
+    // its trip/template/session; an item table's existing entry gains a
+    // sectionId ref to its section table, nullable (deleting a section sets
+    // the item's link to null, never the item). preDiveSessionItems.sectionId
+    // is deliberately absent here: unlike the other three, it is not a SQL
+    // FK (same reasoning as its existing sourceItemId), so there is no FK
+    // for sync_parent_refs_completeness_test's pragma_foreign_key_list scan
+    // to find.
+    'checklistTemplateSections': [
       (field: 'templateId', parent: 'checklistTemplates', nullable: false),
     ],
-    'tripChecklistItems': [(field: 'tripId', parent: 'trips', nullable: false)],
+    'checklistTemplateItems': [
+      (field: 'templateId', parent: 'checklistTemplates', nullable: false),
+      (field: 'sectionId', parent: 'checklistTemplateSections', nullable: true),
+    ],
+    'tripChecklistSections': [
+      (field: 'tripId', parent: 'trips', nullable: false),
+    ],
+    'tripChecklistItems': [
+      (field: 'tripId', parent: 'trips', nullable: false),
+      (field: 'sectionId', parent: 'tripChecklistSections', nullable: true),
+    ],
+    'preDiveChecklistTemplateSections': [
+      (
+        field: 'templateId',
+        parent: 'preDiveChecklistTemplates',
+        nullable: false,
+      ),
+    ],
     'preDiveChecklistTemplateItems': [
       (
         field: 'templateId',
         parent: 'preDiveChecklistTemplates',
         nullable: false,
+      ),
+      (
+        field: 'sectionId',
+        parent: 'preDiveChecklistTemplateSections',
+        nullable: true,
       ),
     ],
     'preDiveSessions': [
@@ -3250,6 +3430,9 @@ class SyncService {
       (field: 'diveId', parent: 'dives', nullable: true),
       (field: 'tripId', parent: 'trips', nullable: true),
       (field: 'equipmentSetId', parent: 'equipmentSets', nullable: true),
+    ],
+    'preDiveSessionSections': [
+      (field: 'sessionId', parent: 'preDiveSessions', nullable: false),
     ],
     'preDiveSessionItems': [
       (field: 'sessionId', parent: 'preDiveSessions', nullable: false),
@@ -4326,11 +4509,54 @@ class SyncService {
       }
       onProgress?.call(deleted + failed, targets.length);
     }
+    // A provider that batches deletes (Git) has only recorded them so far.
+    // Push them now, before anyone is told they are gone; if that fails,
+    // none of them happened.
+    if (deleted > 0) {
+      try {
+        await flushDeferredWrites(provider, timeout: _flushTimeout);
+      } catch (e) {
+        _log.warning('Could not push $deleted deletes for $reason: $e');
+        failed += deleted;
+        deleted = 0;
+      }
+    }
     return SyncCleanupOutcome(
       deleted: deleted,
       failed: failed,
       listIncomplete: listIncomplete,
     );
+  }
+
+  /// How long a flush's own push may run. Its wait behind earlier writes
+  /// (a backup upload, say) does not count, so deletes that will land are
+  /// not reported as failed for waiting their turn.
+  static const Duration _flushTimeout = Duration(seconds: 20);
+
+  /// Pushes deferred writes at the end of a run. Best-effort: a failure is
+  /// logged, and a later sweep redoes the deletes it covered.
+  Future<void> _flushAfterRun(String run) async {
+    final provider = _cloudProvider;
+    if (provider == null) return;
+    try {
+      await flushDeferredWrites(provider, timeout: _flushTimeout);
+    } catch (e) {
+      _log.warning('Deferred writes not pushed after $run: $e');
+    }
+  }
+
+  /// On a backend that keeps deleted data in its history (Git), drops it
+  /// now: called after deletes made for privacy (an old backend, a full
+  /// wipe, a library replace). Best-effort, never throws.
+  Future<void> _resetHistoryQuietly(
+    CloudStorageProvider provider,
+    String reason,
+  ) async {
+    try {
+      await resetHistoryNowIfSupported(provider).timeout(_flushTimeout);
+    } catch (e) {
+      _log.warning('History not reset after $reason: $e');
+    }
   }
 
   /// Best-effort deletion of EVERY sync file in the cloud folder: all peers'
@@ -4340,16 +4566,18 @@ class SyncService {
   Future<SyncCleanupOutcome> deleteAllSyncFiles(
     CloudStorageProvider provider, {
     SyncCleanupProgress? onProgress,
-  }) {
+  }) async {
     // Wipe both the changeset logs (ssv1.*) and any legacy full-file uploads.
     // The epoch/moved markers (submersion_library_*) match neither pattern, so
     // they survive -- a peer mid-replace still learns the new epoch.
-    return _deleteListedFiles(
+    final outcome = await _deleteListedFiles(
       provider,
       const [ChangesetLogLayout.prefix, CloudStorageProviderMixin.syncFileStem],
       reason: 'library replace',
       onProgress: onProgress,
     );
+    await _resetHistoryQuietly(provider, 'library replace');
+    return outcome;
   }
 
   /// Delete EVERY sync artifact on [provider], INCLUDING the library epoch and
@@ -4359,12 +4587,12 @@ class SyncService {
   Future<SyncCleanupOutcome> wipeAllSyncData(
     CloudStorageProvider provider, {
     SyncCleanupProgress? onProgress,
-  }) {
+  }) async {
     // One pass over all four patterns rather than logs-then-markers, so the
     // user sees a single bar with a single honest total (issue #1032). Pattern
     // order still puts the logs first: a peer listing mid-wipe must never find
     // orphaned logs whose epoch marker is already gone.
-    return _deleteListedFiles(
+    final outcome = await _deleteListedFiles(
       provider,
       const [
         ChangesetLogLayout.prefix,
@@ -4375,6 +4603,8 @@ class SyncService {
       reason: 'full sync wipe',
       onProgress: onProgress,
     );
+    await _resetHistoryQuietly(provider, 'full sync wipe');
+    return outcome;
   }
 
   /// Wipe all sync data on the active provider (issue #509, cloud clear 3b).
@@ -4394,6 +4624,16 @@ class SyncService {
   /// pending intent. On any failure the intent is kept so the next sync
   /// retries instead of merging.
   Future<SyncResult> executeLibraryReplace(LibraryEpochMarker marker) async {
+    try {
+      return await _executeLibraryReplaceRun(marker);
+    } finally {
+      await _flushAfterRun('library replace');
+    }
+  }
+
+  Future<SyncResult> _executeLibraryReplaceRun(
+    LibraryEpochMarker marker,
+  ) async {
     final provider = _cloudProvider;
     final store = _epochStore;
     if (provider == null || store == null) {
@@ -4821,6 +5061,14 @@ class SyncService {
   }
 
   Future<SyncResult> adoptReplacedLibrary() async {
+    try {
+      return await _adoptReplacedLibraryRun();
+    } finally {
+      await _flushAfterRun('library adopt');
+    }
+  }
+
+  Future<SyncResult> _adoptReplacedLibraryRun() async {
     final provider = _cloudProvider;
     final store = _epochStore;
     if (provider == null || store == null) {

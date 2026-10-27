@@ -71,8 +71,7 @@ import 'package:submersion/features/media_store/presentation/providers/media_sto
 import 'package:submersion/features/planner/presentation/pages/plan_compare_page.dart';
 import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
 import 'package:submersion/features/pre_dive/presentation/providers/pre_dive_providers.dart';
-import 'package:submersion/features/settings/presentation/pages/connected_accounts_page.dart';
-import 'package:submersion/features/settings/presentation/pages/photos_media_setup_page.dart';
+import 'package:submersion/features/settings/presentation/providers/account_group_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/data_row_status_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
@@ -857,8 +856,8 @@ void main() {
       read: (c) => c.read(connectedAccountsWithStatusProvider.future),
     ),
     (
-      name: 'setupGuideStatusProvider',
-      read: (c) => c.read(setupGuideStatusProvider.future),
+      name: 'accountGroupsProvider',
+      read: (c) => c.read(accountGroupsProvider.future),
     ),
     (
       name: 'lastBackupCloudAccountLabelProvider',

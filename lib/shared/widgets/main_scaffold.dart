@@ -13,11 +13,14 @@ import 'package:submersion/features/gps_log/presentation/widgets/gps_recording_s
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/global_drop_target.dart';
+import 'package:submersion/shared/widgets/master_detail/list_memory_scope.dart';
 import 'package:submersion/shared/widgets/nav/nav_destinations.dart';
 import 'package:submersion/shared/widgets/nav/nav_order_provider.dart';
 import 'package:submersion/shared/widgets/nav/nav_selection.dart';
 import 'package:submersion/shared/widgets/nav/nav_slot_count.dart';
 import 'package:submersion/shared/widgets/shell_chrome_scope.dart';
+import 'package:submersion/features/demo_mode/presentation/widgets/demo_mode_strip.dart';
+import 'package:submersion/features/demo_mode/presentation/providers/demo_mode_providers.dart';
 
 class MainScaffold extends ConsumerStatefulWidget {
   final Widget child;
@@ -63,8 +66,24 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
   /// every page on the shell navigator alive: go_router builds that
   /// navigator with a GlobalKey (ShellRoute.navigatorKey), so the element is
   /// reparented rather than rebuilt.
-  Widget _buildChromelessScaffold() =>
-      Scaffold(body: GlobalDropTarget(child: widget.child));
+  /// The demo strip already sits below the status bar, so the page under it
+  /// must not pad for the status bar a second time (issue #3708).
+  Widget _belowDemoStrip(Widget child) => MediaQuery.removePadding(
+    context: context,
+    removeTop: ref.watch(demoModeActiveProvider),
+    child: child,
+  );
+
+  Widget _buildChromelessScaffold() => Scaffold(
+    body: GlobalDropTarget(
+      child: Column(
+        children: [
+          const DemoModeStrip(),
+          Expanded(child: _belowDemoStrip(widget.child)),
+        ],
+      ),
+    ),
+  );
 
   /// Builds a per-destination accent color lookup for the navigation surfaces.
   ///
@@ -249,11 +268,15 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
         if (didPop || upLocation == null) return;
         context.go(upLocation);
       },
-      child: ShellChromeScope(
-        controller: _chromeController,
-        child: _chromeController.isHidden
-            ? _buildChromelessScaffold()
-            : _buildScaffold(context),
+      // Lives as long as the shell, so a record opened or a diver switched
+      // anywhere in it keeps the lists' memory straight (#3301).
+      child: ListMemoryScope(
+        child: ShellChromeScope(
+          controller: _chromeController,
+          child: _chromeController.isHidden
+              ? _buildChromelessScaffold()
+              : _buildScaffold(context),
+        ),
       ),
     );
   }
@@ -379,6 +402,7 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
                 Expanded(
                   child: Column(
                     children: [
+                      const DemoModeStrip(),
                       const UpdateBanner(),
                       Expanded(child: widget.child),
                       const GpsRecordingStrip(),
@@ -397,8 +421,9 @@ class _MainScaffoldState extends ConsumerState<MainScaffold> {
       body: GlobalDropTarget(
         child: Column(
           children: [
+            const DemoModeStrip(),
             const UpdateBanner(),
-            Expanded(child: widget.child),
+            Expanded(child: _belowDemoStrip(widget.child)),
             const GpsRecordingStrip(),
           ],
         ),

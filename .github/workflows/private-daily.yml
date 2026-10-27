@@ -56,15 +56,12 @@ jobs:
               '[.[] | select(.user.type != "Bot")] | last // empty | "Latest review: \(.submitted_at) by \(.user.login): \(.state)"'
           }
 
-          git init -q . && git remote add up "https://github.com/$UP.git"
-          git fetch -q --depth=1 up main
-          git remote add me "https://github.com/${{ github.repository }}.git"
-          git fetch -q me custom/v1.8
-          behind="$(git rev-list --count me/custom/v1.8..up/main 2>/dev/null || echo '?')"
+          # Upstream's compare API counts how far this fork's branch is behind.
+          behind="$(gh api "repos/$UP/compare/main...${{ github.repository_owner }}:custom/v1.8" --jq .behind_by 2>/dev/null || echo '?')"
 
           {
             echo "## Upstream"
-            echo "- Newest official release: $(gh api "repos/$UP/releases?per_page=1" --jq '.[0] | "\(.tag_name) (\(.published_at))"')"
+            echo "- Newest official release: $(gh api "repos/$UP/releases?per_page=15" --jq '[.[] | select(.tag_name | startswith("v"))] | first | "\(.tag_name) (\(.published_at))"')"
             echo "- custom/v1.8 is $behind commits behind upstream main (the next sync merges them)"
             echo
             echo "## PR 3262, offline map picker"

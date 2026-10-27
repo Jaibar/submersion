@@ -1,5 +1,7 @@
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/core/services/accounts/account_kind.dart';
+
 /// How often automatic backups should run
 enum BackupFrequency { daily, weekly, monthly }
 
@@ -46,6 +48,20 @@ class BackupSettings extends Equatable {
   /// one that syncs today. Null for any other destination.
   final String? lastBackupCloudAccountId;
 
+  /// The roster row the cloud copy goes to, with its kind; both null means
+  /// the copy goes to the same account as sync (spec section 7.3). The kind
+  /// travels with the id so the scheduled backup, which has no database
+  /// registry, can still build the provider.
+  final String? copyAccountId;
+  final AccountKind? copyAccountKind;
+
+  /// The cloud folder the "count backups from all devices" switch was
+  /// confirmed for (issue #3503): its account id, or `provider:<id>` when the
+  /// account is unknown; null when the switch is off. Kept as the folder
+  /// rather than a flag so a different backup folder reads as off until the
+  /// diver confirms it too.
+  final String? crossDeviceRetentionAccount;
+
   const BackupSettings({
     this.enabled = false,
     this.frequency = BackupFrequency.weekly,
@@ -59,6 +75,9 @@ class BackupSettings extends Equatable {
     this.lastCloudCopyMissing = false,
     this.lastBackupDestination,
     this.lastBackupCloudAccountId,
+    this.copyAccountId,
+    this.copyAccountKind,
+    this.crossDeviceRetentionAccount,
   });
 
   BackupSettings copyWith({
@@ -74,6 +93,9 @@ class BackupSettings extends Equatable {
     bool? lastCloudCopyMissing,
     LastBackupDestination? lastBackupDestination,
     String? lastBackupCloudAccountId,
+    String? copyAccountId,
+    AccountKind? copyAccountKind,
+    String? crossDeviceRetentionAccount,
   }) {
     return BackupSettings(
       enabled: enabled ?? this.enabled,
@@ -93,6 +115,10 @@ class BackupSettings extends Equatable {
           lastBackupDestination ?? this.lastBackupDestination,
       lastBackupCloudAccountId:
           lastBackupCloudAccountId ?? this.lastBackupCloudAccountId,
+      copyAccountId: copyAccountId ?? this.copyAccountId,
+      copyAccountKind: copyAccountKind ?? this.copyAccountKind,
+      crossDeviceRetentionAccount:
+          crossDeviceRetentionAccount ?? this.crossDeviceRetentionAccount,
     );
   }
 
@@ -115,6 +141,11 @@ class BackupSettings extends Equatable {
     return DateTime.now().difference(lastBackupTime!) >= frequencyDuration;
   }
 
+  /// Whether the cross-device rule applies to the cloud folder [folderKey]
+  /// names (`BackupServiceRetention.crossDeviceRetentionAccountKey`).
+  bool crossDeviceRetentionFor(String folderKey) =>
+      crossDeviceRetentionAccount == folderKey;
+
   @override
   List<Object?> get props => [
     enabled,
@@ -129,5 +160,8 @@ class BackupSettings extends Equatable {
     lastCloudCopyMissing,
     lastBackupDestination,
     lastBackupCloudAccountId,
+    copyAccountId,
+    copyAccountKind,
+    crossDeviceRetentionAccount,
   ];
 }

@@ -1,7 +1,7 @@
 name: submersion
 description: An open-source dive logging application for scuba divers.
 publish_to: 'none'
-version: 1.8.3+131
+version: 1.8.4+132
 
 environment:
   sdk: ^3.10.0
@@ -60,6 +60,9 @@ dependencies:
   flutter_cache_manager: ^3.4.1
   photo_view: ^0.15.0
   video_player: ^2.10.1
+  # video_player has no Windows player of its own; this federated
+  # implementation plays through Windows Media Foundation (#3548).
+  video_player_win: ^3.3.1
 
   # Networking
   http: ^1.2.2
@@ -177,6 +180,7 @@ dependencies:
   nfc_manager_ndef: ^1.1.0
   ndef_record: ^1.4.2
   window_manager: ^0.5.2
+  markdown: ^7.3.1  # Markdown formatting in notes (#3683)
 
 dev_dependencies:
   flutter_test:

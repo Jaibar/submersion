@@ -186,39 +186,77 @@ warn about gear that falls due. See
 
 ## Manage
 
-The reusable lists and rules Submersion offers throughout the app:
+The reusable lists and rules Submersion offers throughout the app, grouped by
+where you'll run into them:
+
+**Equipment**
+
+| Item | What it manages |
+|------|-----------------|
+| **Tank Presets** | Tank configurations and the default tank; see [Equipment](equipment.md#tank-presets) |
+| **Transmitters** | Air-integration transmitters linked to cylinders |
+| **Weight Presets** | Reusable sets of weights for a dive |
+| **Service types** | The maintenance your gear needs, and how often |
+| **Locations** | Where your gear is kept, serviced or lent |
+| **Default equipment view** | Which statuses the Equipment list shows when no filter is set |
+
+**Dives**
 
 | Item | What it manages |
 |------|-----------------|
 | **Dive Types** | Your own dive types |
 | **Site Types** | Built-in and custom dive site types |
 | **Dive Roles** | Your own roles for buddies on a dive |
-| **Certification Agencies** | Your own agencies and certifications; see [Certifications and Courses](certifications-and-courses.md) |
-| **Tank Presets** | Tank configurations and the default tank; see [Equipment](equipment.md#tank-presets) |
-| **Transmitters** | Air-integration transmitters linked to cylinders |
-| **Weight Presets** | Reusable sets of weights for a dive |
+| **Species** | The species catalog; see [Marine Life & Photos](marine-life-and-photos.md) |
+
+**Planning**
+
+| Item | What it manages |
+|------|-----------------|
 | **Trimix Mixer** | Fill gases, conditions and billing defaults for the trimix blender |
-| **Service types** | The maintenance your gear needs, and how often |
+
+**Training**
+
+| Item | What it manages |
+|------|-----------------|
+| **Certification Agencies** | Your own agencies and certifications; see [Certifications and Courses](certifications-and-courses.md) |
 | **Certification currency** | Refresher and renewal rules |
-| **Locations** | Where your gear is kept, serviced or lent |
-| **Setup assistant** | Revisit the first-run choices for units, appearance and backup |
+
+**Checklists**
+
+| Item | What it manages |
+|------|-----------------|
 | **Trip Checklist Templates** | Reusable to-do lists for trip planning |
 | **Pre-Dive Checklists** | Buddy checks, CCR build lists, gear packing |
-| **Species** | The species catalog; see [Marine Life & Photos](marine-life-and-photos.md) |
-| **Tags** | Manage, merge and delete tags |
+
+**Organization**
+
+| Item | What it manages |
+|------|-----------------|
 | **Saved Queries** | Rename, reorder and delete saved dive searches |
+| **Tags** | Manage, merge and delete tags |
+
+**Setup**
+
+| Item | What it manages |
+|------|-----------------|
+| **Setup assistant** | Revisit units, backups, sync and photos: the units step, then the four steps of [Set Up This Device](set-up-this-device.md) |
 
 ## Data
 
 The top of the page shows four status marks (Backups, Sync, Libraries and
-Photos) with a line for anything that needs attention, then a count of your
-dives, sites and photos.
+Photos) with a line for anything that needs attention. Under them, until you
+hide it or finish it, is the **Set up this device** card, which walks through
+an account, sync, backups and photo copies; see
+[Set Up This Device](set-up-this-device.md). Then comes a count of your dives,
+sites and photos.
 
 ### Your data
 
 Each row says in one sentence where things stand, for example "Backed up
 3 hours ago, copy in Google Drive" or "In step with Eric's iPhone, 12m ago".
-A feature that is not set up shows a **Set up** action under its status.
+A feature that is not set up shows a **Set up** action under its status,
+which opens that step of Set up this device.
 
 | Item | What it does |
 |------|--------------|
@@ -226,7 +264,7 @@ A feature that is not set up shows a **Set up** action under its status.
 | **Sync between devices** | Keep your devices in step through cloud storage; see [Multi-Device Sync](multi-device-sync.md) |
 | **Photos & videos** | Where photos come from, and where copies are kept; see [Media Sync](media-sync.md) |
 | **Shared site libraries** | Dive sites kept together with other divers; see [Shared site libraries](shared-site-libraries.md) |
-| **Connected accounts** | The sign-ins used by sync, media storage and shared site libraries |
+| **Connected accounts** | The sign-ins used by sync, photo copies, backup copies and shared site libraries |
 
 ### Advanced
 
@@ -236,6 +274,7 @@ A feature that is not set up shows a **Set up** action under its status.
 | **Offline maps** | Map tiles and 3D terrain data for use without a connection |
 | **Import options** | How incoming dive data is read (see below) |
 | **Data tools** | One-off repairs for imported data (see below) |
+| **Set up this device again** | Shown once the setup card is hidden or finished: reopens it from the first step |
 
 **Import options**
 
@@ -266,10 +305,19 @@ A feature that is not set up shows a **Set up** action under its status.
 
 ## Shared data
 
-With two or more diver profiles on the device, choose
-**Share new sites and trips by default**, or share everything you already have with
-**Share all my sites**, **Share all my trips** and **Share all my equipment...**. See
-[Diver Profile & Multi-Diver](diver-profile.md).
+With two or more diver profiles on the device:
+
+- **Share new sites and trips by default** shares every new site and trip with
+  everyone.
+- **Share all my sites...** and **Share all my trips...** ask who should see
+  everything you own: **Everyone**, or the profiles you tick. They only add
+  profiles; to change one site or trip later, open it and tap **Shared with**.
+- **Share all my equipment...** shares your gear with the profiles you choose.
+- **Hidden from this profile** lists the shared sites and trips you removed from
+  your profile, with **Unhide** to bring each one back.
+
+See [Diver Profile & Multi-Diver](diver-profile.md) and
+[Sharing a trip with other profiles](trips.md#sharing-a-trip-with-other-profiles).
 
 ## Apple HealthKit
 
