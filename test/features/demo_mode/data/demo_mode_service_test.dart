@@ -1,11 +1,14 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:drift/drift.dart' show GeneratedDatabase;
+import 'package:submersion/core/services/sync/sync_coordinator.dart';
 import 'package:submersion/features/demo_mode/data/demo_database_preparer.dart';
 import 'package:submersion/features/demo_mode/data/demo_downloader.dart';
+import 'package:submersion/features/demo_mode/data/demo_manifest_client.dart';
 import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
 import 'package:submersion/features/demo_mode/data/demo_mode_service.dart';
 import 'package:submersion/features/demo_mode/data/demo_paths.dart';
@@ -56,11 +59,14 @@ void main() {
     FakeDownloader? downloader,
     FakeSwitcher? sw,
     bool hasPackage = true,
+    DemoManifestClient? manifest,
+    Future<void> Function()? endNearbySync,
+    bool Function()? importRunning,
   }) => DemoModeService(
     paths: paths,
     prefs: prefs,
     store: store,
-    manifest: FakeManifestClient(hasPackage ? testPackage : null),
+    manifest: manifest ?? FakeManifestClient(hasPackage ? testPackage : null),
     downloader: downloader ?? FakeDownloader(),
     extractor: FakeExtractor(),
     preparer: DemoDatabasePreparer(),
@@ -70,13 +76,15 @@ void main() {
     deviceId: () => 'device-1',
     cancelDeviceNotifications: () async => notificationCancels++,
     restart: () => restarts++,
+    endNearbySync: endNearbySync,
+    importRunning: importRunning,
     clock: () => DateTime(2026, 10, 26, 12),
   );
 
   test(
     'enter switches to the demo database, snapshots prefs and restarts once',
     () async {
-      await service().enter(fromFirstRun: false);
+      await service().enter(fromFirstRun: false, package: testPackage);
 
       expect(switcher.openPath, paths.databaseFile);
       expect(prefs.getString('current_diver_id'), 'demo-diver');
@@ -88,11 +96,193 @@ void main() {
     },
   );
 
+  test('enter ends nearby sync with the gate closed, before the sample '
+      'logbook opens', () async {
+    ({bool sealed, String? open})? seen;
+
+    await service(
+      endNearbySync: () async => seen = (
+        sealed: DemoModeGate.instance.isActive,
+        open: switcher.openPath,
+      ),
+    ).enter(fromFirstRun: false, package: testPackage);
+
+    expect(seen, (sealed: true, open: realPath));
+  });
+
+  test('enter waits for a sync already merging, so it never reaches the '
+      'sample logbook (issue #3798)', () async {
+    addTearDown(SyncCoordinator.reset);
+    final events = <String>[];
+    final merging = Completer<void>();
+    final sw = _RecordingSwitcher(events);
+    await sw.openAt(realPath, keyHex: null);
+    events.clear();
+    // A sync that started before the gate closed, still merging when the
+    // switch comes.
+    final sync = SyncCoordinator.run(() async {
+      events.add('sync start');
+      await merging.future;
+      events.add('sync end on ${p.basename(sw.openPath!)}');
+    });
+
+    await service(
+      sw: sw,
+      // The sync ends only after every microtask the switch could run.
+      endNearbySync: () async => Timer.run(merging.complete),
+    ).enter(fromFirstRun: false, package: testPackage);
+    await sync;
+    await sw.close();
+
+    expect(events, [
+      'sync start',
+      'sync end on submersion.db',
+      'open ${p.basename(paths.databaseFile)}',
+    ]);
+  });
+
+  test('enter refuses while an import is running, downloading '
+      'nothing', () async {
+    final downloader = _RecordingDownloader();
+
+    await expectLater(
+      service(
+        downloader: downloader,
+        importRunning: () => true,
+      ).enter(fromFirstRun: false, package: testPackage),
+      throwsA(isA<DemoImportRunningException>()),
+    );
+
+    expect(downloader.downloaded, isEmpty);
+    expect(Directory(paths.root).existsSync(), isFalse);
+    expect(switcher.openPath, realPath);
+    expect(DemoModeGate.instance.isActive, isFalse);
+    expect(restarts, 0);
+  });
+
+  test('an import that starts during the download is refused once the '
+      'gate closes, leaving the user logbook open', () async {
+    var checks = 0;
+
+    await expectLater(
+      service(
+        importRunning: () => checks++ > 0,
+      ).enter(fromFirstRun: false, package: testPackage),
+      throwsA(isA<DemoImportRunningException>()),
+    );
+
+    expect(checks, 2);
+    expect(Directory(paths.root).existsSync(), isFalse);
+    expect(switcher.openPath, realPath);
+    expect(prefs.getString('current_diver_id'), 'real-diver');
+    expect(DemoModeGate.instance.isActive, isFalse);
+    expect(restarts, 0);
+  });
+
+  test('a sync queued during the switch runs only once the sample logbook '
+      'is ready, with the gate closed', () async {
+    addTearDown(SyncCoordinator.reset);
+    final events = <String>[];
+    final sw = _RecordingSwitcher(events);
+    await sw.openAt(realPath, keyHex: null);
+    events.clear();
+    final queued = Completer<void>();
+
+    await service(
+      sw: sw,
+      endNearbySync: () async => Timer.run(
+        () => queued.complete(
+          SyncCoordinator.run<void>(() async {
+            events.add(
+              'sync sealed=${DemoModeGate.instance.isActive} '
+              'phase=${(await store.read())?.phase.name}',
+            );
+          }),
+        ),
+      ),
+    ).enter(fromFirstRun: false, package: testPackage);
+    await queued.future;
+    await sw.close();
+
+    expect(events, [
+      'open ${p.basename(paths.databaseFile)}',
+      'sync sealed=true phase=active',
+    ]);
+  });
+
+  test('enter reads the manifest again and downloads its current entry when '
+      'the size is unchanged', () async {
+    // A rebuild republished at the same size: new URL and checksum, so the
+    // package the user agreed to would fail the download.
+    final republished = DemoPackage(
+      schemaVersion: testPackage.schemaVersion,
+      url: Uri.parse('https://example.com/republished.zip'),
+      sha256: 'b' * 64,
+      size: testPackage.size,
+      generatedAt: DateTime.utc(2026, 10, 21),
+    );
+    final manifest = _CountingManifest(republished);
+    final downloader = _RecordingDownloader();
+
+    await service(
+      manifest: manifest,
+      downloader: downloader,
+    ).enter(fromFirstRun: false, package: testPackage);
+
+    expect(manifest.calls, 1);
+    expect(downloader.downloaded, [republished]);
+  });
+
+  test('enter downloads nothing and names the new package when its size '
+      'changed', () async {
+    final bigger = DemoPackage(
+      schemaVersion: testPackage.schemaVersion,
+      url: Uri.parse('https://example.com/bigger.zip'),
+      sha256: 'c' * 64,
+      size: testPackage.size * 4,
+      generatedAt: DateTime.utc(2026, 10, 22),
+    );
+    final downloader = _RecordingDownloader();
+
+    await expectLater(
+      service(
+        manifest: _CountingManifest(bigger),
+        downloader: downloader,
+      ).enter(fromFirstRun: false, package: testPackage),
+      throwsA(
+        isA<DemoPackageChangedException>().having(
+          (e) => e.current,
+          'current',
+          bigger,
+        ),
+      ),
+    );
+
+    expect(downloader.downloaded, isEmpty);
+    expect(Directory(paths.root).existsSync(), isFalse);
+    expect(switcher.openPath, realPath);
+    expect(restarts, 0);
+  });
+
+  test('enter tries the agreed package when the manifest cannot be '
+      'reached', () async {
+    final downloader = _RecordingDownloader();
+
+    await service(
+      hasPackage: false,
+      downloader: downloader,
+    ).enter(fromFirstRun: false, package: testPackage);
+
+    expect(downloader.downloaded, [testPackage]);
+    expect(switcher.openPath, paths.databaseFile);
+  });
+
   test('enter reports downloading, preparing and opening in order', () async {
     final stages = <DemoEnterStage>[];
 
     await service().enter(
       fromFirstRun: false,
+      package: testPackage,
       onProgress: (p) {
         if (stages.isEmpty || stages.last != p.stage) stages.add(p.stage);
       },
@@ -105,13 +295,72 @@ void main() {
     ]);
   });
 
+  test('enter fills one bar from 0 to 1 that never moves back', () async {
+    final fractions = <double>[];
+
+    await service().enter(
+      fromFirstRun: false,
+      package: testPackage,
+      onProgress: (p) => fractions.add(p.fraction),
+    );
+
+    expect(fractions.first, 0);
+    expect(fractions.last, 1);
+    for (var i = 1; i < fractions.length; i++) {
+      expect(fractions[i], greaterThanOrEqualTo(fractions[i - 1]));
+    }
+    // Preparing the logbook moves the bar on, not only the download.
+    expect(
+      fractions.where((f) => f > DemoEnterStage.opening.start && f < 1),
+      isNotEmpty,
+    );
+  });
+
+  group('DemoEnterProgress', () {
+    test('the stages share the bar end to end, from 0 to 1', () {
+      expect(DemoEnterStage.values.first.start, 0);
+      expect(DemoEnterStage.values.last.end, 1);
+      for (var i = 1; i < DemoEnterStage.values.length; i++) {
+        expect(
+          DemoEnterStage.values[i].start,
+          DemoEnterStage.values[i - 1].end,
+        );
+      }
+    });
+
+    test('places progress inside its stage\'s share', () {
+      const stage = DemoEnterStage.preparing;
+      expect(const DemoEnterProgress(stage).fraction, stage.start);
+      expect(
+        const DemoEnterProgress(stage, done: 1, total: 2).fraction,
+        closeTo((stage.start + stage.end) / 2, 1e-9),
+      );
+      expect(
+        const DemoEnterProgress(stage, done: 2, total: 2).fraction,
+        stage.end,
+      );
+    });
+
+    test('never leaves its stage\'s share, whatever the counts', () {
+      const stage = DemoEnterStage.downloading;
+      expect(
+        const DemoEnterProgress(stage, done: 5, total: 2).fraction,
+        stage.end,
+      );
+      expect(
+        const DemoEnterProgress(stage, done: 5, total: 0).fraction,
+        stage.start,
+      );
+    });
+  });
+
   test(
     'enter failing during download leaves no demo directory and the gate inactive',
     () async {
       await expectLater(
         service(
           downloader: FakeDownloader(failWith: DemoDownloadFailure.network),
-        ).enter(fromFirstRun: false),
+        ).enter(fromFirstRun: false, package: testPackage),
         throwsA(isA<DemoDownloadException>()),
       );
 
@@ -128,9 +377,11 @@ void main() {
       var cancelled = false;
 
       await expectLater(
-        service(
-          downloader: _CancelOnLastChunk(() => cancelled = true),
-        ).enter(fromFirstRun: false, isCancelled: () => cancelled),
+        service(downloader: _CancelOnLastChunk(() => cancelled = true)).enter(
+          fromFirstRun: false,
+          package: testPackage,
+          isCancelled: () => cancelled,
+        ),
         throwsA(
           isA<DemoDownloadException>().having(
             (e) => e.reason,
@@ -145,20 +396,6 @@ void main() {
     },
   );
 
-  test('enter with no compatible package fails as a network failure', () async {
-    await expectLater(
-      service(hasPackage: false).enter(fromFirstRun: false),
-      throwsA(
-        isA<DemoDownloadException>().having(
-          (e) => e.reason,
-          'reason',
-          DemoDownloadFailure.network,
-        ),
-      ),
-    );
-    expect(Directory(paths.root).existsSync(), isFalse);
-  });
-
   test(
     'enter failing after the commit point reopens the real database and restores prefs',
     () async {
@@ -167,7 +404,7 @@ void main() {
       addTearDown(failing.close);
 
       await expectLater(
-        service(sw: failing).enter(fromFirstRun: false),
+        service(sw: failing).enter(fromFirstRun: false, package: testPackage),
         throwsA(isA<StateError>()),
       );
 
@@ -205,7 +442,7 @@ void main() {
         deviceId: () => 'device-1',
         cancelDeviceNotifications: () async {},
         restart: () => restarts++,
-      ).enter(fromFirstRun: false);
+      ).enter(fromFirstRun: false, package: testPackage);
 
       // A kill while preparing relaunches as entering, which cleans up,
       // rather than as active over a half-prepared logbook.
@@ -217,7 +454,7 @@ void main() {
   );
 
   test('exit with an unreadable preferences snapshot still finishes', () async {
-    await service().enter(fromFirstRun: false);
+    await service().enter(fromFirstRun: false, package: testPackage);
     File(paths.prefsSnapshotFile).writeAsStringSync('not a snapshot');
 
     await service().exit();
@@ -231,7 +468,7 @@ void main() {
   test(
     'exit when the real logbook cannot reopen leaves exiting for startup and restarts',
     () async {
-      await service().enter(fromFirstRun: false);
+      await service().enter(fromFirstRun: false, package: testPackage);
       final failing = FakeSwitcher(failOpenOf: realPath);
       await failing.openAt(paths.databaseFile, keyHex: null);
       addTearDown(failing.close);
@@ -248,7 +485,7 @@ void main() {
   test(
     'enter never applies the real encryption key to the demo file; exit restores it',
     () async {
-      await service().enter(fromFirstRun: false);
+      await service().enter(fromFirstRun: false, package: testPackage);
       expect(switcher.keys.last, isNull);
 
       await service().exit();
@@ -260,7 +497,7 @@ void main() {
   test(
     'exit restores current_diver_id, sync and storage prefs exactly',
     () async {
-      await service().enter(fromFirstRun: false);
+      await service().enter(fromFirstRun: false, package: testPackage);
       await prefs.setBool('sync_auto_enabled', false);
       await prefs.setString('demo_only', 'x');
 
@@ -295,7 +532,7 @@ void main() {
       cancelDeviceNotifications: () async {},
       restart: () => restarts++,
     );
-    await svc.enter(fromFirstRun: false);
+    await svc.enter(fromFirstRun: false, package: testPackage);
     await prefs.setString('db_custom_path', '/moved-during-demo');
 
     await svc.exit();
@@ -322,7 +559,7 @@ void main() {
       restart: () => restarts++,
       forgetPhotos: (photoPaths) async => forgotten.addAll(photoPaths),
     );
-    await svc.enter(fromFirstRun: false);
+    await svc.enter(fromFirstRun: false, package: testPackage);
 
     await svc.exit();
 
@@ -331,7 +568,7 @@ void main() {
   });
 
   test('exit deletes the demo database, package, photos and state', () async {
-    await service().enter(fromFirstRun: false);
+    await service().enter(fromFirstRun: false, package: testPackage);
 
     await service().exit();
 
@@ -345,7 +582,7 @@ void main() {
   test('the real database is untouched by a full enter and exit', () async {
     final before = File(realPath).readAsBytesSync();
 
-    await service().enter(fromFirstRun: false);
+    await service().enter(fromFirstRun: false, package: testPackage);
     await service().exit();
     await switcher.close();
 
@@ -367,6 +604,7 @@ class _RecordingPreparer extends DemoDatabasePreparer {
     required String photosDir,
     required String? deviceId,
     DemoUnitSettings? units,
+    void Function(int done, int total)? onProgress,
   }) async {
     await onPrepare();
     return super.prepare(
@@ -375,6 +613,7 @@ class _RecordingPreparer extends DemoDatabasePreparer {
       photosDir: photosDir,
       deviceId: deviceId,
       units: units,
+      onProgress: onProgress,
     );
   }
 }
@@ -395,5 +634,52 @@ class _CancelOnLastChunk extends FakeDownloader {
     final file = await super.download(pkg, dest, onProgress: onProgress);
     cancel();
     return file;
+  }
+}
+
+class _CountingManifest extends FakeManifestClient {
+  _CountingManifest(super.package);
+
+  int calls = 0;
+
+  @override
+  Future<DemoPackage?> fetchBest(int appSchemaVersion) {
+    calls++;
+    return super.fetchBest(appSchemaVersion);
+  }
+}
+
+/// Records which package each download was asked for.
+class _RecordingDownloader extends FakeDownloader {
+  final downloaded = <DemoPackage>[];
+
+  @override
+  Future<File> download(
+    DemoPackage pkg,
+    File dest, {
+    void Function(int received, int total)? onProgress,
+    bool Function()? isCancelled,
+  }) {
+    downloaded.add(pkg);
+    return super.download(
+      pkg,
+      dest,
+      onProgress: onProgress,
+      isCancelled: isCancelled,
+    );
+  }
+}
+
+/// Records each open as it is asked for, before the file is touched, so the
+/// order against a sync is exact.
+class _RecordingSwitcher extends FakeSwitcher {
+  _RecordingSwitcher(this.events);
+
+  final List<String> events;
+
+  @override
+  Future<void> openAt(String path, {required String? keyHex}) {
+    events.add('open ${p.basename(path)}');
+    return super.openAt(path, keyHex: keyHex);
   }
 }

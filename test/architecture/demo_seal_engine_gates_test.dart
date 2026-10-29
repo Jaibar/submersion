@@ -40,6 +40,25 @@ const _gates = <(String, String, String, _Kind)>[
     'sync',
     _Kind.ensure,
   ),
+  // Nearby sync (issue #3731): the radio, and the two applies a peer drives.
+  (
+    'lib/core/services/nearby/nearby_link_manager.dart',
+    'Future<void> _refresh(',
+    'sync',
+    _Kind.quiet,
+  ),
+  (
+    'lib/core/services/sync/sync_service.dart',
+    'Future<NearbyApplyResult> applyNearbyPayload(',
+    'sync',
+    _Kind.ensure,
+  ),
+  (
+    'lib/core/services/sync/sync_service.dart',
+    'Future<NearbyApplyResult> applyNearbyBaseFile(',
+    'sync',
+    _Kind.ensure,
+  ),
   // Shared dive-site libraries.
   (
     'lib/core/services/shared_library/shared_library_service.dart',
@@ -170,6 +189,19 @@ const _gates = <(String, String, String, _Kind)>[
     _Kind.ensure,
   ),
   // Imports and dive computer downloads.
+  // Buddy cards received by any route (issue #3728).
+  (
+    'lib/features/buddies/data/services/buddy_card_importer.dart',
+    'Future<Buddy> addNew(',
+    'fileImport',
+    _Kind.ensure,
+  ),
+  (
+    'lib/features/buddies/data/services/buddy_card_importer.dart',
+    'Future<Buddy> update(',
+    'fileImport',
+    _Kind.ensure,
+  ),
   (
     'lib/features/import_wizard/presentation/providers/import_wizard_providers.dart',
     'Future<void> performImport(',
