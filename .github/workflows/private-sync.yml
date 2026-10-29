@@ -57,10 +57,16 @@ jobs:
           git log --oneline HEAD..upstream/main | head -20
 
           if ! git merge upstream/main -m "Merge upstream/main into custom/v1.8"; then
-            echo "::error::Merge conflict. Conflicting files:"
-            git diff --name-only --diff-filter=U
-            git merge --abort
-            exit 1
+            # Conflicts only in the localization files are resolved by script
+            # (the branch's own strings are re-added); anything else stops.
+            if python3 .github/scripts/resolve_l10n_conflicts.py; then
+              git commit --no-edit
+            else
+              echo "::error::Merge conflict. Conflicting files:"
+              git diff --name-only --diff-filter=U
+              git merge --abort
+              exit 1
+            fi
           fi
 
           git push origin HEAD:custom/v1.8
