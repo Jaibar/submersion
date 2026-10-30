@@ -182,9 +182,10 @@ class _TripStoryDayCardState extends ConsumerState<TripStoryDayCard> {
                       diveTypeShortLabelResolver: diveTypeShortLabelResolver,
                       diveTypeListVisibilityPredicate:
                           diveTypeListVisibilityPredicate,
-                      // The story already holds the full Dive; pass it so the
-                      // configurable card can resolve fields absent from the
-                      // summary (tanks, SAC, buddies, weights).
+                      // Pass the story's Dive so the configurable card can
+                      // resolve fields absent from the summary (tanks, SAC,
+                      // buddies, weights). Its profile is empty unless the
+                      // dive's row needed its samples (issue #3831).
                       fullDive: dive,
                       diveNumber: dive.diveNumber ?? index + 1,
                       isHighlighted: dive.id == _highlightedDiveId,
