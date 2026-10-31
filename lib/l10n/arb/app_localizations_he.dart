@@ -29194,6 +29194,11 @@ class AppLocalizationsHe extends AppLocalizations {
   String get insights_profile_avgDescent => 'ירידה ממוצעת';
 
   @override
+  String insights_profile_deco_analyzing(int analyzed, int total) {
+    return 'מנתח צלילות: $analyzed מתוך $total';
+  }
+
+  @override
   String get insights_profile_deco_decoDives => 'צלילות דקו';
 
   @override
