@@ -8394,6 +8394,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get diveLog_legend_label_ceiling => '上升限制';
 
   @override
+  String get diveLog_legend_label_ceilingCalculated => '上升限制（计算）';
+
+  @override
   String get diveLog_legend_label_decoStops => '减压停留';
 
   @override

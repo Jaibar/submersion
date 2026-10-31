@@ -8712,6 +8712,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get diveLog_legend_label_ceiling => 'Ceiling';
 
   @override
+  String get diveLog_legend_label_ceilingCalculated => 'Ceiling (calc)';
+
+  @override
   String get diveLog_legend_label_decoStops => 'Deco stops';
 
   @override

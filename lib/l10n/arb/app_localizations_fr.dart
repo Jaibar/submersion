@@ -8881,6 +8881,9 @@ class AppLocalizationsFr extends AppLocalizations {
   String get diveLog_legend_label_ceiling => 'Plafond';
 
   @override
+  String get diveLog_legend_label_ceilingCalculated => 'Plafond (calc.)';
+
+  @override
   String get diveLog_legend_label_decoStops => 'Paliers de décompression';
 
   @override

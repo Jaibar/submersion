@@ -8654,6 +8654,9 @@ class AppLocalizationsHe extends AppLocalizations {
   String get diveLog_legend_label_ceiling => 'תקרה';
 
   @override
+  String get diveLog_legend_label_ceilingCalculated => 'תקרה (מחושב)';
+
+  @override
   String get diveLog_legend_label_decoStops => 'עצירות דקו';
 
   @override

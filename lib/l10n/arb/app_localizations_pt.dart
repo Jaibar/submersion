@@ -8853,6 +8853,9 @@ class AppLocalizationsPt extends AppLocalizations {
   String get diveLog_legend_label_ceiling => 'Teto';
 
   @override
+  String get diveLog_legend_label_ceilingCalculated => 'Teto (calc.)';
+
+  @override
   String get diveLog_legend_label_decoStops => 'Paradas Deco';
 
   @override
