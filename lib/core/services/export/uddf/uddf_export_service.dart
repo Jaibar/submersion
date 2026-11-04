@@ -5,17 +5,22 @@ import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:xml/xml.dart';
 
+import 'package:submersion/core/constants/enums.dart' show DiveMode;
 import 'package:submersion/core/services/export/models/uddf_export_options.dart';
 import 'package:submersion/core/services/export/shared/file_export_utils.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dive_custom_fields.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dive_durations.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dive_logistics.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dives_extras.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dump_codec.dart';
 import 'package:submersion/core/services/export/uddf/uddf_export_builders.dart';
+import 'package:submersion/core/services/export/uddf/uddf_gas_mix_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_gear_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_participant_writers.dart';
+import 'package:submersion/core/services/export/uddf/uddf_rebreather_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_site_classification_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_site_feature_writers.dart';
+import 'package:submersion/core/services/export/uddf/uddf_source_attribution.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_source_export.dart';
@@ -45,10 +50,14 @@ class UddfExportService {
     // Encoding happens before the XML build so the builders stay pure
     // synchronous functions, and bzip2 runs on a worker isolate rather than
     // whichever isolate called the export.
-    final sources = options.includeRawData
-        ? (dataSources ?? const <DiveSourceExport>[])
+    // The raw data box keeps or drops only the original bytes. The rows go
+    // either way: they are the dive's computers and each one's samples, and
+    // without them a restore keeps one computer (issue #4180).
+    final sources = dataSources ?? const <DiveSourceExport>[];
+    final sourcesByDive = UddfSourceAttribution.groupByDive(sources);
+    final withBytes = options.includeRawData
+        ? sources.where((s) => s.hasDump).toList(growable: false)
         : const <DiveSourceExport>[];
-    final withBytes = sources.where((s) => s.hasDump).toList(growable: false);
     final encoded = await UddfDumpCodec.encodeAll(
       withBytes.map((s) => s.rawData!).toList(growable: false),
     );
@@ -109,6 +118,9 @@ class UddfExportService {
     final computerIds = options.includeGear
         ? UddfGearWriters.computerIds(dives)
         : const <String>{};
+    // The O2 cells the samples name, declared under the owner however the
+    // gear option is set: they are no gear, only what each reading names.
+    final o2CellCount = UddfRebreatherWriters.cellCount(dives);
     // Provenance may name only what this file declares: it shares no
     // equipment sets, and a parent assembly counts only when it is itself one
     // of the exported items. A row left with neither is plain gear, which the
@@ -155,20 +167,18 @@ class UddfExportService {
           },
         );
 
-        // Diver section: an id-only owner hosting the computer declarations,
-        // then the participants. Both trimmed, because this file is shared
-        // with other people.
-        if (computerIds.isNotEmpty || people.isNotEmpty) {
+        // Diver section: an id-only owner hosting the computer and O2 cell
+        // declarations, then the participants. Both trimmed, because this
+        // file is shared with other people.
+        if (computerIds.isNotEmpty || o2CellCount > 0 || people.isNotEmpty) {
           builder.element(
             'diver',
             nest: () {
-              if (computerIds.isNotEmpty) {
-                builder.element(
-                  'owner',
-                  attributes: {'id': 'owner'},
-                  nest: () {
-                    UddfGearWriters.writeOwnerComputers(builder, dives);
-                  },
+              if (computerIds.isNotEmpty || o2CellCount > 0) {
+                UddfGearWriters.writeIdOnlyOwner(
+                  builder,
+                  options.includeGear ? dives : const [],
+                  o2CellCount: o2CellCount,
                 );
               }
               UddfParticipantWriters.writeBuddyDeclarations(
@@ -260,44 +270,7 @@ class UddfExportService {
         }
 
         // Gas definitions
-        builder.element(
-          'gasdefinitions',
-          nest: () {
-            // Collect all unique gas mixes from dives
-            final gasMixes = <String, GasMix>{};
-            for (final dive in dives) {
-              for (final tank in dive.tanks) {
-                final key =
-                    'mix_${tank.gasMix.o2.toInt()}_${tank.gasMix.he.toInt()}';
-                gasMixes[key] = tank.gasMix;
-              }
-            }
-            // Add air as default
-            gasMixes['mix_21_0'] = const GasMix();
-
-            for (final entry in gasMixes.entries) {
-              builder.element(
-                'mix',
-                attributes: {'id': entry.key},
-                nest: () {
-                  builder.element('name', nest: entry.value.name);
-                  builder.element(
-                    'o2',
-                    nest: (entry.value.o2 / 100).toString(),
-                  );
-                  builder.element(
-                    'n2',
-                    nest: (entry.value.n2 / 100).toString(),
-                  );
-                  builder.element(
-                    'he',
-                    nest: (entry.value.he / 100).toString(),
-                  );
-                },
-              );
-            }
-          },
-        );
+        UddfGasMixWriters.writeGasDefinitions(builder, dives);
 
         // Profile data (repetition groups and dives)
         builder.element(
@@ -385,6 +358,15 @@ class UddfExportService {
                             for (final typeId in dive.diveTypeIds) {
                               builder.element('divetype', nest: typeId);
                             }
+                            // Dive mode (ccr, scr), as in the full backup.
+                            // Without it a rebreather dive imports as open
+                            // circuit (issue #4178).
+                            if (dive.diveMode != DiveMode.oc) {
+                              builder.element(
+                                'divemode',
+                                nest: dive.diveMode.name,
+                              );
+                            }
                             // Entry method
                             if (dive.effectiveEntryMethod != null) {
                               builder.element(
@@ -422,8 +404,8 @@ class UddfExportService {
                                 dive,
                               );
                               // One curve per cylinder, the one the app
-                              // draws; every source's series rides in the
-                              // <tankpressureseries> block (issue #2492).
+                              // draws; the <tankpressureseries> block keeps
+                              // what this cannot (issues #2492, #3917).
                               final divePressures =
                                   pressuresByDive[dive.id]?.displayedByTank;
                               for (final (index, point)
@@ -460,7 +442,7 @@ class UddfExportService {
                                       for (final entry
                                           in divePressures.entries) {
                                         final pressure =
-                                            UddfExportBuilders.findPressureAtTimestamp(
+                                            UddfSourceAttribution.findPressureAtTimestamp(
                                               entry.value,
                                               point.timestamp,
                                             );
@@ -476,6 +458,12 @@ class UddfExportService {
                                         }
                                       }
                                     }
+                                    // CCR/SCR setpoint, loop ppO2 and cell
+                                    // readings, as in the full backup.
+                                    UddfRebreatherWriters.writeSample(
+                                      builder,
+                                      point,
+                                    );
                                     // Computer-reported GF99, as Shearwater
                                     // Cloud writes it, so a round trip keeps
                                     // the recorded value.
@@ -501,6 +489,9 @@ class UddfExportService {
                           includeIdentity: options.includeGear,
                         );
 
+                        // Rebreather settings, as in the full backup.
+                        UddfRebreatherWriters.writeConfiguration(builder, dive);
+
                         builder.element(
                           'informationafterdive',
                           nest: () {
@@ -516,12 +507,7 @@ class UddfExportService {
                                 nest: dive.avgDepth.toString(),
                               );
                             }
-                            if (dive.bottomTime != null) {
-                              builder.element(
-                                'diveduration',
-                                nest: dive.bottomTime!.inSeconds.toString(),
-                              );
-                            }
+                            UddfDiveDurations.write(builder, dive);
                             if (dive.waterTemp != null) {
                               builder.element(
                                 'lowesttemperature',
@@ -640,6 +626,11 @@ class UddfExportService {
                               );
                             }
                             UddfDiveCustomFields.write(builder, dive);
+                            UddfExportBuilders.buildGasSwitches(
+                              builder,
+                              extras.diveGasSwitches[dive.id] ?? const [],
+                              sourcesByDive[dive.id] ?? const [],
+                            );
                           },
                         );
                       },
@@ -668,6 +659,8 @@ class UddfExportService {
           customDiveRoles: customRoles,
           dataSources: sources,
           dataSourceDumps: encodedById,
+          // The computers are gear: a share without gear names none.
+          includeSourceIdentity: options.includeGear,
           attributedDives: dives,
           diveTankPressures: pressuresByDive,
           // The definitions the sites' type and tag references need.

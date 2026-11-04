@@ -3,8 +3,11 @@ import 'package:submersion/core/constants/gas_model.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/utils/gas_compressibility.dart';
 import 'package:submersion/features/dive_log/data/services/gas_analysis_service.dart';
+import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart'
+    show DivePhase, SacSegment;
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/services/deco_stop_windows.dart';
 
 void main() {
   late GasAnalysisService service;
@@ -42,7 +45,286 @@ void main() {
     return points;
   }
 
+  group('average depth over uneven samples (#3891)', () {
+    // 60 s at 10 m, a 60 s ramp to 30 m, then 480 s at 30 m: 27 m over time
+    // and 20 m over samples.
+    const uneven = [
+      DiveProfilePoint(timestamp: 0, depth: 10),
+      DiveProfilePoint(timestamp: 60, depth: 10),
+      DiveProfilePoint(timestamp: 120, depth: 30),
+      DiveProfilePoint(timestamp: 600, depth: 30),
+    ];
+    const tank = DiveTank(
+      id: 't1',
+      volume: 12,
+      startPressure: 200,
+      endPressure: 100,
+      gasMix: GasMix(o2: 21, he: 0),
+    );
+
+    const backGas = DiveTank(
+      id: 't0',
+      volume: 12,
+      startPressure: 200,
+      endPressure: 150,
+      gasMix: GasMix(o2: 21, he: 0),
+    );
+    GasSwitchWithTank switchTo(String tankId, int timestamp) =>
+        GasSwitchWithTank(
+          gasSwitch: GasSwitch(
+            id: 'gs-$tankId-$timestamp',
+            diveId: 'dive-1',
+            timestamp: timestamp,
+            tankId: tankId,
+            createdAt: DateTime(2026),
+          ),
+          tankName: tankId,
+          gasMix: 'air',
+          o2Fraction: 0.21,
+        );
+
+    test('a gas switch segment normalizes by its time-weighted depth', () {
+      final switches = [switchTo('t1', 0)];
+
+      SacSegment segmentOf(List<DiveProfilePoint> profile) => service
+          .calculateGasSwitchSegments(
+            profile: profile,
+            tanks: const [tank],
+            gasSwitches: switches,
+            tankPressures: {'t1': linearPressure('t1', 200, 100, 600)},
+          )!
+          .single;
+
+      final segment = segmentOf(uneven);
+      expect(segment.avgDepth, closeTo(27, 1e-9));
+      // The same breathing as a flat dive at that depth.
+      final flat = segmentOf([
+        for (final point in uneven)
+          DiveProfilePoint(timestamp: point.timestamp, depth: 27),
+      ]);
+      expect(segment.sacRate, closeTo(flat.sacRate, 1e-9));
+    });
+
+    test('a gas switch between samples starts the mean on the ramp', () {
+      final segment = service
+          .calculateGasSwitchSegments(
+            profile: uneven,
+            tanks: const [tank],
+            gasSwitches: [switchTo('t1', 90)],
+            tankPressures: {'t1': linearPressure('t1', 200, 100, 600)},
+          )!
+          .last;
+
+      // 20 m at 90 s: 30 s averaging 25 m, then 480 s at 30 m.
+      expect(segment.avgDepth, closeTo((30 * 25 + 480 * 30) / 510, 1e-9));
+      // The average stays inside the band it is reported with.
+      expect(segment.minDepth, closeTo(20, 1e-9));
+      expect(segment.maxDepth, closeTo(30, 1e-9));
+    });
+
+    test('a stint between two samples is still a segment', () {
+      const profile = [
+        DiveProfilePoint(timestamp: 0, depth: 10),
+        DiveProfilePoint(timestamp: 600, depth: 30),
+      ];
+
+      final segments = service.calculateGasSwitchSegments(
+        profile: profile,
+        tanks: const [backGas, tank],
+        gasSwitches: [
+          switchTo('t0', 0),
+          switchTo('t1', 120),
+          switchTo('t0', 420),
+        ],
+        tankPressures: {
+          't0': linearPressure('t0', 200, 150, 600),
+          't1': linearPressure('t1', 200, 100, 600),
+        },
+      )!;
+
+      // 120 s to 420 s, from 14 m to 24 m.
+      final stint = segments.singleWhere((s) => s.tankId == 't1');
+      expect(stint.avgDepth, closeTo(19, 1e-9));
+      expect(stint.minDepth, closeTo(14, 1e-9));
+      expect(stint.maxDepth, closeTo(24, 1e-9));
+    });
+
+    test('a usage range between samples still reads the depth there', () {
+      const profile = [
+        DiveProfilePoint(timestamp: 0, depth: 10),
+        DiveProfilePoint(timestamp: 600, depth: 30),
+      ];
+      final results = service.calculateCylinderSac(
+        dive: Dive(
+          id: 'dive-1',
+          dateTime: DateTime(2026),
+          profile: profile,
+          tanks: const [backGas, tank],
+        ),
+        profile: profile,
+        gasSwitches: [switchTo('t0', 0), switchTo('t1', 120)],
+        tankPressures: {'t1': linearPressure('t1', 200, 100, 600)},
+      );
+
+      // From 120 s, at 14 m, to the end at 30 m.
+      final used = results.singleWhere((c) => c.tankId == 't1');
+      expect(used.avgDepthDuringUse, closeTo(22, 1e-9));
+    });
+
+    test('a phase segment is unchanged by a sample on a flat stretch', () {
+      // A bottom phase on two levels, both within 15% of the maximum: a sample
+      // average moves with each sample added at 30 m, the mean over time does
+      // not.
+      const sparse = [
+        DiveProfilePoint(timestamp: 0, depth: 0),
+        DiveProfilePoint(timestamp: 120, depth: 30),
+        DiveProfilePoint(timestamp: 240, depth: 30),
+        DiveProfilePoint(timestamp: 360, depth: 30),
+        DiveProfilePoint(timestamp: 600, depth: 30),
+        DiveProfilePoint(timestamp: 660, depth: 27),
+        DiveProfilePoint(timestamp: 900, depth: 27),
+        DiveProfilePoint(timestamp: 1100, depth: 27),
+        DiveProfilePoint(timestamp: 1200, depth: 27),
+        DiveProfilePoint(timestamp: 1300, depth: 5),
+        DiveProfilePoint(timestamp: 1480, depth: 5),
+        DiveProfilePoint(timestamp: 1540, depth: 0),
+      ];
+      final dense = [
+        ...sparse.take(2),
+        const DiveProfilePoint(timestamp: 180, depth: 30),
+        ...sparse.skip(2).take(1),
+        const DiveProfilePoint(timestamp: 300, depth: 30),
+        ...sparse.skip(3),
+      ];
+
+      List<double> depthsOf(List<DiveProfilePoint> profile) => service
+          .calculatePhaseSegments(
+            profile: profile,
+            tanks: const [tank],
+            tankPressures: {'t1': linearPressure('t1', 200, 50, 1540)},
+          )!
+          .map((s) => s.avgDepth)
+          .toList();
+
+      final sparseDepths = depthsOf(sparse);
+      final denseDepths = depthsOf(dense);
+      expect(sparseDepths, isNotEmpty);
+      expect(denseDepths, hasLength(sparseDepths.length));
+      for (var i = 0; i < sparseDepths.length; i++) {
+        expect(denseDepths[i], closeTo(sparseDepths[i], 1e-9));
+      }
+    });
+
+    test('a cylinder reports its time-weighted depth during use', () {
+      final results = service.calculateCylinderSac(
+        dive: Dive(
+          id: 'dive-1',
+          dateTime: DateTime(2026),
+          profile: uneven,
+          tanks: const [tank],
+        ),
+        profile: uneven,
+        tankPressures: {'t1': linearPressure('t1', 200, 100, 600)},
+      );
+
+      expect(results.single.avgDepthDuringUse, closeTo(27, 1e-9));
+    });
+  });
+
   group('calculateGasSwitchSegments', () {
+    group('time before the first switch', () {
+      const backGas = DiveTank(
+        id: 't1',
+        name: 'Back gas',
+        role: TankRole.backGas,
+        startPressure: 200,
+        endPressure: 100,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      const stage = DiveTank(
+        id: 't2',
+        name: 'Stage',
+        role: TankRole.stage,
+        startPressure: 200,
+        endPressure: 150,
+        gasMix: GasMix(o2: 50, he: 0),
+      );
+
+      GasSwitchWithTank switchTo(DiveTank tank, int timestamp) =>
+          GasSwitchWithTank(
+            gasSwitch: GasSwitch(
+              id: 'gs$timestamp',
+              diveId: 'd1',
+              timestamp: timestamp,
+              tankId: tank.id,
+              createdAt: DateTime.utc(2026),
+            ),
+            tankName: tank.name!,
+            gasMix: tank.gasMix.name,
+            o2Fraction: tank.gasMix.o2 / 100,
+          );
+
+      test('belongs to the starting cylinder', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(stage, 3000)],
+          tankPressures: const {},
+        )!;
+
+        expect(segments.map((s) => s.tankId), ['t1', 't2']);
+        expect(segments.first.startTimestamp, 0);
+        expect(segments.first.endTimestamp, 3000);
+        expect(segments.first.tankName, 'Back gas');
+      });
+
+      test('prorates over the starting cylinder\'s own stint', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(stage, 3000)],
+          tankPressures: const {},
+        )!;
+
+        // 100 bar over its 50 minutes at 3 ata, not over the 60 minute dive.
+        expect(segments.first.sacRate, closeTo(100 / 50 / 3.0, 0.02));
+      });
+
+      test('stops at the dive end when a switch falls after it', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(stage, 3700)],
+          tankPressures: const {},
+        )!;
+
+        expect(segments.single.tankId, 't1');
+        expect(segments.single.endTimestamp, 3600);
+      });
+
+      test('a later switch past the dive end stops at it too', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(stage, 3000), switchTo(backGas, 3700)],
+          tankPressures: const {},
+        )!;
+
+        expect(segments.last.endTimestamp, 3600);
+      });
+
+      test('adds nothing when a switch opens the dive', () {
+        final segments = service.calculateGasSwitchSegments(
+          profile: flatProfile(3600, 20),
+          tanks: const [backGas, stage],
+          gasSwitches: [switchTo(backGas, 0), switchTo(stage, 3000)],
+          tankPressures: const {},
+        )!;
+
+        expect(segments.map((s) => s.startTimestamp), [0, 3000]);
+      });
+    });
+
     test('a stage tank prorates over its own stint, not the whole dive '
         '(#110)', () {
       // 60-minute dive: back gas for 50 minutes, then a deco tank for the
@@ -361,6 +643,100 @@ void main() {
       for (final seg in segments) {
         expect(seg.sacRate, greaterThan(0));
       }
+    });
+
+    group('a hold in the safety stop band (#4079)', () {
+      const tank = DiveTank(
+        id: 't1',
+        volume: 11.1,
+        startPressure: 200,
+        endPressure: 80,
+        gasMix: GasMix(o2: 21, he: 0),
+      );
+      // 10 minutes at 30 m, a minute up, then 6 minutes at 5 m from 660 s.
+      final profile = <DiveProfilePoint>[
+        for (var t = 0; t < 600; t += 10)
+          DiveProfilePoint(timestamp: t, depth: 30),
+        for (var t = 600; t < 660; t += 10)
+          DiveProfilePoint(timestamp: t, depth: 30 - 25 * (t - 600) / 60),
+        for (var t = 660; t <= 1020; t += 10)
+          DiveProfilePoint(timestamp: t, depth: 5),
+      ];
+      List<DivePhase?> phases(List<StopWindow> decoStops) => service
+          .calculatePhaseSegments(
+            profile: profile,
+            tanks: const [tank],
+            tankPressures: {'t1': linearPressure('t1', 200, 80, 1020)},
+            decoStops: decoStops,
+          )!
+          .map((s) => s.phase)
+          .toList();
+
+      test('is a safety stop by default', () {
+        expect(phases(const []), contains(DivePhase.safetyStop));
+        expect(phases(const []), isNot(contains(DivePhase.deco)));
+      });
+
+      test('is a deco stop inside a deco stop window', () {
+        final result = phases(const [(start: 660, end: 1020)]);
+
+        expect(result, contains(DivePhase.deco));
+        expect(result, isNot(contains(DivePhase.safetyStop)));
+      });
+
+      test('is a deco stop on a sample the NDL curve reads as in deco', () {
+        // Too short to be a window: a minute at 5 m, sampled every 2 seconds.
+        final short = <DiveProfilePoint>[
+          for (var t = 0; t < 600; t += 2)
+            DiveProfilePoint(timestamp: t, depth: 30),
+          for (var t = 600; t <= 660; t += 2)
+            DiveProfilePoint(timestamp: t, depth: 5),
+          for (var t = 662; t <= 720; t += 2)
+            DiveProfilePoint(timestamp: t, depth: 0),
+        ];
+        List<DivePhase?> shortPhases(List<int> ndlCurve) => service
+            .calculatePhaseSegments(
+              profile: short,
+              tanks: const [tank],
+              tankPressures: {'t1': linearPressure('t1', 200, 80, 720)},
+              ndlCurve: ndlCurve,
+            )!
+            .map((s) => s.phase)
+            .toList();
+
+        expect(shortPhases(const []), contains(DivePhase.safetyStop));
+        expect(
+          shortPhases(List.filled(short.length - 1, -1)),
+          contains(DivePhase.safetyStop),
+          reason: 'a curve of another length is another series',
+        );
+        expect(
+          shortPhases(List.filled(short.length, -1)),
+          isNot(contains(DivePhase.safetyStop)),
+        );
+      });
+
+      test('stays a safety stop inside a safety stop window', () {
+        final result = service
+            .calculatePhaseSegments(
+              profile: profile,
+              tanks: const [tank],
+              tankPressures: {'t1': linearPressure('t1', 200, 80, 1020)},
+              safetyStops: const [(start: 660, end: 1020)],
+              ndlCurve: List.filled(profile.length, -1),
+            )!
+            .map((s) => s.phase);
+
+        expect(result, contains(DivePhase.safetyStop));
+        expect(result, isNot(contains(DivePhase.deco)));
+      });
+
+      test('stays a safety stop outside every window', () {
+        final result = phases(const [(start: 0, end: 300)]);
+
+        expect(result, contains(DivePhase.safetyStop));
+        expect(result, isNot(contains(DivePhase.deco)));
+      });
     });
 
     test('falls back to whole-dive proration when no gas switches identify '

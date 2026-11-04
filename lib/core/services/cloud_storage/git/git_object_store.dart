@@ -172,6 +172,20 @@ final class _MemoryObjectWriter implements GitObjectWriter {
 final class FileGitObjectStore implements GitObjectStore {
   FileGitObjectStore(this.root, {this.maxBytes = _defaultMaxBytes});
 
+  /// A store for a worker isolate to read and write through while another
+  /// store on [root] owns it. It skips the scan, which takes seconds on a full
+  /// cache and would run once per pack, because [_entryFor] finds any object
+  /// it is asked for. Its index covers only what it has touched, so it must
+  /// not [trim]: eviction belongs to the owning store, which has to be asked
+  /// about what this one wrote (see `readSpooledPack`). The recency of what it
+  /// reads does not reach that store either, so a trim there can take a delta
+  /// base from under a read. An open handle outlives that where the platform
+  /// allows deleting an open file; elsewhere the delete fails and the file
+  /// stays until a later scan counts it.
+  FileGitObjectStore.unindexed(this.root) : maxBytes = _defaultMaxBytes {
+    _index = Future.value({});
+  }
+
   /// Test seam: replaces [File.rename] when an object file moves into place,
   /// so a test can lose the race to a concurrent put on purpose. Production
   /// leaves this null.
@@ -334,7 +348,7 @@ final class FileGitObjectStore implements GitObjectStore {
 
   /// A temp file name of its own: two writes of one object may run at once.
   String _tmpName(String stem) =>
-      '$stem.${_random.nextInt(1 << 32).toRadixString(16)}$_tmpSuffix';
+      '$stem.${_random.nextInt(0x100000000).toRadixString(16)}$_tmpSuffix';
 
   @override
   Future<void> put(GitStoredObject object) async {

@@ -5,12 +5,19 @@ import 'package:submersion/core/query/registry/query_entity.dart';
 import 'package:submersion/core/query/registry/query_field.dart';
 import 'package:submersion/core/query/registry/query_relation.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_times_sql.dart';
+import 'package:submersion/features/dive_log/data/sql/dive_weight_sql.dart';
 import 'package:submersion/features/dive_log/data/sql/multi_cylinder_sac_sql.dart';
 import 'package:submersion/features/dive_log/domain/entities/derived_metrics.dart';
 import 'package:submersion/features/dive_log/query/dive_child_query_entities.dart';
+import 'package:submersion/features/dive_log/query/dive_number_query.dart';
+import 'package:submersion/features/dive_log/query/dive_word_meanings.dart';
 import 'package:submersion/features/dive_types/query/dive_type_text_search.dart';
 import 'package:submersion/features/equipment/data/repositories/tank_regulator_sql.dart';
 import 'package:submersion/features/insights/data/dive_filter_sql.dart';
+import 'package:submersion/features/insights/data/repositories/site_entry_method_sql.dart';
+import 'package:submersion/features/insights/data/tank_configuration_sql.dart';
+import 'package:submersion/features/insights/domain/tank_configuration/tank_configuration.dart';
+import 'package:submersion/features/marine_life/query/sighting_text_search.dart';
 
 /// Every field and relation a dive query can name (#2365). This file is
 /// the ONLY place a dive filter axis is defined: the paginated list, its
@@ -31,13 +38,12 @@ const _month =
 const _day =
     "CAST(strftime('%d', {r}.dive_date_time / 1000, 'unixepoch') AS INTEGER)";
 
-/// No weight entry at all: neither a `dive_weights` row nor the legacy
-/// scalar the edit form migrates into the table on load (#1392). ONE rule,
-/// read by the `weight` field and the `weights` relation so `weight:none`
-/// and `weights:none` cannot disagree.
-const kDiveNoWeightSql =
-    '({r}.weight_amount IS NULL AND NOT EXISTS '
-    '(SELECT 1 FROM dive_weights w WHERE w.dive_id = {r}.id))';
+/// No weight entry at all: neither a `dive_weights` row nor a positive legacy
+/// scalar, the one the edit form migrates into the table on load (#1392). ONE
+/// rule, read by the `weight` field and the `weights` relation so `weight:none`
+/// and `weights:none` cannot disagree, and defined as the NULL case of
+/// [recordedWeightKgSql] so neither can disagree with the value (#3914).
+final kDiveNoWeightSql = '(${recordedWeightKgSql('{r}')} IS NULL)';
 
 /// The gear union the equipment axes have always used: items linked
 /// through `dive_equipment`, cylinders the transmitter registry matched
@@ -50,13 +56,34 @@ final kDiveGearJoinSql =
     'WHERE dt.dive_id = {from}.id AND dt.equipment_id IS NOT NULL '
     'UNION ${tankRegulatorIdsOfDiveSql('{from}.id')})';
 
+const _gearWordMatchSql =
+    "SELECT teq.id FROM equipment teq WHERE unicode_lower(teq.name) LIKE ? "
+    "ESCAPE '\\' OR unicode_lower(teq.brand) LIKE ? ESCAPE '\\' "
+    "OR unicode_lower(teq.model) LIKE ? ESCAPE '\\'";
+
+/// A word that names gear a dive used: the same set as [kDiveGearJoinSql],
+/// walked from the matching gear to its dives, because that join is correlated
+/// and would read the equipment table once per dive.
+final _gearTextSearchSql =
+    '{r}.id IN (SELECT tde.dive_id FROM dive_equipment tde '
+    'WHERE tde.equipment_id IN ($_gearWordMatchSql) '
+    'UNION SELECT tdt.dive_id FROM dive_tanks tdt '
+    'WHERE tdt.equipment_id IN ($_gearWordMatchSql) '
+    'UNION SELECT dive_id FROM ($tankRegulatorPairsSql) '
+    'WHERE equipment_id IN ($_gearWordMatchSql))';
+
 /// A dive's effective water type: its own, else its site's (issue #3196).
 /// The SQL twin of `Dive.effectiveWaterType`, matching the insights water
 /// type chart, so a dive at a salt-water site is found by `waterType:salt`
 /// whether or not the value was ever copied onto the dive.
-const _effectiveWaterType =
-    "COALESCE(NULLIF({r}.water_type, ''), "
-    "(SELECT NULLIF(s.water_type, '') FROM dive_sites s "
+final String _effectiveWaterType = diveEffectiveWaterTypeSql('{r}');
+
+/// A dive's effective entry method: its own, else its site's when the site
+/// lists exactly one (issue #3806). The SQL twin of
+/// `Dive.effectiveEntryMethod`, matching the insights entry method chart.
+final _effectiveEntryMethod =
+    "COALESCE(NULLIF({r}.entry_method, ''), "
+    "(SELECT ${singleSiteEntryMethodSql('s.entry_method')} FROM dive_sites s "
     'WHERE s.id = {r}.site_id))';
 
 List<String> _names<T extends Enum>(List<T> values) => [
@@ -102,12 +129,40 @@ QueryField _enum(String key, String column, List<String> values) => QueryField(
   enumValues: values,
 );
 
+/// An enum read through [sql], a dive's value with its site as the fallback,
+/// so the query re-ticks when a site changes.
+QueryField _effectiveEnum(String key, String sql, List<String> values) =>
+    QueryField(
+      key: key,
+      type: FieldType.enumName,
+      sql: sql,
+      emptySql: '$sql IS NULL',
+      labelKey: _label(key),
+      enumValues: values,
+      tables: const ['dive_sites'],
+    );
+
 QueryField _bool(String key, String column) => QueryField(
   key: key,
   type: FieldType.bool,
   sql: '{r}.$column',
   emptySql: '0',
   labelKey: _label(key),
+);
+
+/// One of a dive's tank configuration extras, a yes or no in the shape of
+/// `deco`. Its key is the [TankConfigurationExtra]'s name.
+QueryField _tankExtra(TankConfigurationExtra extra) => QueryField(
+  key: extra.name,
+  type: FieldType.bool,
+  sql: '',
+  emptySql: '0',
+  labelKey: _label(extra.name),
+  boolSql: (
+    whenTrue: tankConfigHasExtraSql('{r}', extra),
+    whenFalse: 'NOT (${tankConfigHasExtraSql('{r}', extra)})',
+  ),
+  tables: kTankConfigurationTables,
 );
 
 QueryRelation _fk(
@@ -171,18 +226,21 @@ String _derived(String column) =>
 /// chart plots (`InsightsRepository.getSacPressurePerDive`): every breathed
 /// cylinder's drop in bar of the back gas (issue #3109) over the runtime,
 /// normalised by the average depth, so a search and the chart agree. Empty
-/// with no back-gas drop, no runtime or no average depth, and on a CCR or
-/// SCR dive (issue #3673).
+/// with no back-gas pressures, no drop to count (#3974), no runtime or no
+/// average depth, and on a CCR or SCR dive (issue #3673).
 final String kDiveSacSql =
-    '(CASE WHEN COALESCE({r}.runtime, {r}.bottom_time) > 0 '
+    '(CASE WHEN ${measuredRuntimeSecondsSql('{r}')} > 0 '
     'AND {r}.avg_depth > 0 THEN ${diveSacPressureSql('{r}')} END)';
+
+/// [measuredRuntimeTables] as a field's table list (issue #3537).
+const List<String> _measuredRuntimeTables = [...measuredRuntimeTables];
 
 final QueryEntity diveQueryEntity = QueryEntity(
   subject: QuerySubject.dives,
   table: 'dives',
   diverScopeColumn: 'diver_id',
   scopesHopsToDiver: true,
-  textSearchSql: const [
+  textSearchSql: [
     "unicode_lower({r}.notes) LIKE ? ESCAPE '\\'",
     "unicode_lower({r}.name) LIKE ? ESCAPE '\\'",
     "unicode_lower({r}.buddy) LIKE ? ESCAPE '\\'",
@@ -210,6 +268,28 @@ final QueryEntity diveQueryEntity = QueryEntity(
     'EXISTS (SELECT 1 FROM dive_dive_types tddt JOIN dive_types tdty '
         'ON tdty.id = tddt.dive_type_id WHERE tddt.dive_id = {r}.id '
         "AND unicode_lower(tdty.name) LIKE ? ESCAPE '\\')",
+    // What a dive carries, so a brand or a trip finds it (#3457). Each of
+    // these reads its matches once rather than once per dive, which keeps a
+    // word that matches nothing cheap on a long log.
+    _gearTextSearchSql,
+    "{r}.trip_id IN (SELECT ttrp.id FROM trips ttrp WHERE "
+        "unicode_lower(ttrp.name) LIKE ? ESCAPE '\\' "
+        "OR unicode_lower(ttrp.location) LIKE ? ESCAPE '\\' "
+        "OR unicode_lower(ttrp.resort_name) LIKE ? ESCAPE '\\' "
+        "OR unicode_lower(ttrp.liveaboard_name) LIKE ? ESCAPE '\\')",
+    '{r}.id IN (SELECT tsgt.dive_id FROM sightings tsgt WHERE tsgt.species_id '
+        'IN (SELECT tspc.id FROM species tspc WHERE '
+        "unicode_lower(tspc.common_name) LIKE ? ESCAPE '\\' "
+        "OR unicode_lower(tspc.scientific_name) LIKE ? ESCAPE '\\'))",
+    '{r}.id IN (SELECT tdcr.dive_id FROM dive_courses tdcr WHERE tdcr.course_id '
+        'IN (SELECT tcrs.id FROM courses tcrs WHERE '
+        "unicode_lower(tcrs.name) LIKE ? ESCAPE '\\' "
+        "OR unicode_lower(tcrs.location) LIKE ? ESCAPE '\\'))",
+    "unicode_lower({r}.dive_computer_model) LIKE ? ESCAPE '\\'",
+    "{r}.computer_id IN (SELECT tcmp.id FROM dive_computers tcmp "
+        "WHERE unicode_lower(tcmp.name) LIKE ? ESCAPE '\\' "
+        "OR unicode_lower(tcmp.manufacturer) LIKE ? ESCAPE '\\' "
+        "OR unicode_lower(tcmp.model) LIKE ? ESCAPE '\\')",
   ],
   textSearchTables: const [
     'dive_sites',
@@ -221,8 +301,26 @@ final QueryEntity diveQueryEntity = QueryEntity(
     'dive_custom_fields',
     'dive_dive_types',
     'dive_types',
+    'equipment',
+    'dive_equipment',
+    'dive_tanks',
+    'trips',
+    'sightings',
+    'species',
+    'dive_courses',
+    'courses',
+    'dive_computers',
   ],
-  textSearchExpansions: const [kDiveTypeTranslatedTextSearch],
+  textSearchExpansions: [
+    kDiveTypeTranslatedTextSearch,
+    kDiveNumberTextSearch,
+    kSightingTranslatedTextSearch,
+    ...diveWordExpansions(
+      entryMethodSql: _effectiveEntryMethod,
+      waterTypeSql: _effectiveWaterType,
+    ),
+  ],
+  plainWords: kDivePlainWords,
   fields: [
     QueryField(
       key: 'id',
@@ -302,11 +400,13 @@ final QueryEntity diveQueryEntity = QueryEntity(
       dimension: FieldDimension.minutes,
       emptySql: '{r}.bottom_time IS NULL',
     ),
+    // What the dive measured, like the Runtime column and every total: never
+    // a bottom time (issue #3304).
     _num(
       'runtime',
-      '({r}.runtime / 60)',
+      '(${measuredRuntimeSecondsSql('{r}')} / 60)',
       dimension: FieldDimension.minutes,
-      emptySql: '{r}.runtime IS NULL',
+      tables: _measuredRuntimeTables,
     ),
     _num(
       'depth',
@@ -367,7 +467,7 @@ final QueryEntity diveQueryEntity = QueryEntity(
       // The profile span fallback also reads the series history, which is
       // only written alongside a dive_profile_series row, so that tick
       // covers it (issue #3537).
-      tables: const ['dive_profile_series', 'dive_data_sources'],
+      tables: _measuredRuntimeTables,
     ),
     _num(
       'cnsEnd',
@@ -380,8 +480,7 @@ final QueryEntity diveQueryEntity = QueryEntity(
     // legacy scalar the edit form retired (#1392). Empty means neither.
     _num(
       'weight',
-      'COALESCE((SELECT SUM(w.amount_kg) FROM dive_weights w '
-          'WHERE w.dive_id = {r}.id), {r}.weight_amount)',
+      recordedWeightKgSql('{r}'),
       aliases: ['lead'],
       dimension: FieldDimension.weight,
       emptySql: kDiveNoWeightSql,
@@ -396,12 +495,26 @@ final QueryEntity diveQueryEntity = QueryEntity(
           'NOT EXISTS (SELECT 1 FROM dive_tanks t WHERE t.dive_id = {r}.id)',
       tables: ['dive_tanks'],
     ),
+    QueryField(
+      key: 'tankConfig',
+      type: FieldType.enumName,
+      sql: tankConfigBaseSql('{r}'),
+      // The No tanks logged bar, not "no tank rows": a rebreather dive with
+      // none is still Rebreather, so `:none` leaves it out where
+      // `gasCount:none` finds it.
+      emptySql: "${tankConfigBaseSql('{r}')} = 'noTanks'",
+      labelKey: _label('tankConfig'),
+      enumValues: _names(TankBaseConfiguration.values),
+      tables: kTankConfigurationTables,
+    ),
+    for (final extra in TankConfigurationExtra.values) _tankExtra(extra),
     _num(
       'sac',
       kDiveSacSql,
       dimension: FieldDimension.pressureRate,
       sanity: (min: 0, max: 20),
-      tables: ['dive_tanks'],
+      // dive_sites: a dive with no water of its own reads its site's.
+      tables: ['dive_tanks', 'dive_sites', ..._measuredRuntimeTables],
     ),
     QueryField(
       key: 'sacTrend',
@@ -472,16 +585,12 @@ final QueryEntity diveQueryEntity = QueryEntity(
       'current_strength',
       _names(CurrentStrength.values),
     ),
-    QueryField(
-      key: 'waterType',
-      type: FieldType.enumName,
-      sql: _effectiveWaterType,
-      emptySql: '$_effectiveWaterType IS NULL',
-      labelKey: _label('waterType'),
-      enumValues: _names(WaterType.values),
-      tables: const ['dive_sites'],
+    _effectiveEnum('waterType', _effectiveWaterType, _names(WaterType.values)),
+    _effectiveEnum(
+      'entryMethod',
+      _effectiveEntryMethod,
+      _names(EntryMethod.values),
     ),
-    _enum('entryMethod', 'entry_method', _names(EntryMethod.values)),
     _enum('exitMethod', 'exit_method', _names(EntryMethod.values)),
     _enum('diveMode', 'dive_mode', _names(DiveMode.values)),
     _bool('favorite', 'is_favorite'),

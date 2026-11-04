@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
@@ -10,6 +11,7 @@ import 'package:submersion/features/dive_log/data/repositories/profile_series_re
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_source_links.dart';
 import 'package:submersion/features/dive_log/data/services/data_source_strand.dart';
+import 'package:submersion/features/dive_log/data/services/dive_fold_links.dart';
 import 'package:submersion/features/dive_log/data/services/dive_merge_snapshot.dart';
 import 'package:submersion/features/dive_log/domain/codecs/profile_sample.dart';
 import 'package:submersion/features/dive_log/domain/services/unreadable_series_exception.dart';
@@ -17,12 +19,14 @@ import 'package:submersion/features/dive_log/domain/entities/dive.dart'
     as domain;
 import 'package:submersion/features/dive_log/domain/entities/profile_series.dart'
     as series;
+import 'package:submersion/features/dive_log/domain/services/annotation_links.dart';
 import 'package:submersion/features/dive_log/domain/services/dive_merge_builder.dart';
 import 'package:submersion/features/dive_roles/data/repositories/dive_role_link_repository.dart';
 import 'package:submersion/features/dive_roles/domain/services/dive_role_set.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/documents/data/repositories/document_repository.dart';
 import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/nav_track/data/repositories/nav_track_repository.dart';
 
 /// Result of a successful merge: the new dive plus the pre-merge snapshot
 /// needed to undo it.
@@ -47,6 +51,8 @@ class DiveMergeService {
   final _tagRepository = TagRepository();
   final _profileSeries = ProfileSeriesRepository();
   final _tankSeries = TankPressureSeriesRepository();
+  final _navTracks = NavTrackRepository();
+  final _foldLinks = DiveFoldLinks();
 
   AppDatabase get _db => DatabaseService.instance.database;
 
@@ -70,6 +76,30 @@ class DiveMergeService {
       if (value != null) return value;
     }
     return null;
+  }
+
+  T? _lastNonNullDiveColumn<T>(
+    List<Dive> orderedRows,
+    T? Function(Dive) pick,
+  ) => _firstNonNullDiveColumn(orderedRows.reversed.toList(), pick);
+
+  /// The sum of every segment's value, or null when none has one: a dose
+  /// such as OTU accumulates over the whole combined dive (issue #4136).
+  double? _summedDiveColumn(
+    List<Dive> orderedRows,
+    double? Function(Dive) pick,
+  ) {
+    final values = orderedRows.map(pick).nonNulls;
+    return values.isEmpty ? null : values.reduce((a, b) => a + b);
+  }
+
+  /// The rows whose exposure was measured: the logged segments, so a plan's
+  /// computed CNS or OTU never lands on the logged dive (issue #3924), as
+  /// `DiveMergeBuilder` keeps a plan's values out of its summaries. Every
+  /// row when all of them are plans.
+  List<Dive> _loggedDiveRows(List<Dive> orderedRows) {
+    final logged = orderedRows.where((r) => !r.isPlanned).toList();
+    return logged.isEmpty ? orderedRows : logged;
   }
 
   /// The draft that hosts a gap's surface samples: the segment's primary
@@ -117,7 +147,13 @@ class DiveMergeService {
   /// is not a valid sequential combine (too few dives, mixed divers, or
   /// overlapping timelines) -- nothing is read from the DB via a snapshot
   /// and nothing is written in that case.
-  Future<DiveMergeOutcome> apply(List<String> diveIds) async {
+  Future<DiveMergeOutcome> apply(List<String> diveIds) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.merge,
+    body: () => _applyInner(diveIds),
+  );
+
+  Future<DiveMergeOutcome> _applyInner(List<String> diveIds) async {
     // Every series this operation will carry across has to decode: it
     // re-bases the samples onto the merged timeline and then deletes the
     // dives that hold them, and reads answer an unreadable blob with null,
@@ -162,17 +198,28 @@ class DiveMergeService {
     final mergedId = result.mergedDive.id;
     final snapshot = await captureSnapshot(diveIds, mergedId);
     final now = DateTime.now().millisecondsSinceEpoch;
+    // The events come across under fresh ids (step 5), and an annotation is
+    // held together by its id, so the links in the combined Notes follow
+    // them (#4109).
+    final mergedEventIds = {
+      for (final row in snapshot.eventRows) row.id: _uuid.v4(),
+    };
+    final mergedDive = result.mergedDive.copyWith(
+      notes: renameAnnotationLinks(result.mergedDive.notes, mergedEventIds),
+    );
 
     await _db.transaction(() async {
       // 1. Merged dive + entity-carried children (tanks, weights, custom
       //    fields, profile=[], equipment, tags, dive types).
-      await _diveRepo.createDive(result.mergedDive);
+      await _diveRepo.createDive(mergedDive);
 
       // 1b. Columns the domain Dive entity has no field for (computerId,
       //     importVersion, cnsStart/cnsEnd/otu) never travel through
       //     createDive's round-trip through the domain layer, so backfill
       //     them directly from the source rows here, chronologically
-      //     (sortedSources order), first-non-null wins per column. Same
+      //     (sortedSources order). An identity column takes the first
+      //     non-null value; a whole-dive one (CNS at the end, the OTU dose)
+      //     takes the last segment's or the sum (issue #4136). Same
       //     transaction/record as createDive's write above, so no separate
       //     markRecordPending is needed.
       final chronologicalDiveRows = [
@@ -194,10 +241,16 @@ class DiveMergeService {
           // is always the "first non-null" one.
           cnsStart: Value(chronologicalDiveRows.first.cnsStart),
           cnsEnd: Value(
-            _firstNonNullDiveColumn(chronologicalDiveRows, (r) => r.cnsEnd),
+            _lastNonNullDiveColumn(
+              _loggedDiveRows(chronologicalDiveRows),
+              (r) => r.cnsEnd,
+            ),
           ),
           otu: Value(
-            _firstNonNullDiveColumn(chronologicalDiveRows, (r) => r.otu),
+            _summedDiveColumn(
+              _loggedDiveRows(chronologicalDiveRows),
+              (r) => r.otu,
+            ),
           ),
         ),
       );
@@ -459,7 +512,7 @@ class DiveMergeService {
       // 5. Existing profile events, re-based, tank text-refs remapped.
       for (final row in snapshot.eventRows) {
         final offset = result.segmentOffsetsSeconds[row.diveId] ?? 0;
-        final eventId = _uuid.v4();
+        final eventId = mergedEventIds[row.id]!;
         await _db
             .into(_db.diveProfileEvents)
             .insert(
@@ -640,16 +693,27 @@ class DiveMergeService {
         mergedId,
       );
 
+      // 12c. So do measured routes and whatever else points at the sources
+      // (issue #3918).
+      await _navTracks.moveLinks(fromDiveIds: diveIds, toDiveId: mergedId);
+      await _foldLinks.move(fromDiveIds: diveIds, toDiveId: mergedId, now: now);
+
       // 13. Delete sources through the tombstone-logging path.
       await _diveRepo.bulkDeleteDives(diveIds);
     });
 
     SyncEventBus.notifyLocalChange();
-    return DiveMergeOutcome(mergedDive: result.mergedDive, snapshot: snapshot);
+    return DiveMergeOutcome(mergedDive: mergedDive, snapshot: snapshot);
   }
 
   /// Restores the source dives exactly and removes the merged dive.
-  Future<void> undo(DiveMergeSnapshot snapshot) async {
+  Future<void> undo(DiveMergeSnapshot snapshot) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.undoMerge,
+    body: () => _undoInner(snapshot),
+  );
+
+  Future<void> _undoInner(DiveMergeSnapshot snapshot) async {
     final now = DateTime.now().millisecondsSinceEpoch;
 
     await _db.transaction(() async {
@@ -790,6 +854,7 @@ class DiveMergeService {
       for (final r in snapshot.tankSeriesRows) {
         await _tankSeries.restoreSeriesRow(r, now: now);
       }
+      await _profileSeries.restoreRevisions(snapshot.profileRevisions);
       for (final r in snapshot.weightRows) {
         await _db
             .into(_db.diveWeights)
@@ -905,6 +970,13 @@ class DiveMergeService {
           localUpdatedAt: now,
         );
       }
+
+      // Routes and the other records back on their sources (issue #3918).
+      await _navTracks.restoreLinks(
+        snapshot.navTrackRows,
+        survivingDiveId: mergedId,
+      );
+      await _foldLinks.restore(snapshot.linkedRows, now: now);
     });
 
     SyncEventBus.notifyLocalChange();

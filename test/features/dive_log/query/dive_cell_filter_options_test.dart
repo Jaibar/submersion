@@ -118,6 +118,30 @@ void main() {
     expect((o.first.rule as ConditionNode).value, const NumberValue(47, null));
   });
 
+  // The `runtime` field reads the measured runtime, as the cell shows it
+  // (issue #3304), so a runtime from entry and exit offers its rule too.
+  test('a runtime measured from entry and exit offers its rule', () {
+    final o = options(
+      DiveField.runtime,
+      base.copyWith(
+        entryTime: DateTime.utc(2026, 4, 1, 9),
+        exitTime: DateTime.utc(2026, 4, 1, 9, 50, 30),
+      ),
+    );
+    expect((o.first.rule as ConditionNode).value, const NumberValue(50, null));
+  });
+
+  test('a bottom time alone leaves the runtime empty', () {
+    final o = options(
+      DiveField.runtime,
+      base.copyWith(bottomTime: const Duration(minutes: 40)),
+    );
+    expect(o.map((x) => x.kind), [
+      CellFilterKind.noValue,
+      CellFilterKind.anyValue,
+    ]);
+  });
+
   test('surface interval reads the computed map', () {
     final o = options(
       DiveField.surfaceInterval,
@@ -280,26 +304,23 @@ void main() {
     );
   });
 
+  // The `entryMethod` field reads the site's sole method too (issue #3806),
+  // so the cell and the rule it offers agree on what the dive shows.
+  test('an entry method inherited from the site offers its rule', () {
+    final d = base.copyWith(
+      site: const DiveSite(
+        id: 's',
+        name: 'S',
+        entryMethods: [enums.EntryMethod.shore],
+      ),
+    );
+    expect(
+      (options(DiveField.entryMethod, d).first.rule as ConditionNode).value,
+      isA<EnumValue>().having((v) => v.name, 'name', 'shore'),
+    );
+  });
+
   group('derived display offers no items', () {
-    test('runtime derived from timestamps', () {
-      final d = base.copyWith(
-        entryTime: DateTime.utc(2026, 4, 1, 9),
-        exitTime: DateTime.utc(2026, 4, 1, 9, 50),
-      );
-      expect(options(DiveField.runtime, d), isEmpty);
-    });
-
-    test('entry method inherited from the site', () {
-      final d = base.copyWith(
-        site: const DiveSite(
-          id: 's',
-          name: 'S',
-          entryMethods: [enums.EntryMethod.shore],
-        ),
-      );
-      expect(options(DiveField.entryMethod, d), isEmpty);
-    });
-
     test('a dive whose only participant is a guide', () {
       // The cell lists non-guide buddies ("--"), but `buddies` counts every
       // link, so "no buddy" would drop this dive.
@@ -337,7 +358,7 @@ void main() {
     });
 
     test('total weight, which list loads never hydrate', () {
-      // getAllDives loads weights as const [], so the cell is always "--"
+      // getAllDives loads weights as const [], so a row-weighted cell is "--"
       // while the weight field reads dive_weights: "no Total Weight" would
       // drop the clicked dive.
       expect(options(DiveField.totalWeight, base), isEmpty);

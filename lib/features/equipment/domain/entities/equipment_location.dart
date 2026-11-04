@@ -4,6 +4,7 @@ import 'package:equatable/equatable.dart';
 /// order is the heading order when the Equipment page groups by location.
 enum EquipmentLocationKind {
   storage,
+  diveCenter,
   serviceShop,
   person,
   other;
@@ -18,13 +19,19 @@ enum EquipmentLocationKind {
   }
 }
 
-/// One of a diver's named places where gear can be: a shelf, a shop, a
-/// friend. Archived places leave the picker but stay in history.
+/// One of a diver's named places where gear can be: a shelf, a dive center,
+/// a shop, a friend. Archived places leave the picker but stay in history.
 class EquipmentLocation extends Equatable {
   final String id;
   final String? diverId;
   final String name;
   final EquipmentLocationKind kind;
+
+  /// The saved dive center this place stands for, if any (issue #3623).
+  final String? diveCenterId;
+
+  /// The buddy this place stands for, if any (issue #3790).
+  final String? buddyId;
   final String notes;
   final bool isArchived;
   final DateTime createdAt;
@@ -35,6 +42,8 @@ class EquipmentLocation extends Equatable {
     this.diverId,
     required this.name,
     required this.kind,
+    this.diveCenterId,
+    this.buddyId,
     this.notes = '',
     this.isArchived = false,
     required this.createdAt,
@@ -46,6 +55,10 @@ class EquipmentLocation extends Equatable {
     String? diverId,
     String? name,
     EquipmentLocationKind? kind,
+    String? diveCenterId,
+    bool clearDiveCenterId = false,
+    String? buddyId,
+    bool clearBuddyId = false,
     String? notes,
     bool? isArchived,
     DateTime? createdAt,
@@ -55,6 +68,8 @@ class EquipmentLocation extends Equatable {
     diverId: diverId ?? this.diverId,
     name: name ?? this.name,
     kind: kind ?? this.kind,
+    diveCenterId: clearDiveCenterId ? null : diveCenterId ?? this.diveCenterId,
+    buddyId: clearBuddyId ? null : buddyId ?? this.buddyId,
     notes: notes ?? this.notes,
     isArchived: isArchived ?? this.isArchived,
     createdAt: createdAt ?? this.createdAt,
@@ -67,6 +82,8 @@ class EquipmentLocation extends Equatable {
     diverId,
     name,
     kind,
+    diveCenterId,
+    buddyId,
     notes,
     isArchived,
     createdAt,

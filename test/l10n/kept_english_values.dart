@@ -31,6 +31,8 @@ const _germanSerial =
     'S/N is the usual German abbreviation for a serial number';
 
 const Map<String, String> keptEnglishValues = {
+  'settings_agentAccess_claudeCode': _brand,
+  'settings_agentAccess_claudeDesktop': _brand,
   'attrChoice_battery_type_lithium_ion@fr': _sameWord,
   'attrChoice_battery_type_lithium_ion@nl': _sameWord,
   'attrChoice_bcd_style_back_inflate@de': _loanword,
@@ -205,6 +207,10 @@ const Map<String, String> keptEnglishValues = {
   'plannerMission_environment_openWater@nl': _sameWord,
   'preDive_sessions_title@nl': _loanword,
   'preDive_templates_title@nl': _loanword,
+  'query_dives_stages@de': _loanword,
+  'query_dives_stages@es': _loanword,
+  'query_dives_stages@fr': _loanword,
+  'query_dives_stages@pt': _loanword,
   'safetyHub_cnsOtu_elapsedDaysHours@es': _units,
   'safetyHub_cnsOtu_elapsedDaysHours@pt': _units,
   'safetySettings_noFlyPreset_standard@de': _sameWord,
@@ -251,4 +257,5 @@ const Map<String, String> keptEnglishValues = {
   'trips_detail_preDive_action@nl': _loanword,
   'units_profileMetric_gPerL': _units,
   'universalImport_compare_serial@de': _germanSerial,
+  'web_googleClientId_hint': _exampleAddress,
 };

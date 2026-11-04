@@ -101,8 +101,8 @@ const Map<DiveField, DiveColumnFilter> kDiveColumnFilters = {
     'visibility',
     DiveColumnFilterKind.number,
   ),
-  // Header only: list loads never hydrate weights, so the cell is always
-  // "--" while the field reads dive_weights.
+  // Header only: list loads never hydrate weights, so the cell reads "--" for
+  // a dive with weight rows while the field reads dive_weights.
   DiveField.totalWeight: DiveColumnFilter(
     'weight',
     DiveColumnFilterKind.headerOnly,
@@ -155,6 +155,10 @@ const Map<DiveField, DiveColumnFilter> kDiveColumnFilters = {
     'favorite',
     DiveColumnFilterKind.boolean,
   ),
+  DiveField.excludedFromStats: DiveColumnFilter(
+    'excludedFromStats',
+    DiveColumnFilterKind.boolean,
+  ),
   DiveField.notes: DiveColumnFilter('notes', DiveColumnFilterKind.headerOnly),
   DiveField.diveMaster: DiveColumnFilter(
     'diveMaster',
@@ -194,4 +198,8 @@ const Set<DiveField> kUnfilterableDiveColumns = {
   DiveField.siteLatitude,
   DiveField.siteLongitude,
   DiveField.importSource,
+  DiveField.excludedFromGasStats,
+  DiveField.windDirection,
+  DiveField.scrubberType,
+  DiveField.scrubberDuration,
 };

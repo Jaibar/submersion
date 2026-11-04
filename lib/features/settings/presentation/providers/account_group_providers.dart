@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/misc.dart' show ProviderOrFamily;
 
+import 'package:submersion/core/platform/device_capabilities.dart';
 import 'package:submersion/core/providers/account_providers.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/accounts/account_group.dart';
@@ -52,11 +53,13 @@ Future<List<(domain.ConnectedAccount, AccountStatus)>> _withStatus(
 ) async {
   final repository = ref.watch(connectedAccountsRepositoryProvider);
   ref.invalidateSelfWhen(repository.watchAccountsChanges());
+  // Before the first await: a read nothing holds is disposed while it waits,
+  // and a disposed Ref throws (issue #3780).
+  final registry = ref.watch(accountProviderRegistryProvider);
   final accounts = [
     for (final a in await repository.getAll())
       if (kinds == null || kinds.contains(a.kind)) a,
   ];
-  final registry = ref.watch(accountProviderRegistryProvider);
   // Status probes hit the keychain / provider sessions: run them
   // concurrently so one slow probe cannot serialize the page load.
   return Future.wait([
@@ -109,7 +112,8 @@ final connectedAccountUsageProvider =
 /// sign-in state and what it is used for on this device (issue #3482).
 ///
 /// Probes every row (keychain, provider sessions), so only the pages that
-/// show accounts read it; the Settings > Data page never does.
+/// show accounts read it. The Settings > Data page does only while a cloud
+/// copy is missing, to tell whether its account needs a sign-in.
 final accountGroupsProvider = FutureProvider.autoDispose<List<AccountGroup>>(
   (ref) => _groups(ref, ref.watch(connectedAccountsWithStatusProvider.future)),
   retry: _noRetry,
@@ -136,9 +140,9 @@ Future<List<AccountGroup>> _groups(
   final usageRead = ref
       .watch(connectedAccountUsageProvider.future)
       .then<AccountUsageSnapshot?>((u) => u, onError: (Object _) => null);
+  final registry = ref.watch(accountProviderRegistryProvider);
   final withStatus = await statuses;
   final usage = await usageRead;
-  final registry = ref.watch(accountProviderRegistryProvider);
   final s3 = registry.capabilityFor<S3AccountAdapter>(AccountKind.s3);
   final webdav = registry.capabilityFor<WebDavAccountAdapter>(
     AccountKind.webdav,
@@ -205,17 +209,20 @@ enum AccountKindOffer { icloud, googleDrive, dropbox, ownServer, git }
 /// sync page gates its providers today.
 final offerableAccountKindsProvider =
     Provider.autoDispose<List<AccountKindOffer>>((ref) {
+      final caps = ref.watch(deviceCapabilitiesProvider);
       final icloud = ref.watch(iCloudAvailabilityProvider).value;
       return [
-        if (ref.watch(isApplePlatformProvider) &&
+        if (caps.cloudICloud &&
+            ref.watch(isApplePlatformProvider) &&
             icloud != null &&
             icloud != ICloudAvailability.unsupported)
           AccountKindOffer.icloud,
-        if (ref.watch(googleDriveAvailableProvider).value ?? false)
+        if (caps.cloudGoogleDrive &&
+            (ref.watch(googleDriveAvailableProvider).value ?? false))
           AccountKindOffer.googleDrive,
         if (ref.watch(dropboxConfiguredProvider)) AccountKindOffer.dropbox,
         AccountKindOffer.ownServer,
-        AccountKindOffer.git,
+        if (caps.cloudGit) AccountKindOffer.git,
       ];
     });
 

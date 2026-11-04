@@ -121,6 +121,8 @@ class _UrlTabState extends ConsumerState<UrlTab> {
       SnackBar(
         // TODO(media): l10n, pluralization
         content: Text('Added ${ids.length} URL${ids.length == 1 ? '' : 's'}'),
+        duration: const Duration(seconds: 5),
+        persist: false,
         action: SnackBarAction(
           // TODO(media): l10n
           label: 'Undo',
@@ -134,6 +136,7 @@ class _UrlTabState extends ConsumerState<UrlTab> {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (_) => NetworkSignInSheet(hostname: hostname),
     );
   }

@@ -80,7 +80,7 @@ void main() {
     'lib/features/certifications/presentation/pages/certification_detail_page.dart',
     'lib/features/courses/presentation/pages/course_detail_page.dart',
     'lib/features/dive_centers/presentation/pages/dive_center_detail_page.dart',
-    'lib/features/dive_log/presentation/pages/dive_detail_page.dart',
+    'lib/features/dive_log/presentation/widgets/dive_detail/dive_detail_text_sections.dart',
     'lib/features/dive_sites/presentation/pages/site_detail_page.dart',
     'lib/features/documents/presentation/widgets/document_details_panel.dart',
     'lib/features/equipment/presentation/pages/equipment_detail_page.dart',
@@ -110,7 +110,7 @@ void main() {
     'lib/features/equipment/domain/constants/equipment_field.dart',
     'lib/features/equipment/presentation/pages/equipment_location_list_page.dart',
     'lib/features/equipment/presentation/widgets/equipment_location_picker_sheet.dart',
-    'lib/features/equipment/presentation/widgets/equipment_set_list_content.dart',
+    'lib/features/equipment/presentation/widgets/equipment_set_tile.dart',
     'lib/features/settings/presentation/pages/diver_profile_hub_page.dart',
     'lib/features/shared_library/presentation/widgets/library_about_section.dart',
     'lib/features/trips/domain/constants/trip_field.dart',
@@ -121,6 +121,9 @@ void main() {
   /// and the exact expression, with the reason. Naming the expression (not
   /// the whole file) keeps a file that also shows a Markdown field checked.
   const plainAllowed = <String, String>{
+    'lib/features/dive_lab/presentation/pages/dive_lab_page.dart '
+            'result.notes':
+        'hand-off notes are sentences the app writes, not diver text',
     'lib/features/pre_dive/presentation/widgets/session_item_tile.dart '
             'item.notes':
         'pre-dive item notes are a one-line field',
@@ -145,6 +148,9 @@ void main() {
     'lib/features/dive_log/presentation/widgets/dive_numbering_dialog.dart '
             'gap.description':
         'a numbering gap description, not a notes field',
+    'lib/features/dive_log/presentation/widgets/annotation_marker_popup.dart '
+            'annotation.description':
+        'the plain words of a Notes link, cached without any Markdown (#4109)',
     'lib/features/universal_import/presentation/widgets/source_confirmation_step.dart '
             'detection.description':
         'an import format description, not a notes field',

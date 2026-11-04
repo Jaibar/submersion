@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(libdc_wrapper_tests LANGUAGES C)
+project(libdc_wrapper_tests LANGUAGES C CXX)
 
 set(WRAPPER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../macos/Classes")
 set(LIBDC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/libdivecomputer")
@@ -471,6 +471,36 @@ if(WIN32)
 endif()
 
 enable_testing()
+# Issue #4094: how the Windows BLE transport classifies a failed connect.
+# The classifier is plain C++ with no WinRT, so it builds on any host;
+# windows/ble_io_stream.cc pins its GATT status values against the real enum.
+add_executable(test_ble_connect_failure
+    test_ble_connect_failure.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../windows/ble_connect_failure.cc
+)
+target_include_directories(test_ble_connect_failure PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../windows
+)
+set_target_properties(test_ble_connect_failure PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+)
+
+# Issue #4094: when the Windows Bluetooth download retries LE discovery, and
+# when it takes the Classic RFCOMM route for a dual-mode computer.
+add_executable(test_bluetooth_route_policy
+    test_bluetooth_route_policy.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../windows/bluetooth_route_policy.cc
+)
+target_include_directories(test_bluetooth_route_policy PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../windows
+    ${WRAPPER_DIR}
+)
+set_target_properties(test_bluetooth_route_policy PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+)
+
 add_test(NAME test_dive_converter COMMAND test_dive_converter)
 add_test(NAME test_serial_callbacks COMMAND test_serial_callbacks)
 add_test(NAME test_descriptor_matcher COMMAND test_descriptor_matcher)
@@ -502,3 +532,5 @@ add_test(NAME test_tank_transmitter_serial COMMAND test_tank_transmitter_serial
 )
 add_test(NAME test_ratio_ix3m2_record_type COMMAND test_ratio_ix3m2_record_type)
 add_test(NAME test_cressi_leonardo_deco COMMAND test_cressi_leonardo_deco)
+add_test(NAME test_ble_connect_failure COMMAND test_ble_connect_failure)
+add_test(NAME test_bluetooth_route_policy COMMAND test_bluetooth_route_policy)

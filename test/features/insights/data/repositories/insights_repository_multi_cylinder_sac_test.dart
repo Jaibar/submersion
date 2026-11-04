@@ -48,8 +48,8 @@ void main() {
     int order,
     String role, {
     double? volume,
-    double start = 200,
-    double end = 74,
+    double? start = 200,
+    double? end = 74,
     double o2 = 21.0,
   }) async {
     await db
@@ -124,6 +124,29 @@ void main() {
       expect(await queryLanguageSac('bb'), closeTo(1.5, 1e-9));
     });
 
+    test('sums two unsized twin set rows one to one (#3374)', () async {
+      await insertDive('tw');
+      await insertTank('tw', 0, 'twinSet');
+      await insertTank('tw', 1, 'twinSet', end: 137, o2: 32);
+
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.5, 1e-9));
+      expect(await queryLanguageSac('tw'), closeTo(1.5, 1e-9));
+    });
+
+    test('a twin set is the reference ahead of a stage (#3374)', () async {
+      await insertDive('ts');
+      // Stage first, so order alone would pick it: 63 bar from a 12 L
+      // stage is 31.5 bar of a 24 L twin set, 126 + 31.5 over 42 min at
+      // 3 bar is 1.25 bar/min.
+      await insertTank('ts', 0, 'stage', volume: 12, end: 137);
+      await insertTank('ts', 1, 'twinSet', volume: 24);
+
+      final trend = await repository.getSacPressurePerDive();
+      expect(trend.single.value, closeTo(1.25, 1e-9));
+      expect(await queryLanguageSac('ts'), closeTo(1.25, 1e-9));
+    });
+
     test('does not pair back-gas cylinders carrying different gases', () async {
       await insertDive('bd');
       await insertTank('bd', 0, 'backGas');
@@ -153,14 +176,68 @@ void main() {
       expect(await repository.getSacPressurePerDive(), isEmpty);
     });
 
-    test('a first cylinder with no drop gives no SAC, as Dive.sac', () async {
+    test('a reference with no drop adds zero, as Dive.sac (#3974)', () async {
+      await insertDive('nodrop');
+      await insertTank('nodrop', 0, 'backGas', volume: 12, end: 200);
+      await insertTank('nodrop', 1, 'stage', volume: 6);
+
+      // 126 bar of 6 L is 63 bar of 12 L: half of the 1.0 bar/min.
+      final points = await repository.getSacPressurePerDive();
+      expect(points.single.value, closeTo(0.5, 1e-9));
+      final best = (await repository.getSacPressureRecords()).best;
+      expect(best?.value, closeTo(0.5, 1e-9));
+      expect(await queryLanguageSac('nodrop'), closeTo(0.5, 1e-9));
+    });
+
+    test('a reference with no drop still pairs its partner (#3974)', () async {
       await insertDive('nodrop');
       await insertTank('nodrop', 0, 'sidemountLeft', end: 200);
       await insertTank('nodrop', 1, 'sidemountRight');
 
+      expect(await queryLanguageSac('nodrop'), closeTo(1.0, 1e-9));
+    });
+
+    test('a reference that gained pressure adds zero (#3974)', () async {
+      await insertDive('warmed');
+      await insertTank('warmed', 0, 'backGas', volume: 12, end: 205);
+      await insertTank('warmed', 1, 'stage', volume: 6);
+
+      expect(await queryLanguageSac('warmed'), closeTo(0.5, 1e-9));
+    });
+
+    test('no cylinder dropping gives no SAC', () async {
+      await insertDive('idle');
+      await insertTank('idle', 0, 'backGas', volume: 12, end: 200);
+      await insertTank('idle', 1, 'stage', volume: 6, end: 200);
+
+      expect(await repository.getSacPressurePerDive(), isEmpty);
+      expect(await queryLanguageSac('idle'), isNull);
+    });
+
+    test('a drop that cannot be related gives no SAC, as Dive.sac', () async {
+      await insertDive('unsized');
+      await insertTank('unsized', 0, 'backGas', volume: 12, end: 200);
+      await insertTank('unsized', 1, 'stage');
+
+      expect(await repository.getSacPressurePerDive(), isEmpty);
+      expect(await queryLanguageSac('unsized'), isNull);
+    });
+
+    test('a reference with no pressures logged gives no SAC', () async {
+      await insertDive('unread');
+      await insertTank(
+        'unread',
+        0,
+        'backGas',
+        volume: 12,
+        start: null,
+        end: null,
+      );
+      await insertTank('unread', 1, 'stage', volume: 6);
+
       expect(await repository.getSacPressurePerDive(), isEmpty);
       expect((await repository.getSacPressureRecords()).best, isNull);
-      expect(await queryLanguageSac('nodrop'), isNull);
+      expect(await queryLanguageSac('unread'), isNull);
     });
   });
 
@@ -198,6 +275,22 @@ void main() {
         rightVolume: 11.1,
         leftRole: 'backGas',
         rightRole: 'backGas',
+      );
+      expect(borrowed, closeTo(sized, 1e-9));
+    });
+
+    test('twin set rows borrow like a sidemount pair (#3374)', () async {
+      final borrowed = await rmvOfPair(
+        rightVolume: null,
+        leftRole: 'twinSet',
+        rightRole: 'twinSet',
+        rightO2: 32,
+      );
+      final sized = await rmvOfPair(
+        rightVolume: 11.1,
+        leftRole: 'twinSet',
+        rightRole: 'twinSet',
+        rightO2: 32,
       );
       expect(borrowed, closeTo(sized, 1e-9));
     });

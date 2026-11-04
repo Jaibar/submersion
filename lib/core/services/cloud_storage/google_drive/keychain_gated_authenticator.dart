@@ -43,9 +43,10 @@ typedef GoogleDriveAuthenticatorBuilder = GoogleDriveAuthenticator Function();
 ///   freely and [DesktopOAuthAuthenticator] persists its refresh token through
 ///   [FallbackSecureStorage]'s legacy-keychain fallback.
 /// - **Sandboxed App Store / iOS**: the provisioning profile grants the access
-///   group, so google_sign_in works; that build has no
-///   `com.apple.security.network.server` entitlement, so a loopback listener
-///   would fail anyway.
+///   group, so google_sign_in works, and this flow is the one that fits it.
+///   (The sandboxed macOS build does carry `com.apple.security.network.server`
+///   since #3785, which the agent access MCP listener relies on; the choice
+///   here is about the keychain, not the listener.)
 ///
 /// Probing the real capability rather than a build flag also means a future
 /// signing change is picked up automatically instead of silently mismatching.
@@ -132,13 +133,16 @@ class KeychainGatedAuthenticator implements GoogleDriveAuthenticator {
   http.Client? get authClient => _delegate?.authClient;
 
   @override
-  Future<void> authenticate() async => (await _resolve()).authenticate();
+  Future<void> authenticate({String? expectedAccount}) async =>
+      (await _resolve()).authenticate(expectedAccount: expectedAccount);
 
   @override
   Future<bool> attemptSilentAuth() async {
+    _silentAuthThrew = false;
     try {
       return await (await _resolve()).attemptSilentAuth();
     } catch (e, stackTrace) {
+      _silentAuthThrew = true;
       // The seam contract forbids throwing here; a failed resolution must
       // read as "not signed in", not as a crash on a cold launch.
       _log.warning(
@@ -149,6 +153,12 @@ class KeychainGatedAuthenticator implements GoogleDriveAuthenticator {
       return false;
     }
   }
+
+  @override
+  bool get lastSilentAuthThrew =>
+      _silentAuthThrew || (_delegate?.lastSilentAuthThrew ?? false);
+
+  bool _silentAuthThrew = false;
 
   @override
   Future<String?> get userEmail async => (await _resolve()).userEmail;
@@ -181,13 +191,16 @@ class _UnconfiguredDesktopAuthenticator implements GoogleDriveAuthenticator {
   http.Client? get authClient => null;
 
   @override
-  Future<void> authenticate() async =>
+  Future<void> authenticate({String? expectedAccount}) async =>
       throw const CloudStorageException(_message);
 
   /// False, never throwing: the seam contract forbids it, and a cold launch
   /// must read as "not signed in" rather than crash.
   @override
   Future<bool> attemptSilentAuth() async => false;
+
+  @override
+  bool get lastSilentAuthThrew => false;
 
   @override
   Future<String?> get userEmail async => null;

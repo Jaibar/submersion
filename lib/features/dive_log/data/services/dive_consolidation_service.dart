@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/features/courses/data/dive_course_links.dart';
@@ -10,7 +11,11 @@ import 'package:submersion/features/dive_log/data/repositories/dive_repository_i
 import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_source_links.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/dive_log/data/services/dive_consolidation_field_fill.dart';
+import 'package:submersion/features/dive_log/data/services/user_event_preservation.dart';
+import 'package:submersion/features/dive_log/domain/services/annotation_links.dart';
+import 'package:submersion/features/dive_log/data/services/dive_fold_links.dart';
 import 'package:submersion/features/dive_log/data/services/dive_merge_snapshot.dart';
 import 'package:submersion/features/dive_log/domain/services/dive_consolidation_builder.dart';
 import 'package:submersion/features/dive_log/domain/services/profile_alignment.dart';
@@ -20,6 +25,7 @@ import 'package:submersion/features/dive_roles/data/repositories/dive_role_link_
 import 'package:submersion/features/dive_roles/domain/services/dive_role_set.dart';
 import 'package:submersion/features/documents/data/repositories/document_repository.dart';
 import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/nav_track/data/repositories/nav_track_repository.dart';
 
 /// Result of a successful consolidation: the target dive id plus the
 /// pre-consolidation snapshot needed to undo it.
@@ -53,6 +59,8 @@ class DiveConsolidationService {
   final _roleLinks = DiveRoleLinkRepository();
   final _profileSeries = ProfileSeriesRepository();
   final _tankSeries = TankPressureSeriesRepository();
+  final _navTracks = NavTrackRepository();
+  final _foldLinks = DiveFoldLinks();
 
   AppDatabase get _db => DatabaseService.instance.database;
 
@@ -65,6 +73,20 @@ class DiveConsolidationService {
   /// time. With a mode, a secondary that does not is placed by that mode
   /// (#552); see [DiveConsolidationBuilder.build].
   Future<DiveConsolidationOutcome> apply({
+    required String targetDiveId,
+    required List<String> secondaryDiveIds,
+    ConsolidationAlignment? alignment,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.merge,
+    body: () => _applyInner(
+      targetDiveId: targetDiveId,
+      secondaryDiveIds: secondaryDiveIds,
+      alignment: alignment,
+    ),
+  );
+
+  Future<DiveConsolidationOutcome> _applyInner({
     required String targetDiveId,
     required List<String> secondaryDiveIds,
     ConsolidationAlignment? alignment,
@@ -122,6 +144,7 @@ class DiveConsolidationService {
       }
     }
 
+    final foldedEventIds = <String, String>{}; // old event id -> id on target
     await _db.transaction(() async {
       await _diveRepo.backfillPrimaryDataSource(targetDiveId);
 
@@ -168,8 +191,13 @@ class DiveConsolidationService {
         // With a fresh clock: stamping moves these events into any scope
         // tombstone the computer already has on this dive (#1926), and with
         // their old clocks a relayed copy of that scope would delete them.
+        // Not the diver's own events (#4109): a computer that owned them
+        // could take them away from the Notes that link them.
         await (_db.update(_db.diveProfileEvents)..where(
-              (t) => t.diveId.equals(targetDiveId) & t.computerId.isNull(),
+              (t) =>
+                  t.diveId.equals(targetDiveId) &
+                  t.computerId.isNull() &
+                  nonUserEvent(t),
             ))
             .write(
               DiveProfileEventsCompanion(
@@ -480,6 +508,7 @@ class DiveConsolidationService {
           (r) => r.diveId == secondary.id,
         )) {
           final eventId = _uuid.v4();
+          foldedEventIds[row.id] = eventId;
           await _db
               .into(_db.diveProfileEvents)
               .insert(
@@ -494,7 +523,12 @@ class DiveConsolidationService {
                             ? null
                             : tankIdMap[row.tankId] ?? row.tankId,
                       ),
-                      computerId: Value(secRow.computerId),
+                      // The diver's own stay nobody's, as on the target.
+                      computerId: Value(
+                        row.source == EventSource.user.name
+                            ? row.computerId
+                            : secRow.computerId,
+                      ),
                     ),
               );
           await _sync.markRecordPending(
@@ -772,6 +806,13 @@ class DiveConsolidationService {
         for (final secondary in plan.secondaries)
           snapshot.diveRows.firstWhere((r) => r.id == secondary.id),
       ], targetHasProfile: plan.primary.profile.isNotEmpty);
+      // The events above came across under fresh ids, so annotation links in
+      // Notes a secondary fills in follow them (#4109).
+      if (fieldFill['notes'] case final Variable<String> notes) {
+        fieldFill['notes'] = Variable<String>(
+          renameAnnotationLinks(notes.value ?? '', foldedEventIds),
+        );
+      }
 
       // Every target cylinder nobody shares is marked as recorded, so the
       // open-time inference (backfillTankSharedComputers) never guesses for
@@ -811,6 +852,19 @@ class DiveConsolidationService {
         entityType: 'dives',
         recordId: targetDiveId,
         localUpdatedAt: now,
+      );
+
+      // Measured routes follow the secondaries' other data (issue #3918),
+      // after the fill above so a route with no position of its own inherits
+      // the site the fold settled on. So does whatever else points at them.
+      await _navTracks.moveLinks(
+        fromDiveIds: secondaryDiveIds,
+        toDiveId: targetDiveId,
+      );
+      await _foldLinks.move(
+        fromDiveIds: secondaryDiveIds,
+        toDiveId: targetDiveId,
+        now: now,
       );
 
       // Delete secondaries through the tombstone-logging path (this is the
@@ -863,7 +917,13 @@ class DiveConsolidationService {
   /// deleted -- it was modified in place, not created, so its original row
   /// is restored by the verbatim insertOrReplace re-inserts below rather
   /// than by re-creating it.
-  Future<void> undo(DiveMergeSnapshot snapshot) async {
+  Future<void> undo(DiveMergeSnapshot snapshot) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.undoMerge,
+    body: () => _undoInner(snapshot),
+  );
+
+  Future<void> _undoInner(DiveMergeSnapshot snapshot) async {
     final now = DateTime.now().millisecondsSinceEpoch;
 
     await _db.transaction(() async {
@@ -876,6 +936,20 @@ class DiveConsolidationService {
       // consolidation-output rows for the verbatim re-inserts below to
       // collide with.
       final mergedId = snapshot.mergedDiveId;
+
+      // The dive REPLACE below fires every SET NULL link to the target, so
+      // what was linked since the fold is read now to survive it alongside
+      // what the snapshot captured (issue #3918).
+      final capturedRouteIds = {for (final r in snapshot.navTrackRows) r.id};
+      final routesLinkedSince = [
+        for (final r in await _navTracks.linkedRowsForDives([mergedId]))
+          if (!capturedRouteIds.contains(r.id)) r,
+      ];
+      final capturedLinkIds = {for (final r in snapshot.linkedRows) r.id};
+      final linkedSince = [
+        for (final r in await _foldLinks.read([mergedId]))
+          if (!capturedLinkIds.contains(r.id)) r,
+      ];
 
       // Tombstone the consolidation-created child rows (ids NOT in the
       // snapshot) before deleting them. The target dive survives the undo,
@@ -1134,6 +1208,7 @@ class DiveConsolidationService {
       for (final r in snapshot.tankSeriesRows) {
         await _tankSeries.restoreSeriesRow(r, now: now);
       }
+      await _profileSeries.restoreRevisions(snapshot.profileRevisions);
       for (final r in snapshot.weightRows) {
         await _db
             .into(_db.diveWeights)
@@ -1251,6 +1326,16 @@ class DiveConsolidationService {
           localUpdatedAt: now,
         );
       }
+
+      // Routes and the other records back on their dives (issue #3918).
+      await _navTracks.restoreLinks([
+        ...snapshot.navTrackRows,
+        ...routesLinkedSince,
+      ], survivingDiveId: mergedId);
+      await _foldLinks.restore([
+        ...snapshot.linkedRows,
+        ...linkedSince,
+      ], now: now);
     });
 
     SyncEventBus.notifyLocalChange();

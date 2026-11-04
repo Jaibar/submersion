@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:submersion/features/planner/domain/entities/stored_series.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_localization.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
@@ -10,6 +11,7 @@ import 'package:submersion/features/planner/data/services/plan_slate_pdf_service
 import 'package:submersion/features/planner/domain/entities/dive_plan.dart';
 import 'package:submersion/features/planner/domain/services/dive_plan_state_mapper.dart';
 import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_results_providers.dart';
 import 'package:submersion/features/planner/presentation/widgets/plan_export_actions.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
@@ -18,6 +20,13 @@ import 'package:submersion/l10n/arb/app_localizations.dart';
 PlanExportFile subplanExport(DivePlan plan) => (
   bytes: utf8.encode(planToSubplanJson(plan)),
   fileName: subplanFileName(plan.name),
+  mimeType: 'application/json',
+);
+
+/// [series] as a `.subplan` file.
+PlanExportFile seriesExport(StoredSeries series) => (
+  bytes: utf8.encode(seriesToSubplanJson(series)),
+  fileName: subplanFileName(series.name),
   mimeType: 'application/json',
 );
 
@@ -47,26 +56,32 @@ PlanSlateLabels planSlateLabels(AppLocalizations l10n) => PlanSlateLabels(
   base: l10n.plannerCanvas_range_base,
   minutes: l10n.pdf_minutes,
   maxPrefix: l10n.pdf_slateMax,
+  noEligibleBailoutGas: l10n.plannerCanvas_issue_noEligibleBailoutGas,
 );
 
-/// The open plan's slate PDF, rendered from the plan as it is now.
-Future<PlanExportFile> planSlateExport(
+/// The open plan's slate PDF, rendered from the plan as it is now. Null when
+/// another plan took its place while the results landed.
+Future<PlanExportFile?> planSlateExport(
   WidgetRef ref, {
   required PlanSlateLabels labels,
   required PdfLocalization localization,
 }) async {
-  final state = ref.read(divePlanNotifierProvider);
+  // The diver can leave the canvas while the results land, which ends [ref].
+  final container = ProviderScope.containerOf(ref.context, listen: false);
+  final results = await planSlateResults(container);
+  if (results == null) return null;
+  final state = results.state;
   // The plan's own values, else the diver's Settings defaults (#3552).
-  final resolved = ref.read(resolvedPlanEngineConfigProvider);
+  final resolved = container.read(resolvedPlanEngineConfigProvider);
   final bytes = await const PlanSlatePdfService().buildSlate(
     plan: divePlanFromState(state),
-    outcome: ref.read(planOutcomeProvider),
+    outcome: results.outcome,
     localization: localization,
-    deviations: ref.read(planDeviationsProvider),
-    lostGas: ref.read(planLostGasProvider),
-    rangeTable: ref.read(planRangeTableProvider),
-    bailout: ref.read(planBailoutProvider),
-    units: UnitFormatter(ref.read(settingsProvider)),
+    deviations: results.deviations,
+    lostGas: results.lostGas,
+    rangeTable: results.rangeTable,
+    bailout: results.bailout,
+    units: UnitFormatter(container.read(settingsProvider)),
     labels: labels,
     deviationDepthDelta: resolved.deviationDepthDelta,
     deviationTimeMinutes: resolved.deviationTimeMinutes,

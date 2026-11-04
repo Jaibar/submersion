@@ -14,6 +14,7 @@ import 'package:submersion/core/services/sync/changeset_log/changeset_writer.dar
 import 'package:submersion/core/services/sync/changeset_log/publish_state_store.dart';
 import 'package:submersion/core/services/sync/changeset_log/resumable_base_publish.dart';
 import 'package:submersion/core/services/sync/changeset_log/sync_manifest.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_dir.dart';
 import 'package:submersion/core/services/sync/sync_data_serializer.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 
@@ -135,6 +136,86 @@ void main() {
         reason: 'another backend’s in-flight publish is not ours to delete',
       );
     });
+
+    test('reclaims another backend\'s export once long abandoned', () async {
+      final path = await writeExport('left-behind.json', 50);
+      final old = record(dataPath: path, byteLength: 50, providerId: 's3');
+      await store.save(old);
+      await File(
+        old.sidecarPath,
+      ).setLastModified(DateTime.now().subtract(const Duration(days: 60)));
+
+      await store.find(providerId: 'dropbox', deviceId: 'dev1');
+
+      expect(
+        await File(path).exists(),
+        isFalse,
+        reason:
+            'a diver who left that backend never comes back for these bytes, '
+            'and nothing else reclaims this directory (issue #3822)',
+      );
+    });
+
+    test('discards an export left by an identity given up since', () async {
+      final path = await writeExport('old-identity.json', 50);
+      final old = record(dataPath: path, byteLength: 50, deviceId: 'old-id');
+      await store.save(old);
+      await File(
+        old.sidecarPath,
+      ).setLastModified(DateTime.now().subtract(const Duration(hours: 1)));
+
+      expect(await store.find(providerId: 'fake', deviceId: 'new-id'), isNull);
+      expect(
+        await File(path).exists(),
+        isFalse,
+        reason:
+            'no later attempt publishes under the old id, and this directory '
+            'is one nothing else reclaims (issue #3822)',
+      );
+    });
+
+    test('spares another id\'s export young enough to be in flight', () async {
+      final path = await writeExport('in-flight.json', 50);
+      await store.save(
+        record(dataPath: path, byteLength: 50, deviceId: 'other-id'),
+      );
+
+      await store.find(providerId: 'fake', deviceId: 'this-id');
+
+      expect(
+        await File(path).exists(),
+        isTrue,
+        reason: 'deleting it would fail that publish mid-upload',
+      );
+    });
+
+    test('a reader never sees a half-written record', () async {
+      // find() deletes an export whose record will not parse, so a record
+      // caught mid-write would cost its owner the export.
+      final path = await writeExport('busy.json', 50);
+      final busy = record(dataPath: path, byteLength: 50);
+      await store.save(busy);
+
+      var saving = true;
+      var torn = 0;
+      Future<void> keepReading() async {
+        while (saving) {
+          final text = await File(busy.sidecarPath).readAsString();
+          if (text.isEmpty) torn++;
+        }
+      }
+
+      final reader = keepReading();
+      for (var i = 0; i < 200; i++) {
+        await store.save(busy);
+      }
+      saving = false;
+      await reader;
+
+      expect(torn, 0);
+      // Windows refuses a rename onto a file the reader holds open. save never
+      // does that outside this test: each export has a name of its own.
+    }, skip: Platform.isWindows);
 
     test('keeps only the newest of several attempts', () async {
       final oldPath = await writeExport('old.json', 50);
@@ -262,6 +343,72 @@ void main() {
   ///
   /// The host running these tests is POSIX, so the Windows style is pinned
   /// explicitly rather than inherited from the platform.
+  group('where an export cannot outlive the page (a browser)', () {
+    // A browser has no directory, and touching one throws there.
+    ResumableBasePublishStore pageStore() => ResumableBasePublishStore(
+      persistent: false,
+      directory: () async =>
+          throw UnsupportedError('a browser has no directory'),
+    );
+
+    test('nothing is found, recorded or cleared', () async {
+      final page = pageStore();
+      expect(page.persistent, isFalse);
+      expect(
+        await page.find(providerId: 'p', deviceId: 'd', epochId: null),
+        isNull,
+      );
+      await page.save(record(dataPath: 'unused', byteLength: 1));
+      await page.clearForProvider('p');
+    });
+
+    test('discard removes the export where it lies', () async {
+      final data = File(p.join(publishDir.path, 'export.base'));
+      await data.writeAsString('bytes');
+      await pageStore().discard(record(dataPath: data.path, byteLength: 5));
+      expect(await data.exists(), isFalse);
+    });
+
+    test('a base publishes and leaves no export behind', () async {
+      await DatabaseService.instance.database.customStatement(
+        "INSERT INTO divers (id, name, created_at, updated_at) "
+        "VALUES ('d1', 'Page Diver', 1, 1)",
+      );
+      final repo = SyncRepository();
+      final deviceId = await repo.getDeviceId();
+      final provider = FakeCloudStorageProvider();
+      final folder = await provider.getOrCreateSyncFolder();
+      final writer = ChangesetWriter(
+        SyncDataSerializer(),
+        const ChangesetCodec(),
+        PublishStateStore(DatabaseService.instance.database),
+        resumableStore: pageStore(),
+      );
+      final result = await writer.publish(
+        provider: provider,
+        deviceId: deviceId,
+        folderId: folder,
+        deletions: await repo.getAllDeletions(),
+      );
+      expect(result.kind, isNot(ChangesetWriteKind.noop));
+      final names = [
+        for (final file in await provider.listFiles(
+          folderId: folder,
+          namePattern: ChangesetLogLayout.prefix,
+        ))
+          file.name,
+      ];
+      expect(names, anyElement(contains('.base.')));
+      // By device id: test files running beside this one share the folder.
+      final tempDir = await resolveSyncTempDir();
+      expect(
+        tempDir.listSync().where((file) => file.path.contains(deviceId)),
+        isEmpty,
+        reason: 'the export is gone',
+      );
+    });
+  });
+
   group('basePublishTargetPath', () {
     final windows = p.Context(style: p.Style.windows);
     const name =
@@ -365,7 +512,7 @@ void main() {
       final serializer = SyncDataSerializer();
       writer = ChangesetWriter(
         serializer,
-        ChangesetCodec(serializer),
+        const ChangesetCodec(),
         PublishStateStore(db),
         compactionByteRatio: 1000.0,
         compactionMaxChangesets: 1 << 30,
@@ -462,6 +609,145 @@ void main() {
       expect(
         await store.find(providerId: provider.providerId, deviceId: deviceId),
         isNull,
+      );
+    });
+
+    test('a resumed publish reports the nonce its manifest carries', () async {
+      await DiveRepository().createDive(
+        createTestDiveWithBottomTime(id: 'd1', diveNumber: 1),
+      );
+      final deviceId = await SyncRepository().getDeviceId();
+      final reported = <String>[];
+      var manifestInCloudWhenReported = false;
+
+      Future<ChangesetWriteResult> attempt(String nonce) => writer.publish(
+        provider: provider,
+        deviceId: deviceId,
+        folderId: folder,
+        deletions: const [],
+        uploadNonce: nonce,
+        onManifestNonce: (n) async {
+          reported.add(n);
+          manifestInCloudWhenReported =
+              await download(ChangesetLogLayout.manifestName(deviceId)) != null;
+        },
+      );
+
+      provider.failUploadsAfter = 0;
+      await expectLater(attempt('first-attempt'), throwsA(anything));
+      expect(
+        reported,
+        isEmpty,
+        reason: 'nothing reached a manifest, so there is nothing to claim',
+      );
+
+      provider.failUploadsAfter = null;
+      await attempt('second-attempt');
+
+      expect(
+        reported,
+        ['first-attempt'],
+        reason:
+            'the nonce is baked into the export, so the resume publishes the '
+            'first attempt\'s, not the one it was handed',
+      );
+      expect(
+        manifestInCloudWhenReported,
+        isFalse,
+        reason:
+            'reported before the upload, or a lost response leaves a manifest '
+            'this install has never heard of',
+      );
+      final manifest = SyncManifest.fromBytes(
+        (await download(ChangesetLogLayout.manifestName(deviceId)))!,
+      );
+      expect(manifest.uploadNonce, 'first-attempt');
+    });
+
+    test('a publish with nothing to say reports no nonce', () async {
+      await DiveRepository().createDive(
+        createTestDiveWithBottomTime(id: 'd1', diveNumber: 1),
+      );
+      await publish();
+      final repo = SyncRepository();
+      await repo.clearPendingRecords();
+      final reported = <String>[];
+
+      final result = await writer.publish(
+        provider: provider,
+        deviceId: await repo.getDeviceId(),
+        folderId: folder,
+        deletions: const [],
+        uploadNonce: 'unused',
+        onManifestNonce: (n) async => reported.add(n),
+      );
+
+      expect(result.kind, ChangesetWriteKind.noop);
+      expect(reported, isEmpty);
+    });
+
+    test('a heartbeat reports no nonce', () async {
+      final heartbeating = ChangesetWriter(
+        SyncDataSerializer(),
+        const ChangesetCodec(),
+        PublishStateStore(DatabaseService.instance.database),
+        compactionByteRatio: 1000.0,
+        compactionMaxChangesets: 1 << 30,
+        heartbeatMaxAgeMillis: -1,
+        resumableStore: store,
+      );
+      await DiveRepository().createDive(
+        createTestDiveWithBottomTime(id: 'd1', diveNumber: 1),
+      );
+      await publish();
+      final repo = SyncRepository();
+      await repo.clearPendingRecords();
+      final reported = <String>[];
+
+      final result = await heartbeating.publish(
+        provider: provider,
+        deviceId: await repo.getDeviceId(),
+        folderId: folder,
+        deletions: const [],
+        uploadNonce: 'unused',
+        onManifestNonce: (n) async => reported.add(n),
+      );
+
+      expect(result.kind, ChangesetWriteKind.heartbeat);
+      expect(
+        reported,
+        isEmpty,
+        reason:
+            'it re-carries a nonce it read back; claiming that one could '
+            'launder a twin\'s upload as our own',
+      );
+    });
+
+    test('a forced base still resumes over the base it replaces', () async {
+      await DiveRepository().createDive(
+        createTestDiveWithBottomTime(id: 'd1', diveNumber: 1),
+      );
+      await publish();
+      final repo = SyncRepository();
+      Future<ChangesetWriteResult> forced() async => writer.publish(
+        provider: provider,
+        deviceId: await repo.getDeviceId(),
+        folderId: folder,
+        deletions: const [],
+        forceBase: true,
+      );
+
+      provider.failUploadsAfter = 0;
+      await expectLater(forced(), throwsA(anything));
+      provider.failUploadsAfter = null;
+
+      final retried = await forced();
+
+      expect(retried.kind, ChangesetWriteKind.base);
+      expect(
+        retried.snapshotAt,
+        isNull,
+        reason: 'only a resumed export leaves snapshotAt unset',
       );
     });
 

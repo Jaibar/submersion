@@ -64,6 +64,9 @@ class SyncRepository {
     'checklistTemplates': (table: 'checklist_templates', pk: 'id'),
     'checklistTemplateItems': (table: 'checklist_template_items', pk: 'id'),
     'tripChecklistItems': (table: 'trip_checklist_items', pk: 'id'),
+    // Multiple checklists per trip (v336, issue #3356), the parent of
+    // tripChecklistSections/tripChecklistItems below.
+    'tripChecklists': (table: 'trip_checklists', pk: 'id'),
     // Section tables for checklists/pre-dive (v297-300, issue #3360), fully
     // wired for sync (SyncData, mergeOrder, parentRefs, conflict_reference
     // labels) alongside their item tables.
@@ -90,7 +93,9 @@ class SyncRepository {
     'gpsTracks': (table: 'gps_tracks', pk: 'id'),
     'navTracks': (table: 'nav_tracks', pk: 'id'),
     'siteFeatures': (table: 'site_features', pk: 'id'),
+    'divePlanSeries': (table: 'dive_plan_series', pk: 'id'),
     'divePlans': (table: 'dive_plans', pk: 'id'),
+    'diveScenarios': (table: 'dive_scenarios', pk: 'id'),
     'divePlanTanks': (table: 'dive_plan_tanks', pk: 'id'),
     'divePlanSegments': (table: 'dive_plan_segments', pk: 'id'),
     'divePlanMissions': (table: 'dive_plan_missions', pk: 'id'),
@@ -737,8 +742,7 @@ class SyncRepository {
     required SyncFactGroup group,
   }) async {
     if (recordIds.isEmpty) return;
-    final target = hlcTargets[entityType];
-    if (target == null || compositeHlcKeys.containsKey(entityType)) {
+    if (!_hasSingleKeyClock(entityType)) {
       for (final recordId in recordIds) {
         await markFactsPending(
           entityType: entityType,
@@ -750,39 +754,12 @@ class SyncRepository {
       return;
     }
     try {
-      await _db.transaction(() async {
-        final now = DateTime.now().millisecondsSinceEpoch;
-        await _db.batch(
-          (b) => b.insertAllOnConflictUpdate(_db.syncRecords, [
-            for (final recordId in recordIds)
-              SyncRecordsCompanion(
-                id: Value('${entityType}_$recordId'),
-                entityType: Value(entityType),
-                recordId: Value(recordId),
-                localUpdatedAt: Value(localUpdatedAt),
-                syncStatus: const Value('pending'),
-                createdAt: Value(now),
-                updatedAt: Value(now),
-              ),
-          ]),
-        );
-        await ensureSyncClockConfigured();
-        final hlc = SyncClock.instance.issue();
-        if (hlc == null) return;
-        // Chunked: one statement may bind only so many variables.
-        for (var i = 0; i < recordIds.length; i += _clockChunk) {
-          final chunk = recordIds.sublist(
-            i,
-            min(i + _clockChunk, recordIds.length),
-          );
-          final marks = List.filled(chunk.length, '?').join(', ');
-          await _db.customStatement(
-            'UPDATE "${target.table}" SET "${group.clockColumn}" = ? '
-            'WHERE "${target.pk}" IN ($marks)',
-            [hlc, ...chunk],
-          );
-        }
-      });
+      await _markAllPending(
+        entityType,
+        recordIds,
+        localUpdatedAt,
+        group.clockColumn,
+      );
     } catch (e, stackTrace) {
       _log.error(
         'Failed to mark facts pending: $entityType x${recordIds.length} '
@@ -792,6 +769,89 @@ class SyncRepository {
       );
       rethrow;
     }
+  }
+
+  /// [markRecordPending] for many rows written together, set-based as
+  /// [markFactsPendingForAll] is. They share one clock: clocks only ever
+  /// order writes of one row, and these commit as one write. Callers run it
+  /// inside the transaction that wrote the rows.
+  Future<void> markRecordsPending({
+    required String entityType,
+    required List<String> recordIds,
+    required int localUpdatedAt,
+  }) async {
+    if (recordIds.isEmpty) return;
+    if (!_hasSingleKeyClock(entityType) ||
+        SyncFactGroups.of(entityType).isNotEmpty) {
+      for (final recordId in recordIds) {
+        await markRecordPending(
+          entityType: entityType,
+          recordId: recordId,
+          localUpdatedAt: localUpdatedAt,
+        );
+      }
+      return;
+    }
+    try {
+      await _markAllPending(entityType, recordIds, localUpdatedAt, 'hlc');
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to mark records pending: $entityType x${recordIds.length}',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// Whether [_markAllPending] can address [entityType]'s rows by one key.
+  bool _hasSingleKeyClock(String entityType) =>
+      hlcTargets.containsKey(entityType) &&
+      !compositeHlcKeys.containsKey(entityType);
+
+  /// The set-based write behind [markFactsPendingForAll] and
+  /// [markRecordsPending]: every row pending, one clock reading in
+  /// [clockColumn]. [entityType] passes [_hasSingleKeyClock].
+  Future<void> _markAllPending(
+    String entityType,
+    List<String> recordIds,
+    int localUpdatedAt,
+    String clockColumn,
+  ) async {
+    final target = hlcTargets[entityType]!;
+    await _db.transaction(() async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _db.batch(
+        (b) => b.insertAllOnConflictUpdate(_db.syncRecords, [
+          for (final recordId in recordIds)
+            SyncRecordsCompanion(
+              id: Value('${entityType}_$recordId'),
+              entityType: Value(entityType),
+              recordId: Value(recordId),
+              localUpdatedAt: Value(localUpdatedAt),
+              syncStatus: const Value('pending'),
+              createdAt: Value(now),
+              updatedAt: Value(now),
+            ),
+        ]),
+      );
+      await ensureSyncClockConfigured();
+      final hlc = SyncClock.instance.issue();
+      if (hlc == null) return;
+      // Chunked: one statement may bind only so many variables.
+      for (var i = 0; i < recordIds.length; i += _clockChunk) {
+        final chunk = recordIds.sublist(
+          i,
+          min(i + _clockChunk, recordIds.length),
+        );
+        final marks = List.filled(chunk.length, '?').join(', ');
+        await _db.customStatement(
+          'UPDATE "${target.table}" SET "$clockColumn" = ? '
+          'WHERE "${target.pk}" IN ($marks)',
+          [hlc, ...chunk],
+        );
+      }
+    });
   }
 
   static const _clockChunk = 500;
@@ -912,6 +972,15 @@ class SyncRepository {
     (
       entityType: 'tankPressureSeries',
       table: 'tank_pressure_series',
+      timestamp: 'updated_at',
+      filter: null,
+    ),
+    // The trip_id->checklist_id migration (v336, issue #3356) clears hlc on
+    // the sections and items it re-points, listed below, and leaves each new
+    // default checklist unstamped, as the legacy sync apply does.
+    (
+      entityType: 'tripChecklists',
+      table: 'trip_checklists',
       timestamp: 'updated_at',
       filter: null,
     ),

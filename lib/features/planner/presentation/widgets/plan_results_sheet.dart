@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/constants/enums.dart';
@@ -12,120 +10,22 @@ import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
     show PlanMode;
 import 'package:submersion/features/planner/domain/entities/plan_outcome.dart';
 import 'package:submersion/features/planner/domain/services/bailout_solver.dart';
+import 'package:submersion/features/planner/domain/services/contingency_service.dart';
 import 'package:submersion/features/planner/domain/services/dive_plan_state_mapper.dart';
 import 'package:submersion/features/planner/domain/services/schedule_lines.dart';
 import 'package:submersion/features/planner/domain/services/tank_role_resolver.dart';
 import 'package:submersion/features/planner/presentation/mission/mission_results_section.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_background_results.dart';
 import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_results_providers.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_gas_row.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_issue_text.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_result_status.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_runtime_table.dart';
 import 'package:submersion/features/planner/presentation/widgets/plan_status_chips.dart';
+import 'package:submersion/features/planner/presentation/widgets/plan_warnings_section.dart';
 import 'package:submersion/features/planner/presentation/widgets/range_table_section.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
-import 'package:submersion/features/planner/domain/services/plan_issue_grouping.dart';
-import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
-import 'package:submersion/shared/widgets/forms/number_field.dart';
-import 'package:submersion/shared/widgets/forms/number_input_validation.dart';
-
-/// Localized, unit-aware message for a plan issue. Reuses the existing
-/// `divePlanner_warning_*` strings where a type overlaps, so only genuinely
-/// new issue types need new keys.
-String planIssueMessage(
-  BuildContext context,
-  PlanIssue issue,
-  UnitFormatter units,
-) {
-  final l10n = context.l10n;
-  switch (issue.type) {
-    case PlanIssueType.ppO2High:
-      return l10n.divePlanner_warning_ppO2High(
-        issue.value?.toStringAsFixed(2) ?? '--',
-      );
-    case PlanIssueType.ppO2Critical:
-      return l10n.divePlanner_warning_ppO2Critical(
-        issue.value?.toStringAsFixed(2) ?? '--',
-      );
-    case PlanIssueType.hypoxicGas:
-      return l10n.plannerCanvas_issue_hypoxic(
-        units.formatDepth(issue.atDepth ?? 0, decimals: 0),
-        issue.value?.toStringAsFixed(2) ?? '--',
-      );
-    case PlanIssueType.endExceeded:
-      // The engine compares unrounded values, so plain rounding could print
-      // "30m exceeds the 30m limit" for an END of 30.05 m. Round the END up
-      // and the limit down; the epsilon stops float noise (32.0000001) from
-      // bumping a whole value. The engine only raises this issue when the END
-      // is above the limit, so an END within the epsilon of it is still shown
-      // one unit higher rather than equal.
-      const epsilon = 1e-6;
-      final limit = (units.convertDepth(issue.threshold ?? 0) + epsilon)
-          .floor();
-      final end = max(
-        (units.convertDepth(issue.value ?? 0) - epsilon).ceil(),
-        limit + 1,
-      );
-      return l10n.divePlanner_warning_endExceedsLimit(
-        units.formatDepth(units.depthToMeters(end.toDouble()), decimals: 0),
-        units.formatDepth(units.depthToMeters(limit.toDouble()), decimals: 0),
-      );
-    case PlanIssueType.gasDensityHigh:
-      return l10n.plannerCanvas_issue_gasDensityHigh(
-        issue.value?.toStringAsFixed(1) ?? '--',
-      );
-    case PlanIssueType.gasDensityCritical:
-      return l10n.plannerCanvas_issue_gasDensityCritical(
-        issue.value?.toStringAsFixed(1) ?? '--',
-      );
-    case PlanIssueType.cnsWarning:
-      return l10n.divePlanner_warning_cnsWarning(
-        issue.value?.toStringAsFixed(0) ?? '--',
-      );
-    case PlanIssueType.cnsCritical:
-      return l10n.divePlanner_warning_cnsCritical;
-    case PlanIssueType.otuHigh:
-      return l10n.divePlanner_warning_otuWarning;
-    case PlanIssueType.gasReserveViolation:
-      return l10n.divePlanner_warning_gasLow(
-        units.formatPressure(issue.threshold ?? 0),
-      );
-    case PlanIssueType.gasOut:
-      return l10n.divePlanner_warning_gasOut;
-    case PlanIssueType.ndlExceededNoDecoGas:
-      return l10n.plannerCanvas_issue_noDecoGas;
-    case PlanIssueType.noBailoutCarried:
-      return l10n.plannerCanvas_issue_noBailout;
-    case PlanIssueType.minGasViolation:
-      return l10n.plannerCanvas_issue_minGas(
-        units.formatPressure(issue.threshold ?? 0),
-      );
-    case PlanIssueType.noUsableGas:
-      return l10n.plannerCanvas_issue_noUsableGas(
-        units.formatPressure(issue.value ?? 0),
-        units.formatPressure(issue.threshold ?? 0),
-      );
-    case PlanIssueType.diluentModExceeded:
-      return l10n.plannerCanvas_issue_diluentModExceeded(
-        units.formatDepth(issue.atDepth ?? 0, decimals: 0),
-        issue.value?.toStringAsFixed(2) ?? '--',
-      );
-    case PlanIssueType.ceilingViolated:
-      return l10n.plannerCanvas_issue_ceilingViolated(
-        units.formatDepth(issue.value ?? 0, decimals: 1),
-      );
-  }
-}
-
-IconData _issueIcon(PlanIssueSeverity severity) {
-  switch (severity) {
-    case PlanIssueSeverity.critical:
-      return Icons.error;
-    case PlanIssueSeverity.alert:
-      return Icons.warning;
-    case PlanIssueSeverity.warning:
-      return Icons.warning_amber;
-    case PlanIssueSeverity.info:
-      return Icons.info_outline;
-  }
-}
 
 /// The results content: runtime table, per-tank gas plan, and the
 /// severity-sorted issue list. The page owns the sheet chrome and passes the
@@ -147,8 +47,7 @@ class PlanResultsSheet extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final outcome = ref.watch(activePlanOutcomeProvider);
     final state = ref.watch(divePlanNotifierProvider);
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
+    final units = ref.watch(unitFormatterProvider);
     final theme = Theme.of(context);
 
     String tankLabel(String? tankId) {
@@ -157,69 +56,82 @@ class PlanResultsSheet extends ConsumerWidget {
       return tank.name ?? tank.gasMix.name;
     }
 
-    final bailout = ref.watch(planBailoutProvider);
+    // Each of these holds its section's place from a check that takes no
+    // calculating, so the sheet does not jump as results land.
+    final bailout = ref.watch(planMayHaveBailoutProvider)
+        ? planResultView(ref.watch(planBailoutProvider), state.id)
+        : null;
+    final rangeTable = state.segments.isEmpty
+        ? null
+        : planResultView(ref.watch(planRangeTableProvider), state.id);
     final resolvedRoles = const TankRoleResolver().rolesFor(
       divePlanFromState(state),
     );
-    // On a loop plan this list is what the loop consumes: the diluent(s)
-    // and the oxygen supply, the plan's two mandatory slots (#3220). The
-    // bailout cylinders carry no loop consumption and live in the bailout
-    // section's own picture instead (#3137 follow-up). Open circuit has no
-    // such distinction, so every tank it resolves to still shows.
+    // On a loop plan this list is what the plan consumes: the diluent(s) and
+    // the oxygen supply, the plan's two mandatory slots (#3220), plus any
+    // bailout cylinder an authored off-loop segment actually breathes
+    // (#3898). The bailout cylinders otherwise carry no consumption and live
+    // in the bailout section's own picture instead (#3137 follow-up). Open
+    // circuit has no such distinction, so every tank it resolves to still
+    // shows.
     final loopTankUsages = outcome.tankUsages.where((u) {
       final role = resolvedRoles[u.tankId];
       return state.mode == PlanMode.oc ||
           role == TankRole.diluent ||
-          role == TankRole.oxygenSupply;
+          role == TankRole.oxygenSupply ||
+          u.litersUsed > 0;
     });
 
-    return ListView(
+    // Laid out in full rather than lazily, so the warnings list can be
+    // measured and scrolled to while it is out of view (#3738).
+    return SingleChildScrollView(
       controller: controller,
-      shrinkWrap: shrinkWrap,
       physics: shrinkWrap ? const NeverScrollableScrollPhysics() : null,
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      children: [
-        _grip(theme),
-        PlanSectionHeader(context.l10n.divePlanner_label_decoSchedule),
-        _RuntimeTable(outcome: outcome, units: units),
-        const SizedBox(height: 20),
-        PlanSectionHeader(context.l10n.divePlanner_label_gasConsumption),
-        for (final usage in loopTankUsages)
-          _GasRow(usage: usage, label: tankLabel(usage.tankId), units: units),
-        if (ref.watch(
-          divePlanNotifierProvider.select((s) => s.mission != null),
-        )) ...[
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _grip(theme),
+          PlanSectionHeader(context.l10n.divePlanner_label_decoSchedule),
+          PlanRuntimeTable(outcome: outcome, units: units),
           const SizedBox(height: 20),
-          PlanSectionHeader(context.l10n.plannerMission_results_title),
-          const MissionResultsSection(),
-        ],
-        if (bailout != null) ...[
-          const SizedBox(height: 20),
-          PlanSectionHeader(context.l10n.plannerCanvas_bailout_title),
-          _BailoutSection(outcome: bailout, units: units),
-        ],
-        ...?_contingencySections(context, ref, units),
-        if (ref.watch(planRangeTableProvider) != null) ...[
-          const SizedBox(height: 20),
-          PlanSectionHeader(context.l10n.plannerCanvas_range_title),
-          const RangeTableSection(),
-        ],
-        const SizedBox(height: 20),
-        PlanSectionHeader(context.l10n.divePlanner_label_warnings),
-        if (outcome.issues.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Text(
-              context.l10n.divePlanner_label_empty,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.outline,
-              ),
+          PlanSectionHeader(context.l10n.divePlanner_label_gasConsumption),
+          for (final usage in loopTankUsages)
+            PlanGasRow(
+              usage: usage,
+              label: tankLabel(usage.tankId),
+              units: units,
             ),
-          )
-        else
-          for (final group in groupPlanIssues(outcome.issues))
-            _IssueRow(group: group, units: units),
-      ],
+          if (ref.watch(
+            divePlanNotifierProvider.select((s) => s.mission != null),
+          )) ...[
+            const SizedBox(height: 20),
+            PlanSectionHeader(context.l10n.plannerMission_results_title),
+            const MissionResultsSection(),
+          ],
+          if (bailout != null && !bailout.isFinishedEmpty) ...[
+            const SizedBox(height: 20),
+            PlanSectionHeader(context.l10n.plannerCanvas_bailout_title),
+            PlanResultSection<BailoutOutcome>(
+              view: bailout,
+              builder: (outcome) =>
+                  _BailoutSection(outcome: outcome, units: units),
+            ),
+          ],
+          ...?_contingencySections(context, ref, units),
+          if (rangeTable != null && !rangeTable.isFinishedEmpty) ...[
+            const SizedBox(height: 20),
+            PlanSectionHeader(context.l10n.plannerCanvas_range_title),
+            const RangeTableSection(),
+          ],
+          const SizedBox(height: 20),
+          PlanWarningsSection(
+            key: const Key('planWarningsSection'),
+            issues: outcome.issues,
+            units: units,
+          ),
+        ],
+      ),
     );
   }
 
@@ -237,8 +149,11 @@ class PlanResultsSheet extends ConsumerWidget {
     final state = ref.watch(divePlanNotifierProvider);
     if (state.segments.isEmpty) return null;
     final expanded = ref.watch(contingenciesExpandedProvider);
-    final deviations = ref.watch(planDeviationsProvider);
-    final lostGas = ref.watch(planLostGasProvider);
+    final deviations = planResultView(
+      ref.watch(planDeviationsProvider),
+      state.id,
+    );
+    final lostGas = planResultView(ref.watch(planLostGasProvider), state.id);
     final selectedDeviation = ref.watch(selectedDeviationProvider);
     final selectedLostGasTankId = ref.watch(selectedLostGasTankIdProvider);
     final collapsedKeys = ref.watch(collapsedContingencyKeysProvider);
@@ -321,10 +236,32 @@ class PlanResultsSheet extends ConsumerWidget {
               ],
             ),
           ),
-          if (!collapsed) _RuntimeTable(outcome: outcome, units: units),
+          if (!collapsed) PlanRuntimeTable(outcome: outcome, units: units),
         ],
       );
     }
+
+    final rows = [
+      for (final deviation in deviations.value ?? const <DeviationOutcome>[])
+        row(
+          key: deviation.key,
+          label: deviationLabel(deviation.key),
+          selected: selectedDeviation == deviation.key,
+          onSelect: () => toggleDeviation(deviation.key),
+          outcome: deviation.outcome,
+        ),
+      for (final lost in lostGas.value ?? const <LostGasOutcome>[])
+        row(
+          key: lost.tank.id,
+          label: context.l10n.plannerCanvas_contingency_lostGas(
+            lost.tank.gasMix.name,
+          ),
+          selected: selectedLostGasTankId == lost.tank.id,
+          onSelect: () => toggleLostGas(lost.tank.id),
+          outcome: lost.outcome,
+        ),
+    ];
+    final status = combinePlanResultStatus(deviations.status, lostGas.status);
 
     return [
       const SizedBox(height: 20),
@@ -343,26 +280,21 @@ class PlanResultsSheet extends ConsumerWidget {
           ],
         ),
       ),
-      if (expanded) ...[
-        for (final deviation in deviations)
-          row(
-            key: deviation.key,
-            label: deviationLabel(deviation.key),
-            selected: selectedDeviation == deviation.key,
-            onSelect: () => toggleDeviation(deviation.key),
-            outcome: deviation.outcome,
+      if (expanded)
+        PlanResultSection<List<Widget>>(
+          // Opening the section reloads from the collapsed empty list, which
+          // is a first result for the diver, not an update to one.
+          view: PlanResultView(
+            value: rows.isEmpty ? null : rows,
+            status: rows.isEmpty && status == PlanResultStatus.updating
+                ? PlanResultStatus.calculating
+                : status,
           ),
-        for (final lost in lostGas)
-          row(
-            key: lost.tank.id,
-            label: context.l10n.plannerCanvas_contingency_lostGas(
-              lost.tank.gasMix.name,
-            ),
-            selected: selectedLostGasTankId == lost.tank.id,
-            onSelect: () => toggleLostGas(lost.tank.id),
-            outcome: lost.outcome,
+          builder: (rows) => Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: rows,
           ),
-      ],
+        ),
     ];
   }
 
@@ -379,443 +311,6 @@ class PlanResultsSheet extends ConsumerWidget {
   );
 }
 
-class _RuntimeTable extends ConsumerWidget {
-  const _RuntimeTable({required this.outcome, required this.units});
-
-  final PlanOutcome outcome;
-  final UnitFormatter units;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final l10n = context.l10n;
-    final lines = scheduleLines(outcome.schedule);
-    final stopMinimums = ref.watch(divePlanNotifierProvider).stopMinimums;
-    final noDeco = Text(
-      l10n.plannerCanvas_results_noDeco,
-      style: theme.textTheme.bodyMedium,
-    );
-    if (lines.isEmpty) return noDeco;
-
-    final headerStyle = theme.textTheme.labelSmall?.copyWith(
-      color: theme.colorScheme.outline,
-    );
-    final glyphStyle = theme.textTheme.bodyMedium?.copyWith(
-      color: theme.colorScheme.outline,
-    );
-    // The gas column repeats on every line (not just the switch) so a diver
-    // reading a single row never has to scroll up to see what they are
-    // breathing; a switch still stands out via switchStyle below.
-    final switchStyle = theme.textTheme.bodyMedium?.copyWith(
-      color: theme.colorScheme.primary,
-      fontWeight: FontWeight.w600,
-    );
-
-    Widget cell(String text, {TextStyle? style, int flex = 1}) => Expanded(
-      flex: flex,
-      child: Text(text, style: style ?? theme.textTheme.bodyMedium),
-    );
-    Widget glyph(String text) =>
-        SizedBox(width: 20, child: Text(text, style: glyphStyle));
-
-    return Column(
-      children: [
-        if (outcome.stops.isEmpty)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: noDeco,
-            ),
-          ),
-        Row(
-          children: [
-            glyph(''),
-            cell(l10n.plannerCanvas_table_depth, style: headerStyle),
-            cell(l10n.plannerCanvas_table_duration, style: headerStyle),
-            cell(l10n.plannerCanvas_table_runtime, style: headerStyle),
-            cell(l10n.plannerCanvas_table_gas, style: headerStyle, flex: 2),
-            cell(l10n.plannerCanvas_table_ppO2, style: headerStyle),
-            cell(l10n.plannerCanvas_table_end, style: headerStyle),
-          ],
-        ),
-        const Divider(height: 12),
-        for (final line in lines)
-          _buildLineRow(
-            context,
-            ref,
-            line,
-            stopMinimums,
-            cell,
-            glyph,
-            switchStyle,
-          ),
-      ],
-    );
-  }
-
-  Widget _buildLineRow(
-    BuildContext context,
-    WidgetRef ref,
-    ScheduleLine line,
-    Map<int, int> stopMinimums,
-    Widget Function(String, {TextStyle? style, int flex}) cell,
-    Widget Function(String) glyph,
-    TextStyle? switchStyle,
-  ) {
-    final isStop = line.row.kind == PlanScheduleRowKind.stop;
-    final stopDepth = line.row.depthMeters.round();
-    final hasMinimum = isStop && (stopMinimums[stopDepth] ?? 0) > 0;
-    final theme = Theme.of(context);
-
-    final row = Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        children: [
-          glyph(scheduleRowGlyph(line.row.kind)),
-          cell(units.formatDepth(line.row.depthMeters, decimals: 0)),
-          cell(
-            _durationText(line),
-            style: hasMinimum
-                ? theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  )
-                : null,
-          ),
-          cell('${line.runtimeMinutes}′'),
-          if (hasMinimum)
-            const Padding(
-              padding: EdgeInsets.only(right: 4),
-              child: Icon(Icons.push_pin, size: 14),
-            ),
-          cell(
-            GasMix(o2: line.row.gasFO2 * 100, he: line.row.gasFHe * 100).name,
-            style: line.row.gasSwitch ? switchStyle : null,
-            flex: 2,
-          ),
-          cell(line.row.ppO2.toStringAsFixed(2)),
-          cell(units.formatDepth(line.row.endMeters, decimals: 0)),
-        ],
-      ),
-    );
-
-    if (!isStop) return row;
-
-    return InkWell(
-      onTap: () => showDialog<void>(
-        context: context,
-        builder: (dialogContext) => _StopMinimumDialog(
-          stopDepth: stopDepth,
-          currentMinutes: (line.row.durationSeconds / 60).round(),
-          currentMinimumSeconds: stopMinimums[stopDepth],
-          depthLabel: units.formatDepth(stopDepth.toDouble(), decimals: 0),
-        ),
-      ),
-      child: row,
-    );
-  }
-
-  /// Whole minutes, so the column adds up to the runtime beside it.
-  String _durationText(ScheduleLine line) {
-    final base = '${line.durationMinutes}′';
-    if (line.row.airBreakSeconds > 0) {
-      return "$base (+${(line.row.airBreakSeconds / 60).ceil()}′)";
-    }
-    return base;
-  }
-}
-
-/// Owns the minutes field so the controller is disposed with the route,
-/// after the pop animation, not when [showDialog] first completes.
-class _StopMinimumDialog extends ConsumerStatefulWidget {
-  const _StopMinimumDialog({
-    required this.stopDepth,
-    required this.currentMinutes,
-    required this.currentMinimumSeconds,
-    required this.depthLabel,
-  });
-
-  final int stopDepth;
-  final int currentMinutes;
-  final int? currentMinimumSeconds;
-  final String depthLabel;
-
-  @override
-  ConsumerState<_StopMinimumDialog> createState() => _StopMinimumDialogState();
-}
-
-class _StopMinimumDialogState extends ConsumerState<_StopMinimumDialog> {
-  late final TextEditingController _controller;
-  final _formKey = GlobalKey<FormState>();
-
-  @override
-  void initState() {
-    super.initState();
-    final seed = widget.currentMinimumSeconds != null
-        ? (widget.currentMinimumSeconds! / 60).round()
-        : widget.currentMinutes;
-    _controller = TextEditingController(text: seed.toString());
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = context.l10n;
-    return AlertDialog(
-      title: Text(
-        l10n.plannerCanvas_stopMinimum_dialogTitle(widget.depthLabel),
-      ),
-      content: Form(
-        key: _formKey,
-        child: TextFormField(
-          controller: _controller,
-          keyboardType: TextInputType.number,
-          inputFormatters: numberInputFormatters(),
-          validator: numberValidator(context, integer: true),
-          decoration: InputDecoration(
-            labelText: l10n.plannerCanvas_stopMinimum_minutesLabel,
-          ),
-        ),
-      ),
-      actions: [
-        if (widget.currentMinimumSeconds != null)
-          TextButton(
-            onPressed: () {
-              ref
-                  .read(divePlanNotifierProvider.notifier)
-                  .setStopMinimum(widget.stopDepth, null);
-              Navigator.of(context).pop();
-            },
-            child: Text(l10n.plannerCanvas_stopMinimum_clear),
-          ),
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
-        ),
-        FilledButton(
-          onPressed: () {
-            // "5.5" used to close the dialog as if applied, leaving the deco
-            // stop unchanged (#1900).
-            if (!_formKey.currentState!.validate()) return;
-            final minutes = switch (readNumber(
-              _controller.text,
-              integer: true,
-            )) {
-              NumberValue(:final value) => value.toInt(),
-              // Blank closes with no change, as before.
-              NumberBlank() || NumberInvalid() => null,
-            };
-            if (minutes != null) {
-              // Non-positive is "no minimum": the engine ignores <= 0,
-              // so persisting 0 would pin the row with no effect.
-              ref
-                  .read(divePlanNotifierProvider.notifier)
-                  .setStopMinimum(
-                    widget.stopDepth,
-                    minutes <= 0 ? null : minutes * 60,
-                  );
-            }
-            Navigator.of(context).pop();
-          },
-          child: Text(l10n.plannerCanvas_stopMinimum_apply),
-        ),
-      ],
-    );
-  }
-}
-
-class _GasRow extends StatelessWidget {
-  const _GasRow({
-    required this.usage,
-    required this.label,
-    required this.units,
-  });
-
-  final PlanTankUsage usage;
-  final String label;
-  final UnitFormatter units;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final l10n = context.l10n;
-    final statsStyle = theme.textTheme.labelSmall?.copyWith(
-      fontFeatures: const [FontFeature.tabularFigures()],
-    );
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: theme.textTheme.bodyMedium,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 2),
-          Wrap(
-            spacing: 12,
-            runSpacing: 2,
-            children: [
-              Text(
-                l10n.plannerCanvas_gas_usedReading(
-                  _reading(usage.litersUsed, usage.usedPressure),
-                ),
-                style: statsStyle,
-              ),
-              Text(
-                l10n.plannerCanvas_gas_endReading(
-                  _reading(usage.remainingLiters, usage.remainingPressure),
-                ),
-                style: statsStyle?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: usage.reserveViolation
-                      ? theme.colorScheme.error
-                      : null,
-                ),
-              ),
-            ],
-          ),
-          if (_limitParts(l10n) case final parts when parts.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(
-                parts.join(' \u00b7 '),
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.outline,
-                ),
-              ),
-            ),
-          const SizedBox(height: 4),
-          _bar(theme),
-        ],
-      ),
-    );
-  }
-
-  /// The turn-pressure and minimum-gas line: each figure where the engine
-  /// computed it, else the input it is missing (#3603), so a back gas never
-  /// just goes quiet. One missing start pressure blanks both figures, and
-  /// says so once.
-  List<String> _limitParts(AppLocalizations l10n) {
-    final turnGap = usage.turnPressureGap;
-    final minGap = usage.minGasGap;
-    if (turnGap == PlanGasLimitGap.noStartPressure &&
-        minGap == PlanGasLimitGap.noStartPressure) {
-      return [l10n.plannerCanvas_gas_limitsNoStartPressure];
-    }
-    return [
-      if (usage.turnPressureBar != null)
-        l10n.plannerCanvas_gas_turnAt(
-          units.formatPressure(usage.turnPressureBar),
-        )
-      else if (turnGap == PlanGasLimitGap.noTurnRule)
-        l10n.plannerCanvas_gas_noTurnRule
-      else if (turnGap == PlanGasLimitGap.noStartPressure)
-        l10n.plannerCanvas_gas_turnNoStartPressure,
-      if (usage.minGasBar != null)
-        l10n.plannerCanvas_gas_minGas(units.formatPressure(usage.minGasBar))
-      else if (minGap == PlanGasLimitGap.noStartPressure)
-        l10n.plannerCanvas_gas_minGasNoStartPressure
-      else if (minGap == PlanGasLimitGap.noVolume)
-        l10n.plannerCanvas_gas_minGasNoVolume,
-    ];
-  }
-
-  /// A cylinder that holds enough gas gets the ordinary single-colour bar.
-  /// One that does not gets a bar spanning the full NEED instead of the
-  /// cylinder's own capacity: blue for the share the cylinder actually
-  /// covers, red for the share still missing -- the shortfall is exactly as
-  /// visible as the surplus a diver reads on an ordinary line (#3190).
-  Widget _bar(ThemeData theme) {
-    final total = usage.totalLiters;
-    final overBudget = total != null && usage.litersUsed > total;
-    if (!overBudget) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(3),
-        child: LinearProgressIndicator(
-          value: (usage.percentUsed / 100).clamp(0.0, 1.0),
-          minHeight: 4,
-          color: usage.reserveViolation
-              ? theme.colorScheme.error
-              : theme.colorScheme.primary,
-          backgroundColor: theme.colorScheme.surfaceContainerHighest,
-        ),
-      );
-    }
-    final coveredPermille = ((total / usage.litersUsed) * 1000).round().clamp(
-      1,
-      999,
-    );
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(3),
-      child: SizedBox(
-        width: double.infinity,
-        height: 4,
-        child: Row(
-          // A childless ColoredBox takes the smallest size its constraints
-          // allow, and a Row only hands its children LOOSE cross-axis
-          // constraints by default -- so without stretch each segment was
-          // laid out 0 px tall and the whole bar vanished (a diver saw both
-          // over-capacity cylinders print their negative readings with no
-          // bar underneath at all).
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              flex: coveredPermille,
-              child: ColoredBox(color: theme.colorScheme.primary),
-            ),
-            Expanded(
-              flex: 1000 - coveredPermille,
-              child: ColoredBox(color: theme.colorScheme.error),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Compact "411L/37bar" pair; no space before the unit, matching the
-  /// slate-style gas row.
-  String _reading(double? liters, double? bar) {
-    final volume = liters == null
-        ? '--'
-        : '${units.convertVolume(liters).round()}${units.volumeSymbol}';
-    final pressure = bar == null
-        ? '--'
-        : '${units.convertPressure(bar).round()}${units.pressureSymbol}';
-    return '$volume/$pressure';
-  }
-}
-
-class _IssueRow extends StatelessWidget {
-  const _IssueRow({required this.group, required this.units});
-
-  final GroupedPlanIssue group;
-  final UnitFormatter units;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final issue = group.issue;
-    final color = planIssueSeverityColor(theme.colorScheme, issue.severity);
-    final message = planIssueMessage(context, issue, units);
-    return PlanWarningRow(
-      icon: _issueIcon(issue.severity),
-      color: color,
-      message: group.count > 1
-          ? context.l10n.plannerCanvas_issue_repeated(message, group.count)
-          : message,
-    );
-  }
-}
-
 class _BailoutSection extends StatelessWidget {
   const _BailoutSection({required this.outcome, required this.units});
 
@@ -825,6 +320,20 @@ class _BailoutSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // Every figure below was sized on a gas past its MOD, so none of them is
+    // shown: the error is the whole answer (#3961).
+    if (outcome.gasGap case final gap?) {
+      return PlanWarningRow(
+        icon: Icons.error,
+        color: theme.colorScheme.error,
+        message: bailoutGasGapMessage(
+          context.l10n,
+          units,
+          depthMeters: gap.depthMeters,
+          deepestModMeters: gap.deepestModMeters,
+        ),
+      );
+    }
     final worst = outcome.worstCase;
     final shortfallColor = outcome.sufficient
         ? theme.colorScheme.onSurface
@@ -868,27 +377,15 @@ class _BailoutSection extends StatelessWidget {
           ],
         ),
         if (!outcome.sufficient)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              children: [
-                Icon(Icons.error, size: 18, color: theme.colorScheme.error),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    context.l10n.plannerCanvas_bailout_insufficient,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.error,
-                    ),
-                  ),
-                ),
-              ],
-            ),
+          PlanWarningRow(
+            icon: Icons.error,
+            color: theme.colorScheme.error,
+            message: context.l10n.plannerCanvas_bailout_insufficient,
           ),
         if (outcome.bailoutTankUsages.isNotEmpty) ...[
           const SizedBox(height: 10),
           for (final usage in outcome.bailoutTankUsages)
-            _GasRow(
+            PlanGasRow(
               usage: usage,
               label: () {
                 final tank = outcome.bailoutTanks
@@ -968,7 +465,7 @@ class _BailoutScheduleTable extends StatelessWidget {
                   ),
                 ),
                 cell(units.formatDepth(line.row.depthMeters, decimals: 0)),
-                cell('${line.durationMinutes}′'),
+                cell(line.durationLabel('′')),
                 cell('${line.runtimeMinutes}′'),
                 cell(
                   GasMix(

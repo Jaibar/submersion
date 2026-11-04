@@ -1,9 +1,8 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
@@ -18,7 +17,6 @@ import 'package:submersion/features/documents/presentation/widgets/document_form
 import 'package:submersion/features/documents/presentation/widgets/document_owner_field.dart';
 import 'package:submersion/features/documents/presentation/widgets/document_owner_picker_sheet.dart';
 import 'package:submersion/features/documents/presentation/widgets/document_page_strip.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_link_providers.dart';
 import 'package:submersion/features/tags/presentation/widgets/scoped_tags_field.dart';
@@ -124,7 +122,9 @@ class _DocumentEditPageState extends ConsumerState<DocumentEditPage> {
     if (id != null) {
       final repo = ref.read(documentRepositoryProvider);
       final doc = await repo.getById(id);
-      final pages = await repo.getPages(id);
+      // Without content: the strip reads what it shows, and a save keeps the
+      // stored content of any page that has none.
+      final pages = await repo.getPages(id, withBytes: false);
       if (!mounted) return;
       if (doc != null) {
         _original = doc;
@@ -209,7 +209,7 @@ class _DocumentEditPageState extends ConsumerState<DocumentEditPage> {
     }
     final l10n = context.l10n;
     final messenger = ScaffoldMessenger.of(context);
-    final canUseCamera = Platform.isAndroid || Platform.isIOS;
+    final canUseCamera = HostPlatform.isAndroid || HostPlatform.isIOS;
     final source = await showModalBottomSheet<String>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -376,7 +376,7 @@ class _DocumentEditPageState extends ConsumerState<DocumentEditPage> {
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
     final title = Text(
       _isNew ? l10n.documents_edit_newTitle : l10n.documents_edit_editTitle,
     );

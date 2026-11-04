@@ -1,10 +1,11 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 
 import 'package:cryptography/cryptography.dart' show SecretKey;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
+import 'package:submersion/core/platform/cross_tab_lock.dart';
 import 'package:submersion/core/data/repositories/connected_accounts_repository.dart';
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/account_providers.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/services/accounts/account_identity.dart';
@@ -94,13 +95,13 @@ final iCloudAvailabilityProvider = FutureProvider<ICloudAvailability>((
 /// platforms (even transiently while [iCloudAvailabilityProvider] loads), and so
 /// widget tests can simulate an Apple platform on a non-Apple CI host.
 final isApplePlatformProvider = Provider<bool>(
-  (ref) => Platform.isIOS || Platform.isMacOS,
+  (ref) => HostPlatform.isIOS || HostPlatform.isMacOS,
 );
 
 /// Whether the host is Linux, where video transcoding depends on a system
 /// ffmpeg. A provider (not Platform.isLinux inline) so widget tests can
 /// simulate Linux on any CI host — same pattern as [isApplePlatformProvider].
-final isLinuxPlatformProvider = Provider<bool>((ref) => Platform.isLinux);
+final isLinuxPlatformProvider = Provider<bool>((ref) => HostPlatform.isLinux);
 
 /// Sync preferences provider
 final syncPreferencesProvider = Provider<SyncPreferences>((ref) {
@@ -1454,6 +1455,7 @@ class SyncNotifier extends StateNotifier<SyncState> {
         status: SyncStatus.error,
         message: result.message ?? _l10n.settings_cloudSync_message_adoptFailed,
       );
+      await _recordRefusal(result);
       return;
     }
     await realignActiveDiverAfterDataReplace(
@@ -1496,8 +1498,13 @@ class SyncNotifier extends StateNotifier<SyncState> {
       while (true) {
         // One merge into the database at a time, shared with the library
         // library sync (issue #2567).
+        // And one tab at a time in a browser: two tabs share the database
+        // and would otherwise reuse one changeset sequence.
         final succeeded = await SyncCoordinator.run(
-          () => _runSyncOnce(auto: runAuto),
+          () => withCrossTabLock(
+            kSyncCrossTabLock,
+            () => _runSyncOnce(auto: runAuto),
+          ),
         );
         if (!mounted) return;
         final queued = _queuedSyncAuto;
@@ -1566,6 +1573,13 @@ class SyncNotifier extends StateNotifier<SyncState> {
         );
   }
 
+  /// For an operation outside [performSync]: a refusal it met has to reach
+  /// Data health, or its error offers no sign-in (issue #3811).
+  Future<void> _recordRefusal(SyncResult result) async {
+    if (!result.accessRefused) return;
+    await _recordSyncFailure(SyncFailureKind.auth, result.message ?? '');
+  }
+
   /// One sync, run inside [performSync]'s single flight. True when it
   /// completed successfully (with or without conflicts).
   Future<bool> _runSyncOnce({required bool auto}) async {
@@ -1626,7 +1640,11 @@ class SyncNotifier extends StateNotifier<SyncState> {
       var result = await _syncService.performSync();
       if (result.status == SyncResultStatus.authError &&
           preCheckCloudError != null) {
-        result = SyncResult(status: result.status, message: preCheckCloudError);
+        result = SyncResult(
+          status: result.status,
+          message: preCheckCloudError,
+          accessRefused: result.accessRefused,
+        );
       }
       _log.debug('Result: ${result.status}, message: ${result.message}');
       // This notifier can be disposed while a launch-triggered sync is in
@@ -1784,12 +1802,17 @@ class SyncNotifier extends StateNotifier<SyncState> {
           message: message,
           progress: null,
         );
-        await _recordSyncFailure(
-          result.status == SyncResultStatus.networkError
-              ? SyncFailureKind.network
-              : SyncFailureKind.other,
-          message,
-        );
+        await _recordSyncFailure(switch (result.status) {
+          SyncResultStatus.networkError => SyncFailureKind.network,
+          // No session here is read live from isAuthenticated, so it clears
+          // itself. Stored as a sign-in failure, an offline cold launch would
+          // keep asking for a sign-in after the network came back.
+          SyncResultStatus.authError =>
+            result.accessRefused
+                ? SyncFailureKind.auth
+                : SyncFailureKind.network,
+          _ => SyncFailureKind.other,
+        }, message);
         if (!mounted) return false;
       }
     } catch (e) {
@@ -1803,7 +1826,10 @@ class SyncNotifier extends StateNotifier<SyncState> {
         message: message,
         progress: null,
       );
-      await _recordSyncFailure(SyncFailureKind.other, message);
+      await _recordSyncFailure(
+        isAccessRefused(e) ? SyncFailureKind.auth : SyncFailureKind.other,
+        message,
+      );
       if (!mounted) return false;
     }
 
@@ -2024,6 +2050,7 @@ class SyncNotifier extends StateNotifier<SyncState> {
       // Keep the error visible: refreshState (which recomputes status from the
       // repository) must NOT run here, or it would clear the reason.
       state = state.copyWith(status: SyncStatus.error, message: result.message);
+      await _recordRefusal(result);
       return;
     }
     state = state.copyWith(

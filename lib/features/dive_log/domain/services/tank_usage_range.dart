@@ -1,13 +1,37 @@
+import 'dart:math' as math;
+
 import 'package:collection/collection.dart';
 
-import 'package:submersion/core/constants/enums.dart';
-import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/core/constants/app_enums.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_tank.dart';
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
 import 'package:submersion/features/dive_log/domain/services/multi_cylinder_consumption.dart';
 
 /// A switch this many seconds or less after the dive starts names the
 /// starting gas: computers log it at the first sample, not at second zero.
 const int startingSwitchGraceSeconds = 60;
+
+/// A stretch of a dive, in seconds, when a cylinder was breathed.
+typedef TankUsageWindow = ({int start, int end});
+
+/// The breathing periods of one cylinder, in time order and not overlapping.
+extension TankUsageWindows on List<TankUsageWindow> {
+  /// Total time breathed.
+  int get breathedSeconds => fold(0, (total, w) => total + w.end - w.start);
+
+  /// Time breathed before [timestamp].
+  int breathedBefore(int timestamp) => fold(
+    0,
+    (total, w) => total + math.max(0, math.min(timestamp, w.end) - w.start),
+  );
+
+  /// The parts of these periods from [start] to [end].
+  List<TankUsageWindow> within(int start, int end) => [
+    for (final w in this)
+      if (w.start < end && w.end > start)
+        (start: math.max(w.start, start), end: math.min(w.end, end)),
+  ];
+}
 
 /// The switches of [gasSwitches] that say when a cylinder of [tanks] was
 /// breathed: those naming a current tank (a stale id a re-import left
@@ -29,12 +53,13 @@ List<GasSwitchWithTank> knownGasSwitches(
 
 /// The cylinder breathed at [timestamp]: the one the last switch at or
 /// before it names, else the starting gas (see [_startingTank]). Null when
-/// there are no cylinders.
+/// there are no cylinders. [onLoop] as for [startingTankOf].
 DiveTank? activeTankAt({
   required List<DiveTank> tanks,
   required List<GasSwitchWithTank>? gasSwitches,
   required int timestamp,
   required int diveStart,
+  bool onLoop = false,
 }) {
   if (tanks.isEmpty) return null;
   final sorted = knownGasSwitches(tanks, gasSwitches)
@@ -42,7 +67,9 @@ DiveTank? activeTankAt({
   final active = sorted.lastWhereOrNull(
     (sw) => sw.gasSwitch.timestamp <= timestamp,
   );
-  if (active == null) return _startingTank(tanks, sorted, diveStart);
+  if (active == null) {
+    return _startingTank(tanks, sorted, diveStart, onLoop: onLoop);
+  }
   return tanks.firstWhere((t) => t.id == active.gasSwitch.tankId);
 }
 
@@ -53,42 +80,81 @@ DiveTank? activeTankAt({
 DiveTank _startingTank(
   List<DiveTank> tanks,
   List<GasSwitchWithTank> sortedSwitches,
-  int diveStart,
-) {
-  final first = sortedSwitches.firstOrNull;
+  int diveStart, {
+  bool onLoop = false,
+}) => startingTankOf(
+  tanks: tanks,
+  switches: sortedSwitches.map((s) => s.gasSwitch),
+  diveStart: diveStart,
+  onLoop: onLoop,
+)!;
+
+/// The cylinder the dive starts on, by the [_startingTank] rule, from bare
+/// switches in any order: one naming a cylinder not in [tanks] is ignored.
+/// Null when there are no cylinders.
+///
+/// [onLoop] is set for a rebreather dive, which starts on its diluent ahead of
+/// the SAC reference: its gas list often leads with a bailout (#4020).
+DiveTank? startingTankOf({
+  required List<DiveTank> tanks,
+  required Iterable<GasSwitch> switches,
+  required int diveStart,
+  bool onLoop = false,
+}) {
+  if (tanks.isEmpty) return null;
+  final tankIds = {for (final t in tanks) t.id};
+  final first = switches
+      .where((s) => tankIds.contains(s.tankId))
+      .sorted((a, b) => a.timestamp.compareTo(b.timestamp))
+      .firstOrNull;
   if (first != null &&
-      first.gasSwitch.timestamp <= diveStart + startingSwitchGraceSeconds) {
-    return tanks.firstWhere((t) => t.id == first.gasSwitch.tankId);
+      first.timestamp <= diveStart + startingSwitchGraceSeconds) {
+    return tanks.firstWhere((t) => t.id == first.tankId);
   }
-  return sacReferenceTankOf(tanks)!;
+  final diluent = onLoop
+      ? tanks
+            .sortedBy<num>((t) => t.order)
+            .firstWhereOrNull((t) => t.role == TankRole.diluent)
+      : null;
+  return diluent ?? sacReferenceTankOf(tanks)!;
 }
 
-/// The time window, in seconds, when [tank] was breathed: from the dive's
-/// gas switches, else the whole dive for the primary gas. Null when nothing
-/// says when the tank was breathed (a stage with no recorded switch).
-({int start, int end})? tankUsageRange({
+/// The periods, in seconds and time order, when [tank] was breathed: from the
+/// dive's gas switches, else the whole dive for the primary gas. A cylinder the
+/// diver returned to has one per visit (#3900). Empty when nothing says when
+/// the tank was breathed (a stage with no recorded switch). [onLoop] as for
+/// [startingTankOf].
+List<TankUsageWindow> tankUsageWindows({
   required DiveTank tank,
   required List<GasSwitchWithTank>? gasSwitches,
   required int diveStart,
   required int diveEnd,
   required List<DiveTank> tanks,
+  bool onLoop = false,
 }) {
-  if (diveEnd <= diveStart) return null;
+  if (diveEnd <= diveStart) return const [];
 
   // A dive's only cylinder was breathed for all of it, whatever its
   // switches say (issue #3373).
-  if (tanks.length == 1) return (start: diveStart, end: diveEnd);
+  if (tanks.length == 1) return [(start: diveStart, end: diveEnd)];
 
   final knownSwitches = knownGasSwitches(tanks, gasSwitches, before: diveEnd);
 
   if (knownSwitches.isEmpty) {
-    // Without switches only the primary gas is known to span the dive: the
-    // back gas, or either cylinder of a sidemount pair. A stage's window
-    // is unknown, and the whole dive would understate its rate.
-    if (tank.role != TankRole.backGas && !sidemountRoles.contains(tank.role)) {
-      return null;
+    if (onLoop) {
+      final starting = _startingTank(tanks, const [], diveStart, onLoop: true);
+      return starting.id == tank.id
+          ? [(start: diveStart, end: diveEnd)]
+          : const [];
     }
-    return (start: diveStart, end: diveEnd);
+    // Without switches only the primary gas is known to span the dive: the
+    // backmount gas, or either cylinder of a sidemount pair. A stage's
+    // window is unknown, and the whole dive would understate its rate.
+    if (!backmountRoles.contains(tank.role) &&
+        !sidemountRoles.contains(tank.role)) {
+      return const [];
+    }
+    return [(start: diveStart, end: diveEnd)];
   }
 
   // A matched pair (sidemount, doubles logged as independents) is breathed
@@ -111,32 +177,39 @@ DiveTank _startingTank(
     ..sort((a, b) => a.gasSwitch.timestamp.compareTo(b.gasSwitch.timestamp));
 
   // Find all time ranges where this tank was active
-  int? rangeStart;
-  int totalEnd = diveEnd;
+  final windows = <TankUsageWindow>[];
+  int? periodStart;
 
   // Check if this tank is the initial tank (before first switch)
-  final initialTankId = _startingTank(tanks, sortedSwitches, diveStart).id;
+  final initialTankId = _startingTank(
+    tanks,
+    sortedSwitches,
+    diveStart,
+    onLoop: onLoop,
+  ).id;
   if (breathedWith(initialTankId)) {
-    rangeStart = diveStart;
+    periodStart = diveStart;
   }
 
   // Find switches to and from this tank
-  for (int i = 0; i < sortedSwitches.length; i++) {
-    final sw = sortedSwitches[i];
+  for (final sw in sortedSwitches) {
+    final timestamp = sw.gasSwitch.timestamp;
     if (breathedWith(sw.gasSwitch.tankId)) {
       // Switched TO this tank
-      rangeStart ??= sw.gasSwitch.timestamp;
-    } else if (rangeStart != null) {
-      // Switched AWAY from this tank
-      totalEnd = sw.gasSwitch.timestamp;
-      break;
+      periodStart ??= timestamp;
+    } else if (periodStart != null) {
+      // Switched AWAY from this tank, which may yet come back
+      if (timestamp > periodStart) {
+        windows.add((start: periodStart, end: timestamp));
+      }
+      periodStart = null;
     }
   }
 
   // If we found a start but no end, tank was used until dive end
-  if (rangeStart != null) {
-    return (start: rangeStart, end: totalEnd);
+  if (periodStart != null) {
+    windows.add((start: periodStart, end: diveEnd));
   }
 
-  return null;
+  return windows;
 }

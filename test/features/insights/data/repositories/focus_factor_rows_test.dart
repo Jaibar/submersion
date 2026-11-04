@@ -41,6 +41,7 @@ void main() {
     double? visibilityMeters,
     double? visibilityMinMeters,
     double? visibilityMaxMeters,
+    double? legacyWeight = 6,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     await db
@@ -56,7 +57,7 @@ void main() {
             runtime: Value(runtime),
             bottomTime: Value(bottomTime),
             waterTemp: const Value(24),
-            weightAmount: const Value(6),
+            weightAmount: Value(legacyWeight),
             diverRole: Value(diverRole),
             buddy: Value(buddy),
             visibilityMeters: Value(visibilityMeters),
@@ -97,7 +98,7 @@ void main() {
     expect(result.map((r) => r.diveId), ['in']);
   });
 
-  test('duration prefers runtime and falls back to bottom time', () async {
+  test('duration is the measured runtime, never a bottom time', () async {
     await dive('rt', runtime: 3000, bottomTime: 2400);
     await dive('bt', day: 2, runtime: null, bottomTime: 1800);
     final byId = {
@@ -107,7 +108,7 @@ void main() {
         r.diveId: r,
     };
     expect(byId['rt']!.durationMinutes, 50);
-    expect(byId['bt']!.durationMinutes, 30);
+    expect(byId['bt']!.durationMinutes, isNull);
   });
 
   test('gas class and first tank follow the tanks', () async {
@@ -273,6 +274,12 @@ void main() {
       expect(byId['legacy']!.weight, 6);
     },
   );
+
+  test('a zero legacy weight is no recorded weight (issue #3914)', () async {
+    await dive('zero', legacyWeight: 0);
+    final rows = await repository.getFocusFactorRows(visibilityScale: scale);
+    expect(rows.single.weight, isNull);
+  });
 
   test(
     'duration falls back to entry and exit times like the dive page',

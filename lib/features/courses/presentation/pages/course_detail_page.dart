@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/features/change_log/presentation/widgets/change_log_history_menu_item.dart';
 import 'package:submersion/features/connections/domain/entities/connection_kind.dart';
 import 'package:submersion/features/connections/domain/entities/node_ref.dart';
 import 'package:submersion/features/connections/presentation/widgets/open_in_connections.dart';
@@ -67,7 +68,7 @@ class CourseDetailPage extends ConsumerWidget {
     AsyncValue<List<Dive>> divesAsync,
   ) {
     final colorScheme = Theme.of(context).colorScheme;
-    final formatter = UnitFormatter(ref.watch(settingsProvider));
+    final formatter = ref.watch(unitFormatterProvider);
 
     final body = SingleChildScrollView(
       controller: DetailScrollController.maybeOf(context),
@@ -155,6 +156,7 @@ class CourseDetailPage extends ConsumerWidget {
                           context.l10n.courses_label_instructorNumber,
                           course.instructorNumber!,
                           Icons.numbers,
+                          copyable: true,
                         ),
                     ],
                   ),
@@ -402,22 +404,25 @@ class CourseDetailPage extends ConsumerWidget {
     BuildContext context,
     String label,
     String value,
-    IconData icon,
-  ) {
+    IconData icon, {
+    bool copyable = false,
+  }) {
     final colorScheme = Theme.of(context).colorScheme;
-    return Semantics(
-      label: '$label: $value',
-      child: DetailRow.text(
-        icon: icon,
-        iconSize: 16,
-        iconGap: 8,
-        iconColor: colorScheme.onSurfaceVariant,
-        label: label,
-        value: value,
-        valueStyle: Theme.of(context).textTheme.bodyMedium,
-        padding: const EdgeInsets.symmetric(vertical: 4),
-      ),
+    final row = DetailRow.text(
+      icon: icon,
+      iconSize: 16,
+      iconGap: 8,
+      iconColor: colorScheme.onSurfaceVariant,
+      label: label,
+      value: value,
+      valueStyle: Theme.of(context).textTheme.bodyMedium,
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      copyable: copyable,
     );
+    // A copyable row reads as one node by itself, beside its copy button.
+    if (copyable && DetailRow.canCopy(value)) return row;
+
+    return Semantics(label: '$label: $value', child: row);
   }
 
   Widget _buildCertificationSection(
@@ -557,6 +562,11 @@ class CourseDetailPage extends ConsumerWidget {
         }
       },
       itemBuilder: (context) => [
+        changeLogHistoryMenuItem(
+          context,
+          rootTable: 'courses',
+          rootId: course.id,
+        ),
         openInConnectionsMenuItem(context),
         PopupMenuItem(
           value: 'export',

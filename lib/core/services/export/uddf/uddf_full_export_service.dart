@@ -11,8 +11,11 @@ import 'package:submersion/core/services/export/models/uddf_export_options.dart'
 import 'package:submersion/core/services/export/shared/file_export_utils.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dump_codec.dart';
 import 'package:submersion/core/services/export/uddf/uddf_export_builders.dart';
+import 'package:submersion/core/services/export/uddf/uddf_gas_mix_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_gear_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_participant_writers.dart';
+import 'package:submersion/core/services/export/uddf/uddf_rebreather_writers.dart';
+import 'package:submersion/core/services/export/uddf/uddf_source_attribution.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/courses/domain/entities/course.dart';
@@ -102,10 +105,14 @@ class UddfFullExportService {
     // synchronous functions over already-encoded strings like every other
     // builder in that file. bzip2 is slow in pure Dart, so it runs on a
     // worker isolate rather than whichever isolate called the export.
-    final sources = options.includeRawData
-        ? (dataSources ?? const <DiveSourceExport>[])
+    // The raw data box keeps or drops only the original bytes. The rows go
+    // either way: they are the dive's computers and each one's samples, and
+    // without them a restore keeps one computer (issue #4180).
+    final sources = dataSources ?? const <DiveSourceExport>[];
+    final sourcesByDive = UddfSourceAttribution.groupByDive(sources);
+    final withBytes = options.includeRawData
+        ? sources.where((s) => s.hasDump).toList(growable: false)
         : const <DiveSourceExport>[];
-    final withBytes = sources.where((s) => s.hasDump).toList(growable: false);
     final encoded = await UddfDumpCodec.encodeAll(
       withBytes.map((s) => s.rawData!).toList(growable: false),
     );
@@ -146,8 +153,14 @@ class UddfFullExportService {
           },
         );
 
+        // The O2 cells rebreather samples name, declared under the owner
+        // (issue #4178).
+        final o2CellCount = UddfRebreatherWriters.cellCount(dives);
+
         // Diver section with owner and buddy records (UDDF standard)
-        if (owner != null || (buddies != null && buddies.isNotEmpty)) {
+        if (owner != null ||
+            o2CellCount > 0 ||
+            (buddies != null && buddies.isNotEmpty)) {
           builder.element(
             'diver',
             nest: () {
@@ -177,12 +190,20 @@ class UddfFullExportService {
                       },
                     );
                     // Export dive computers used in equipment section
-                    declaredComputerIds = UddfGearWriters.writeOwnerComputers(
+                    declaredComputerIds = UddfGearWriters.writeOwnerEquipment(
                       builder,
                       dives,
+                      o2CellCount: o2CellCount,
                     );
                     // Certifications will be added in applicationdata section
                   },
+                );
+              } else if (o2CellCount > 0) {
+                // No diver, but the cells still need their declaration.
+                UddfGearWriters.writeIdOnlyOwner(
+                  builder,
+                  const [],
+                  o2CellCount: o2CellCount,
                 );
               }
 
@@ -267,42 +288,7 @@ class UddfFullExportService {
         }
 
         // Gas definitions
-        builder.element(
-          'gasdefinitions',
-          nest: () {
-            final gasMixes = <String, GasMix>{};
-            for (final dive in dives) {
-              for (final tank in dive.tanks) {
-                final key =
-                    'mix_${tank.gasMix.o2.toInt()}_${tank.gasMix.he.toInt()}';
-                gasMixes[key] = tank.gasMix;
-              }
-            }
-            gasMixes['mix_21_0'] = const GasMix();
-
-            for (final entry in gasMixes.entries) {
-              builder.element(
-                'mix',
-                attributes: {'id': entry.key},
-                nest: () {
-                  builder.element('name', nest: entry.value.name);
-                  builder.element(
-                    'o2',
-                    nest: (entry.value.o2 / 100).toString(),
-                  );
-                  builder.element(
-                    'n2',
-                    nest: (entry.value.n2 / 100).toString(),
-                  );
-                  builder.element(
-                    'he',
-                    nest: (entry.value.he / 100).toString(),
-                  );
-                },
-              );
-            }
-          },
-        );
+        UddfGasMixWriters.writeGasDefinitions(builder, dives);
 
         // Deco models (gradient factors)
         final uniqueGFs = <String, Map<String, int>>{};
@@ -376,6 +362,7 @@ class UddfFullExportService {
                         gasSwitchList,
                         tankPressures:
                             diveTankPressures?[dive.id]?.displayedByTank,
+                        sources: sourcesByDive[dive.id] ?? const [],
                       );
                     }
                   },

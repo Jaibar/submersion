@@ -1,9 +1,10 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
+import 'package:submersion/core/platform/zlib/platform_zlib.dart';
 import 'package:submersion/features/demo_mode/data/demo_date_columns.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
 
 /// The `diver_settings` columns that follow the user into demo mode, so the
 /// sample logbook reads in units and formats they already know.
@@ -34,33 +35,46 @@ class DemoUnitSettings {
 /// The published file is built once, so its dates would grow stale and its
 /// photo paths point at the build machine. [prepare] moves every instant by
 /// the same whole number of weeks, relinks the photos into the downloaded
-/// photo folder, applies the user's units, and drops device-local
-/// notification rows the app rebuilds itself.
+/// photo folder (or, in a browser, to the site that serves them), applies
+/// the user's units, and drops device-local notification rows the app
+/// rebuilds itself.
 class DemoDatabasePreparer {
   static const _trackTables = ['gps_tracks', 'nav_tracks'];
 
   /// [onProgress] hears each step done, out of the total: one per date
-  /// column and per track table, then the photos, units and notifications.
+  /// column and per track table, one for the date attributes, then the
+  /// photos, units and notifications.
+  ///
+  /// With [photosUrl] the photos become links under it instead of files in
+  /// [photosDir]: a browser shows them from the site the sample logbook
+  /// shipped with (issue #4121).
   Future<void> prepare(
     GeneratedDatabase db, {
     required DateTime now,
     required String photosDir,
     required String? deviceId,
+    Uri? photosUrl,
     DemoUnitSettings? units,
     void Function(int done, int total)? onProgress,
   }) async {
     final columns = demoDateColumnsOf(db);
-    final total = columns.length + _trackTables.length + 3;
+    // The date columns, the track tables and the date attributes, then the
+    // photos, units and notifications.
+    final total = columns.length + _trackTables.length + 4;
     var done = 0;
     void step() => onProgress?.call(++done, total);
 
     await db.transaction(() async {
       await _shiftDates(db, now, columns, step);
-      await _relinkPhotos(db, photosDir, deviceId);
+      await _relinkPhotos(db, photosDir, photosUrl, deviceId);
       step();
       if (units != null) await _applyUnits(db, units);
       step();
       await db.customStatement('DELETE FROM scheduled_notifications');
+      // The shift above is setup, not something the diver did.
+      await db.customStatement('DELETE FROM change_log_fields');
+      await db.customStatement('DELETE FROM change_log_events');
+      await db.customStatement('DELETE FROM change_log_operations');
       step();
     });
   }
@@ -93,6 +107,26 @@ class DemoDatabasePreparer {
       }
       step();
     }
+    if (shift != Duration.zero) {
+      await _shiftDateAttributes(db, shift.inMilliseconds);
+    }
+    step();
+  }
+
+  /// Equipment attributes of a date kind hold an instant in `value_num`,
+  /// unix milliseconds: a fitted part's install date, a cylinder's last
+  /// inspection. Custom attributes carry no kind and stay as they are.
+  Future<void> _shiftDateAttributes(GeneratedDatabase db, int millis) async {
+    final keys = EquipmentAttributeCatalog.dateKeys.toList()..sort();
+    await db.customUpdate(
+      'UPDATE equipment_attributes SET value_num = value_num + ? '
+      'WHERE is_custom = 0 AND value_num IS NOT NULL '
+      'AND attr_key IN (${List.filled(keys.length, '?').join(', ')})',
+      variables: [
+        Variable.withInt(millis),
+        for (final k in keys) Variable.withString(k),
+      ],
+    );
   }
 
   /// How far to move every instant: zero for a logbook without dives.
@@ -125,7 +159,9 @@ class DemoDatabasePreparer {
         .get();
     for (final row in rows) {
       final points =
-          jsonDecode(utf8.decode(gzip.decode(row.read<Uint8List>('points'))))
+          jsonDecode(
+                utf8.decode(PlatformZlib.gunzip(row.read<Uint8List>('points'))),
+              )
               as List;
       final shifted = [
         for (final point in points)
@@ -138,7 +174,7 @@ class DemoDatabasePreparer {
         'UPDATE "$table" SET points = ? WHERE id = ?',
         variables: [
           Variable.withBlob(
-            Uint8List.fromList(gzip.encode(utf8.encode(jsonEncode(shifted)))),
+            PlatformZlib.gzip(utf8.encode(jsonEncode(shifted))),
           ),
           Variable.withString(row.read<String>('id')),
         ],
@@ -149,6 +185,7 @@ class DemoDatabasePreparer {
   Future<void> _relinkPhotos(
     GeneratedDatabase db,
     String photosDir,
+    Uri? photosUrl,
     String? deviceId,
   ) async {
     final rows = await db
@@ -160,7 +197,23 @@ class DemoDatabasePreparer {
     for (final row in rows) {
       final old =
           row.read<String?>('local_path') ?? row.read<String>('file_path');
-      final path = p.join(photosDir, p.basename(old.replaceAll(r'\', '/')));
+      final name = p.basename(old.replaceAll(r'\', '/'));
+      if (photosUrl != null) {
+        // A link resolves the same on every device, so no device owns it.
+        final url = photosUrl.resolve(Uri.encodeComponent(name)).toString();
+        await db.customUpdate(
+          "UPDATE media SET source_type = 'networkUrl', url = ?, "
+          'file_path = ?, local_path = NULL, origin_device_id = NULL '
+          'WHERE id = ?',
+          variables: [
+            Variable.withString(url),
+            Variable.withString(url),
+            Variable.withString(row.read<String>('id')),
+          ],
+        );
+        continue;
+      }
+      final path = p.join(photosDir, name);
       await db.customUpdate(
         'UPDATE media SET file_path = ?, local_path = ?, origin_device_id = ? '
         'WHERE id = ?',

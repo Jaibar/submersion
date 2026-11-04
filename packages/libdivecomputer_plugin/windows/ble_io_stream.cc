@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <sstream>
+#include <thread>
 
 #include "native_logger.h"
 
@@ -21,14 +22,6 @@ namespace {
 // bug report reads the same way as the ones this code was modelled on.
 constexpr char kBleCategory[] = "BLE";
 
-// Colon-free upper-case hex, the one form a Windows address takes anywhere
-// else in this plugin: ble_scanner.cc formats the same uint64 as "%012llX",
-// that string is DiscoveredDevice::address(), it is the access-code storage
-// key, it is what dive_computer_host_api_impl.cc parses back with strtoull,
-// and it is what the Dart log prints. A colon-separated form here would mean
-// the connect and error lines could not be matched to the device that
-// produced them, and bluetoothAddressesMatch (discovery_providers.dart) only
-// upper-cases before comparing, so it would not bridge the two spellings.
 // HRESULT code plus message. The message alone is localized and often
 // generic ("The object has been closed"), while the code is what a bug
 // report can be searched on and what names an access or authentication
@@ -38,13 +31,6 @@ std::string DescribeHresult(const winrt::hresult_error& e) {
     std::snprintf(code, sizeof(code), "0x%08X",
                   static_cast<unsigned int>(static_cast<int32_t>(e.code())));
     return std::string(code) + " " + winrt::to_string(e.message());
-}
-
-std::string FormatAddress(uint64_t address) {
-    char buffer[13];
-    std::snprintf(buffer, sizeof(buffer), "%012llX",
-                  static_cast<unsigned long long>(address));
-    return std::string(buffer);
 }
 
 // Formatted by hand rather than through winrt::to_hstring so the output
@@ -87,6 +73,29 @@ std::string DescribeGattStatus(GattCommunicationStatus status) {
             return "unknown status (" +
                    std::to_string(static_cast<int>(status)) + ")";
     }
+}
+
+// ble_connect_failure.h mirrors these values so its classifier can be unit
+// tested without WinRT. A drift would hand every status the wrong advice.
+static_assert(static_cast<int>(GattCommunicationStatus::Success) ==
+                  gatt_status::kSuccess,
+              "gatt_status::kSuccess drifted from WinRT");
+static_assert(static_cast<int>(GattCommunicationStatus::Unreachable) ==
+                  gatt_status::kUnreachable,
+              "gatt_status::kUnreachable drifted from WinRT");
+static_assert(static_cast<int>(GattCommunicationStatus::ProtocolError) ==
+                  gatt_status::kProtocolError,
+              "gatt_status::kProtocolError drifted from WinRT");
+static_assert(static_cast<int>(GattCommunicationStatus::AccessDenied) ==
+                  gatt_status::kAccessDenied,
+              "gatt_status::kAccessDenied drifted from WinRT");
+
+BleConnectFailure ClassifyStatus(GattCommunicationStatus status) {
+    return ClassifyGattStatus(static_cast<int>(status));
+}
+
+BleConnectFailure ClassifyError(const winrt::hresult_error& e) {
+    return ClassifyHresult(static_cast<int32_t>(e.code()));
 }
 
 }  // namespace
@@ -185,9 +194,84 @@ BleIoStream::BleIoStream() = default;
 
 BleIoStream::~BleIoStream() { Close(); }
 
-bool BleIoStream::ConnectAndDiscover(uint64_t bluetooth_address) {
-    const std::string address = FormatAddress(bluetooth_address);
+bool BleIoStream::Fail(BleConnectFailure failure, const std::string& detail,
+                       int32_t hresult) {
+    NativeLogger::Error(kBleCategory, detail);
+    connect_failure_ = failure;
+    connect_failure_detail_ = detail;
+    connect_failure_hresult_ = hresult;
+    return false;
+}
+
+bool BleIoStream::ConnectAndDiscover(uint64_t bluetooth_address,
+                                     const std::function<bool()>& cancelled) {
+    // A single refusal used to end the download. Qt's WinRT backend keeps
+    // asking an unpaired device for its services for 20 seconds, and the
+    // Petrel 2 in issue #4094 failed discovery three different ways in three
+    // tries (0x8007003A twice, Unreachable once), so a transient failure is
+    // repeated until the window closes. Pairing refusals and a missing LE
+    // record are not: asking again cannot change them.
+    const auto started = std::chrono::steady_clock::now();
+    for (int attempt = 1;; attempt++) {
+        if (ConnectAndDiscoverOnce(bluetooth_address)) {
+            if (attempt > 1) {
+                NativeLogger::Info(kBleCategory,
+                                   "Connected on attempt " +
+                                       std::to_string(attempt));
+            }
+            return true;
+        }
+        const int64_t elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+        if (!ShouldRetryConnect(connect_failure_, connect_failure_hresult_,
+                                elapsed_ms) ||
+            (cancelled && cancelled())) {
+            return false;
+        }
+        // Tear down what the failed attempt opened, so the next one starts
+        // from a fresh BluetoothLEDevice rather than from stale GATT objects.
+        // Close() revokes event tokens on objects the failed attempt may have
+        // left half set up, and a winrt::hresult_error is not a
+        // std::exception, so nothing above this thread would catch it.
+        try {
+            Close();
+        } catch (...) {
+        }
+        NativeLogger::Warn(kBleCategory,
+                           "Attempt " + std::to_string(attempt) +
+                               " failed; retrying in " +
+                               std::to_string(kConnectRetryDelayMs) + " ms");
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(kConnectRetryDelayMs));
+        if (cancelled && cancelled()) return false;
+    }
+}
+
+bool BleIoStream::ConnectAndDiscoverOnce(uint64_t bluetooth_address) {
+    const std::string address = FormatBluetoothAddress(bluetooth_address);
+    connect_failure_ = BleConnectFailure::kNone;
+    connect_failure_detail_.clear();
+    connect_failure_hresult_ = 0;
+    // A fresh balance per attempt. Credit grant completions capture the
+    // balance they were issued against, so one still in flight from an
+    // earlier attempt lands on that object and never on this link's.
+    credits_ = std::make_shared<CreditBalance>();
+    // Bytes queued by a failed attempt would reach libdivecomputer ahead of
+    // this link's own and corrupt the protocol, so the queue starts empty
+    // and callbacks still running for the old attempt are shut out.
+    {
+        std::lock_guard<std::mutex> lock(read_mutex_);
+        link_generation_++;
+        read_chunks_.clear();
+    }
     NativeLogger::Debug(kBleCategory, "Connecting to " + address);
+    // Which WinRT call is running, for the catch below. Its line used to say
+    // only "connect or service discovery", so the 0x8007003A in #4094 could
+    // not be pinned to address resolution, the service list, or one
+    // service's characteristics.
+    connect_step_ = "resolving the address";
     try {
         device_ = BluetoothLEDevice::FromBluetoothAddressAsync(
                       bluetooth_address)
@@ -203,17 +287,14 @@ bool BleIoStream::ConnectAndDiscover(uint64_t bluetooth_address) {
             // random-static advertiser (#1232), and a stored address the
             // stack has not seen advertise recently fails here too
             // (discovery_providers.dart).
-            NativeLogger::Error(kBleCategory,
-                                "No Bluetooth LE device for " + address +
-                                    "; Windows resolved no LE record for this "
-                                    "address. Known causes: a dual-mode "
-                                    "computer Windows knows only as a "
-                                    "Bluetooth Classic device, an address "
-                                    "the stack has not seen advertise "
-                                    "recently, or a random-static advertising "
-                                    "address. Re-running a scan before the "
-                                    "connect distinguishes the second");
-            return false;
+            return Fail(BleConnectFailure::kNoLeDevice,
+                        "No Bluetooth LE device for " + address +
+                            "; Windows resolved no LE record for this "
+                            "address. Known causes: a dual-mode computer "
+                            "Windows knows only as a Bluetooth Classic "
+                            "device, an address the stack has not seen "
+                            "advertise recently, or a random-static "
+                            "advertising address");
         }
 
         device_name_ = winrt::to_string(device_.Name());
@@ -232,6 +313,23 @@ bool BleIoStream::ConnectAndDiscover(uint64_t bluetooth_address) {
         } catch (...) {
         }
 
+        // Ask Windows to hold the link between the discovery calls below
+        // instead of dropping it whenever no GATT request is in flight, the
+        // shape of the nine-second Unreachable in #4094. Best-effort:
+        // GattSession needs Windows 10 1803.
+        connect_step_ = "opening a GATT session";
+        try {
+            gatt_session_ =
+                GattSession::FromDeviceIdAsync(device_.BluetoothDeviceId())
+                    .get();
+            if (gatt_session_) gatt_session_.MaintainConnection(true);
+        } catch (...) {
+            gatt_session_ = nullptr;
+            NativeLogger::Warn(kBleCategory,
+                               "Could not hold a GATT session open; "
+                               "continuing without one");
+        }
+
         return DiscoverCharacteristics();
     // DiscoverCharacteristics runs inside this try and does not catch its
     // own .get() throws, so these handlers see discovery failures too.
@@ -239,33 +337,40 @@ bool BleIoStream::ConnectAndDiscover(uint64_t bluetooth_address) {
     // may have come up and died during discovery, which is exactly the
     // distinction #957 was about.
     } catch (const winrt::hresult_error& e) {
-        NativeLogger::Error(kBleCategory,
-                            "Connect or service discovery for " + address +
-                                " threw: " + DescribeHresult(e));
-        return false;
+        return Fail(ClassifyError(e),
+                    "Connect or service discovery for " + address +
+                        " threw while " + connect_step_ + ": " +
+                        DescribeHresult(e),
+                    static_cast<int32_t>(e.code()));
     } catch (...) {
-        NativeLogger::Error(kBleCategory,
-                            "Connect or service discovery for " + address +
-                                " threw an unknown error");
-        return false;
+        return Fail(BleConnectFailure::kOther,
+                    "Connect or service discovery for " + address +
+                        " threw an unknown error while " + connect_step_);
     }
 }
 
 bool BleIoStream::DiscoverCharacteristics() {
     read_poller_.reset();
+    connect_step_ = "listing services";
     auto services_result =
         device_.GetGattServicesAsync(BluetoothCacheMode::Uncached).get();
     if (services_result.Status() != GattCommunicationStatus::Success) {
-        NativeLogger::Error(kBleCategory,
-                            "Service discovery failed: " +
-                                DescribeGattStatus(services_result.Status()));
-        return false;
+        return Fail(ClassifyStatus(services_result.Status()),
+                    "Service discovery failed: " +
+                        DescribeGattStatus(services_result.Status()));
     }
 
     // The UUIDs a computer actually exposed are what a new descriptor gets
     // written from, and their absence is the whole diagnosis when none of
     // them can carry a serial session (issue #957).
     std::vector<std::string> discovered_service_uuids;
+    // Services listed, and how many refused their characteristics with
+    // AccessDenied or Unreachable: every one refusing with the same status
+    // is an unpaired machine or a dropped link, advice the diver can act on
+    // (issue #4094).
+    size_t services_listed = 0;
+    size_t services_access_denied = 0;
+    size_t services_unreachable = 0;
 
     struct Candidate {
         int score = -1;
@@ -285,10 +390,20 @@ bool BleIoStream::DiscoverCharacteristics() {
     GattCharacteristic read_poll_candidate{nullptr};
 
     for (auto const& service : services_result.Services()) {
+        services_listed++;
+        connect_step_ =
+            "listing the characteristics of " + DescribeUuid(service.Uuid());
         auto chars_result =
             service.GetCharacteristicsAsync(BluetoothCacheMode::Uncached)
                 .get();
         if (chars_result.Status() != GattCommunicationStatus::Success) {
+            if (chars_result.Status() ==
+                GattCommunicationStatus::AccessDenied) {
+                services_access_denied++;
+            } else if (chars_result.Status() ==
+                       GattCommunicationStatus::Unreachable) {
+                services_unreachable++;
+            }
             NativeLogger::Warn(kBleCategory,
                                "Service " + DescribeUuid(service.Uuid()) +
                                    " listed no characteristics: " +
@@ -450,24 +565,44 @@ bool BleIoStream::DiscoverCharacteristics() {
     }
 
     if (best.score < 0) {
-        if (discovered_service_uuids.empty()) {
-            NativeLogger::Error(kBleCategory,
-                                "Service discovery succeeded but the computer "
-                                "reported no services at all");
-        } else {
-            std::ostringstream seen;
-            for (size_t i = 0; i < discovered_service_uuids.size(); i++) {
-                if (i > 0) seen << ", ";
-                seen << discovered_service_uuids[i];
-            }
-            NativeLogger::Error(
-                kBleCategory,
-                "No discovered service carries both a write and a notify "
-                "characteristic, nor matches a known read-poll service; " +
-                    std::to_string(discovered_service_uuids.size()) +
-                    " service(s) seen: " + seen.str());
+        const BleConnectFailure failure = ClassifyDiscoveryAccess(
+            services_listed, services_access_denied, services_unreachable);
+        if (services_listed == 0) {
+            return Fail(failure,
+                        "Service discovery succeeded but the computer "
+                        "reported no services at all");
         }
-        return false;
+        if (discovered_service_uuids.empty()) {
+            // Listed, but none would enumerate its characteristics. Before
+            // this branch an unpaired machine fell through to the "no
+            // services at all" line above, which was false: it had listed
+            // services and been refused every one of them.
+            std::string statuses;
+            if (failure == BleConnectFailure::kPairingRequired) {
+                statuses = DescribeGattStatus(
+                    GattCommunicationStatus::AccessDenied);
+            } else if (failure == BleConnectFailure::kUnreachable) {
+                statuses = DescribeGattStatus(
+                    GattCommunicationStatus::Unreachable);
+            } else {
+                statuses = "see the warnings above for each status";
+            }
+            return Fail(failure,
+                        "Every one of the " + std::to_string(services_listed) +
+                            " service(s) refused to list its "
+                            "characteristics: " + statuses);
+        }
+        std::ostringstream seen;
+        for (size_t i = 0; i < discovered_service_uuids.size(); i++) {
+            if (i > 0) seen << ", ";
+            seen << discovered_service_uuids[i];
+        }
+        return Fail(
+            failure,
+            "No discovered service carries both a write and a notify "
+            "characteristic, nor matches a known read-poll service; " +
+                std::to_string(discovered_service_uuids.size()) +
+                " service(s) seen: " + seen.str());
     }
 
     NativeLogger::Debug(kBleCategory,
@@ -510,6 +645,10 @@ bool BleIoStream::DiscoverCharacteristics() {
         // On a Telit module this is terminal, so it is the last line in the
         // log and has to be true.
         std::string credits_cccd_threw;
+        BleConnectFailure credits_cccd_failure = BleConnectFailure::kOther;
+        // Carried to Fail so the retry policy sees the same code it would
+        // for a throw anywhere else in discovery.
+        int32_t credits_cccd_hresult = 0;
         try {
             credits_cccd_result =
                 credits_notify_characteristic_
@@ -519,29 +658,38 @@ bool BleIoStream::DiscoverCharacteristics() {
         } catch (const winrt::hresult_error& e) {
             credits_cccd_result = GattCommunicationStatus::Unreachable;
             credits_cccd_threw = DescribeHresult(e);
+            credits_cccd_failure = ClassifyError(e);
+            credits_cccd_hresult = static_cast<int32_t>(e.code());
         } catch (...) {
             credits_cccd_result = GattCommunicationStatus::Unreachable;
             credits_cccd_threw = "unknown error";
         }
         if (credits_cccd_result != GattCommunicationStatus::Success) {
-            NativeLogger::Warn(kBleCategory,
-                               "Terminal I/O credit subscription failed: " +
-                                   (credits_cccd_threw.empty()
-                                        ? DescribeGattStatus(
-                                              credits_cccd_result)
-                                        : "threw: " + credits_cccd_threw));
-            if (credits_required_) return false;
+            const std::string detail =
+                "Terminal I/O credit subscription failed: " +
+                (credits_cccd_threw.empty()
+                     ? DescribeGattStatus(credits_cccd_result)
+                     : "threw: " + credits_cccd_threw);
+            if (credits_required_) {
+                return Fail(credits_cccd_threw.empty()
+                                ? ClassifyStatus(credits_cccd_result)
+                                : credits_cccd_failure,
+                            detail, credits_cccd_hresult);
+            }
+            NativeLogger::Warn(kBleCategory, detail);
             // u-blox flow control is optional; fall back to running without it
             // rather than failing a device that works today.
             credits_notify_characteristic_ = nullptr;
             credits_write_characteristic_ = nullptr;
         } else {
-            credits_notify_token_ = credits_notify_characteristic_.ValueChanged(
-                {this, &BleIoStream::OnCharacteristicValueChanged});
+            credits_notify_token_ =
+                SubscribeValueChanged(credits_notify_characteristic_);
         }
     }
 
     // Enable notifications.
+    connect_step_ = "subscribing to " +
+                    DescribeUuid(notify_characteristic_.Uuid());
     auto cccd_value =
         ((notify_characteristic_.CharacteristicProperties() &
           GattCharacteristicProperties::Notify) !=
@@ -556,19 +704,17 @@ bool BleIoStream::DiscoverCharacteristics() {
                 cccd_value)
             .get();
     if (cccd_result != GattCommunicationStatus::Success) {
-        NativeLogger::Error(kBleCategory,
-                            "Could not subscribe to notifications on " +
-                                DescribeUuid(notify_characteristic_.Uuid()) +
-                                ": " + DescribeGattStatus(cccd_result));
-        return false;
+        return Fail(ClassifyStatus(cccd_result),
+                    "Could not subscribe to notifications on " +
+                        DescribeUuid(notify_characteristic_.Uuid()) + ": " +
+                        DescribeGattStatus(cccd_result));
     }
 
     // Publish the handle before subscribing, so the first callback already
     // has something to match against.
     notify_attribute_handle_.store(notify_characteristic_.AttributeHandle(),
                                    std::memory_order_release);
-    notify_token_ = notify_characteristic_.ValueChanged(
-        {this, &BleIoStream::OnCharacteristicValueChanged});
+    notify_token_ = SubscribeValueChanged(notify_characteristic_);
 
     return GrantInitialCredits();
 }
@@ -576,7 +722,14 @@ bool BleIoStream::DiscoverCharacteristics() {
 bool BleIoStream::GrantInitialCredits() {
     if (!credits_write_characteristic_) return true;
 
+    // Status and classification are kept apart, as on the credit CCCD path
+    // above: an AccessDenied or a timeout while granting the required Telit
+    // credits is still a pairing or link problem the diver can act on, not a
+    // generic failure.
     bool granted = false;
+    std::string refusal;
+    BleConnectFailure failure = BleConnectFailure::kOther;
+    int32_t hresult = 0;
     try {
         auto writer = DataWriter();
         writer.WriteByte(kTerminalIoInitialGrant);
@@ -586,17 +739,28 @@ bool BleIoStream::GrantInitialCredits() {
                                            GattWriteOption::WriteWithResponse)
                 .get();
         granted = result.Status() == GattCommunicationStatus::Success;
+        if (!granted) {
+            refusal = DescribeGattStatus(result.Status());
+            failure = ClassifyStatus(result.Status());
+        }
+    } catch (const winrt::hresult_error& e) {
+        granted = false;
+        refusal = "threw: " + DescribeHresult(e);
+        failure = ClassifyError(e);
+        hresult = static_cast<int32_t>(e.code());
     } catch (...) {
         granted = false;
+        refusal = "threw: unknown error";
     }
 
     if (!granted) {
-        NativeLogger::Warn(kBleCategory,
-                           "Terminal I/O initial credit grant was refused");
+        const std::string detail =
+            "Terminal I/O initial credit grant was refused: " + refusal;
         // A Telit bridge carries nothing without credits, so the connection is
         // dead. u-blox flow control is optional and the service already works
         // with no handshake at all, so fall back to that instead.
-        if (credits_required_) return false;
+        if (credits_required_) return Fail(failure, detail, hresult);
+        NativeLogger::Warn(kBleCategory, detail);
         ReleaseCreditCharacteristics();
         return true;
     }
@@ -631,16 +795,19 @@ void BleIoStream::ReleaseCreditCharacteristics() {
     credits_->open = false;
 }
 
-void BleIoStream::ReplenishCredits() {
-    auto credits = credits_;
+void BleIoStream::ReplenishCredits(
+    const std::shared_ptr<CreditBalance>& credits) {
     const uint8_t grant = static_cast<uint8_t>(kTerminalIoInitialGrant -
                                                kTerminalIoRefillThreshold);
     GattCharacteristic characteristic{nullptr};
 
     {
         std::lock_guard<std::mutex> lock(credits->mutex);
-        if (!credits_write_characteristic_) return;
+        // `open` first: a failed attempt's balance was closed by Close(), so
+        // its late callbacks return here without reading the characteristic
+        // member the next attempt is setting up.
         if (!credits->open) return;
+        if (!credits_write_characteristic_) return;
         if (credits->credits > 0) credits->credits--;
         if (credits->grant_in_flight) return;
         if (credits->credits > kTerminalIoRefillThreshold) return;
@@ -688,9 +855,24 @@ void BleIoStream::ReplenishCredits() {
     }
 }
 
+winrt::event_token BleIoStream::SubscribeValueChanged(
+    GattCharacteristic const& characteristic) {
+    // Both captured by value, so a late callback never reads the credits_
+    // member the next attempt replaces.
+    const uint32_t generation = link_generation_;
+    auto credits = credits_;
+    return characteristic.ValueChanged(
+        [this, generation, credits](GattCharacteristic const& sender,
+                                    GattValueChangedEventArgs const& args) {
+            OnCharacteristicValueChanged(sender, args, generation, credits);
+        });
+}
+
 void BleIoStream::OnCharacteristicValueChanged(
     GattCharacteristic const& sender,
-    GattValueChangedEventArgs const& args) {
+    GattValueChangedEventArgs const& args,
+    uint32_t generation,
+    const std::shared_ptr<CreditBalance>& credits) {
     // UART Credits TX shares this handler with UART Data TX but carries no
     // application data: injecting its indications into the read queue would
     // corrupt the protocol stream.
@@ -716,13 +898,19 @@ void BleIoStream::OnCharacteristicValueChanged(
 
     {
         std::lock_guard<std::mutex> lock(read_mutex_);
+        // Checked under the lock the retry takes to clear the queue: a
+        // callback from a failed attempt either lands before the clear and
+        // is wiped, or arrives after it and is dropped here.
+        if (generation != link_generation_) return;
         read_chunks_.push_back(std::move(data));
     }
     read_cv_.notify_one();
 
     // Each packet the module sends costs it one credit; top it back up before
-    // the balance runs out or the transfer stalls part-way through.
-    ReplenishCredits();
+    // the balance runs out or the transfer stalls part-way through. The
+    // balance is this callback's own attempt's: one that passed the
+    // generation check just before a retry finds it closed and stops.
+    ReplenishCredits(credits);
 }
 
 libdc_io_callbacks_t BleIoStream::MakeCallbacks() {
@@ -767,6 +955,13 @@ void BleIoStream::Close() {
     // Release the throughput-optimized connection request (reverts to the
     // controller's default interval) before tearing down the device.
     preferred_connection_request_ = nullptr;
+    if (gatt_session_) {
+        try {
+            gatt_session_.Close();
+        } catch (...) {
+        }
+        gatt_session_ = nullptr;
+    }
     if (device_) {
         device_.Close();
         device_ = nullptr;

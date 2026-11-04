@@ -179,7 +179,9 @@ class CompactDiveListTile extends ConsumerWidget {
     if (field == DiveField.maxDepth) {
       return units.formatDepth(maxDepth);
     }
-    if (field == DiveField.bottomTime) {
+    // [duration] is either of runtime and bottom time, so with a source to
+    // read, the slot reads its own field (issue #3304).
+    if (field == DiveField.bottomTime && !_hasSlotData) {
       return duration != null ? '${duration!.inMinutes} min' : '--';
     }
     // Fallback for any other field value
@@ -228,8 +230,7 @@ class CompactDiveListTile extends ConsumerWidget {
     // screen-reader label leave the number out.
     final isPlannedDive = isPlanned || summary?.isPlanned == true;
     final colorScheme = Theme.of(context).colorScheme;
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
+    final units = ref.watch(unitFormatterProvider);
 
     // Card coloring
     final colorAttribute = ref.watch(cardColorAttributeProvider);

@@ -9,6 +9,7 @@ import 'package:submersion/core/query/registry/query_entity.dart';
 import 'package:submersion/features/query/app_query_registry.dart';
 import 'package:submersion/core/query/names/name_index.dart';
 import 'package:submersion/features/query/presentation/app_query_labels.dart';
+import 'package:submersion/features/query/presentation/providers/query_language_provider.dart';
 import 'package:submersion/features/query/presentation/providers/query_name_index_provider.dart';
 import 'package:submersion/features/query/presentation/providers/query_unit_prefs_provider.dart';
 import 'package:submersion/features/query/presentation/query_error_text.dart';
@@ -81,18 +82,8 @@ class EntityQueryEditor extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final prefs = ref.watch(queryUnitPrefsProvider);
-    final names = ref.watch(queryNameIndexProvider).value ?? NameIndex.empty;
-    final editorContext = QueryEditorContext(
-      registry: appQueryRegistry,
-      root: root,
-      prefs: prefs,
-      names: names,
-      labels: AppQueryLabels(context),
-      now: DateTime.now,
-    );
     return QueryEditor(
-      context: editorContext,
+      context: watchQueryEditorContext(context, ref, root),
       value: value,
       onChanged: onChanged,
       strings: queryEditorStringsOf(context.l10n),
@@ -104,6 +95,21 @@ class EntityQueryEditor extends ConsumerWidget {
     );
   }
 }
+
+/// The editor context for [root], kept current while the widget is up.
+QueryEditorContext watchQueryEditorContext(
+  BuildContext context,
+  WidgetRef ref,
+  QueryEntity root,
+) => QueryEditorContext(
+  registry: appQueryRegistry,
+  root: root,
+  prefs: ref.watch(queryUnitPrefsProvider),
+  names: ref.watch(queryNameIndexProvider).value ?? NameIndex.empty,
+  labels: AppQueryLabels(context),
+  now: DateTime.now,
+  language: ref.watch(queryLanguageProvider),
+);
 
 /// The editor context for [root], read once (for an action) rather than
 /// watched (#2984: the dive table's Add filter builds a rule with it).
@@ -118,4 +124,5 @@ QueryEditorContext readQueryEditorContext(
   names: ref.read(queryNameIndexProvider).value ?? NameIndex.empty,
   labels: AppQueryLabels(context),
   now: DateTime.now,
+  language: ref.read(queryLanguageProvider),
 );

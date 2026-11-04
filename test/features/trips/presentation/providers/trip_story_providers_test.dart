@@ -10,6 +10,7 @@ import 'package:submersion/features/divers/presentation/providers/diver_provider
 import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
 import 'package:submersion/features/trips/presentation/providers/liveaboard_providers.dart';
+import 'package:submersion/features/trips/domain/entities/trip_media_preview.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_media_providers.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_story_providers.dart';
@@ -46,8 +47,10 @@ void main() {
         tripByIdProvider('trip-1').overrideWith((ref) async => trip),
         divesForTripProvider('trip-1').overrideWith((ref) async => [dive]),
         itineraryDaysProvider('trip-1').overrideWith((ref) async => []),
-        mediaForTripProvider('trip-1').overrideWith((ref) async => {}),
-        tripChecklistProvider('trip-1').overrideWith((ref) async => []),
+        tripMediaPreviewProvider(
+          'trip-1',
+        ).overrideWith((ref) async => TripMediaPreview.empty),
+        tripChecklistAllItemsProvider('trip-1').overrideWith((ref) async => []),
         tripSightingsByDiveProvider('trip-1').overrideWith((ref) async => {}),
       ].cast(),
     );
@@ -74,8 +77,10 @@ void main() {
       tripByIdProvider('trip-1').overrideWith((ref) async => trip),
       divesForTripProvider('trip-1').overrideWith((ref) async => []),
       itineraryDaysProvider('trip-1').overrideWith((ref) async => []),
-      mediaForTripProvider('trip-1').overrideWith((ref) async => {}),
-      tripChecklistProvider('trip-1').overrideWith((ref) async => []),
+      tripMediaPreviewProvider(
+        'trip-1',
+      ).overrideWith((ref) async => TripMediaPreview.empty),
+      tripChecklistAllItemsProvider('trip-1').overrideWith((ref) async => []),
       tripSightingsByDiveProvider('trip-1').overrideWith((ref) async => {}),
     ];
 
@@ -126,9 +131,11 @@ void main() {
           tripByIdProvider('trip-1').overrideWith((ref) async => trip),
           divesForTripProvider('trip-1').overrideWith((ref) async => [dive]),
           itineraryDaysProvider('trip-1').overrideWith((ref) async => []),
-          tripChecklistProvider('trip-1').overrideWith((ref) async => []),
+          tripChecklistAllItemsProvider(
+            'trip-1',
+          ).overrideWith((ref) async => []),
           // Both enrichment sources error; the story should still compose.
-          mediaForTripProvider(
+          tripMediaPreviewProvider(
             'trip-1',
           ).overrideWith((ref) => Future.error(Exception('media down'))),
           tripSightingsByDiveProvider(

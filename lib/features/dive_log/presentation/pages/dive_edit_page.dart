@@ -30,7 +30,15 @@ import 'package:submersion/core/deco/altitude_calculator.dart';
 import 'package:submersion/core/services/location_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/data/repositories/annotation_repository.dart';
+import 'package:submersion/features/dive_log/domain/services/annotation_links.dart';
+import 'package:submersion/features/dive_log/data/services/diver_gas_switch_writer.dart';
+import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/services/gas_switch_editing.dart';
+import 'package:submersion/features/dive_log/domain/services/profile_depth_at.dart';
+import 'package:submersion/features/dive_log/domain/services/tank_usage_range.dart';
 import 'package:submersion/features/dive_log/presentation/formatters/visibility_display.dart';
+import 'package:submersion/features/dive_log/presentation/helpers/seeded_dive_times.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/dive_roles/data/repositories/dive_role_link_repository.dart';
 import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
@@ -74,7 +82,12 @@ import 'package:submersion/features/dive_types/presentation/providers/dive_type_
 import 'package:submersion/features/tags/presentation/widgets/tag_form_block.dart';
 import 'package:submersion/features/tags/presentation/widgets/tag_input_widget.dart';
 import 'package:submersion/features/tags/presentation/widgets/tag_picker_sheet.dart';
+import 'package:submersion/features/trips/data/repositories/selection_trip_facts.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/domain/services/trip_date_stretch.dart';
+import 'package:submersion/features/trips/domain/services/trip_draft.dart';
+import 'package:submersion/features/trips/presentation/helpers/new_trip_from_selection.dart';
+import 'package:submersion/features/trips/presentation/helpers/trip_date_stretch_message.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/trips/presentation/widgets/trip_picker.dart';
@@ -91,6 +104,7 @@ import 'package:submersion/features/dive_log/domain/entities/dive_custom_field.d
 import 'package:submersion/features/dive_log/domain/entities/dive_weight.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_data_source.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_mirror_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/cylinder_breath_starts_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_text_suggestion_field.dart';
 import 'package:submersion/features/dive_log/presentation/providers/visibility_input_mode_provider.dart';
@@ -103,6 +117,11 @@ import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/
 import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/conditions_section.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/experience_section.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/gas_gear_section.dart';
+import 'package:submersion/features/dive_log/presentation/providers/annotation_providers.dart';
+import 'package:submersion/shared/widgets/markdown_notes/markdown_editing.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/annotation_time_sheet.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/gas_switch_time_sheet.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/gas_switches_editor.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/rare_sections.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/route_link_sheet.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/edit_sections/route_row.dart';
@@ -171,6 +190,9 @@ import 'package:submersion/features/dive_log/presentation/providers/shared_gear_
 import 'package:submersion/features/rules/presentation/run_rules_flow.dart';
 import 'package:submersion/features/rules/domain/rule_subject.dart';
 import 'package:submersion/shared/widgets/markdown_notes/markdown_notes_field.dart';
+
+part 'dive_edit_page_annotations.dart';
+part 'dive_edit_page_gas_switches.dart';
 
 const _createNewDiveCenterSentinel = '__create_new_dive_center__';
 const _createNewTripSentinel = '__create_new_trip__';
@@ -303,6 +325,11 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
   late TimeOfDay _entryTime;
   DateTime? _exitDate;
   TimeOfDay? _exitTime;
+
+  /// What the time inputs were filled with and the exact values they round;
+  /// null for a new dive. The save reads it so an unrelated edit does not
+  /// write whole minutes over stored seconds (issue #3901).
+  SeededDiveTimes? _seededTimes;
   final _diveNumberController = TextEditingController();
   final _durationController = TextEditingController();
   final _runtimeController = TextEditingController();
@@ -432,6 +459,17 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
 
   // Tank data - list of tanks with multi-tank support
   List<DiveTank> _tanks = [];
+
+  // The gas switch list (issue #32); the handlers live in
+  // dive_edit_page_gas_switches.dart, which reaches setState through
+  // [_updateGasSwitches].
+  List<GasSwitch> _gasSwitches = const [];
+  Set<String> _loadedGasSwitchIds = const {};
+  Set<String> _depthTouchedSwitchIds = const {};
+  int _removedSwitchNotice = 0;
+  bool _gasSwitchesDirty = false;
+
+  void _updateGasSwitches(VoidCallback mutate) => setState(mutate);
   final _uuid = const Uuid();
   TankPresetEntity? _defaultPreset;
   bool _tanksDirty = false;
@@ -493,6 +531,10 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
   // Existing dive for editing
   Dive? _existingDive;
 
+  /// Annotations linked in the notes since the page opened, written on save
+  /// (#4109).
+  List<PendingAnnotation> _pendingAnnotations = const [];
+
   /// Planned dive, awaiting its dive computer data (issue #2002). A planned
   /// dive holds no number; turning the switch off on an existing planned
   /// dive promotes it on save.
@@ -537,9 +579,16 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
   bool _suppressDirty = true;
 
   /// The form's entry date and time as an instant, the wall clock stamped
-  /// UTC as every dive time is. The save, the flight-window check and the
-  /// trip cylinders' state at the dive all read it here.
-  DateTime _currentEntryTime() => DateTime.utc(
+  /// UTC as every dive time is. The shared gear note, the route sheet and the
+  /// trip cylinders' state at the dive all read it here. Stored seconds hold
+  /// until the diver moves the entry.
+  DateTime _currentEntryTime() {
+    final input = _entryInput();
+    return _seededTimes?.entryFor(input) ?? input;
+  }
+
+  /// The entry inputs to the minute, the wall clock stamped UTC.
+  DateTime _entryInput() => DateTime.utc(
     _entryDate.year,
     _entryDate.month,
     _entryDate.day,
@@ -547,31 +596,38 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     _entryTime.minute,
   );
 
-  /// In-edit dive end time, wall-clock-as-UTC: exit fields when both are
-  /// set, otherwise entry + runtime. Null when neither is derivable. Feeds
-  /// the flight-window warning banner; mirrors the save-path derivation.
-  DateTime? _currentDiveEndTime() {
-    if (_exitDate != null && _exitTime != null) {
-      return DateTime.utc(
-        _exitDate!.year,
-        _exitDate!.month,
-        _exitDate!.day,
-        _exitTime!.hour,
-        _exitTime!.minute,
-      );
-    }
-    final entry = _currentEntryTime();
-    final runtimeMinutes = switch (readNumber(
-      _runtimeController.text,
-      integer: true,
-    )) {
-      NumberValue(:final value) => value.toInt(),
-      // No exit to derive; the runtime field shows its own error.
-      NumberBlank() || NumberInvalid() => null,
-    };
-    if (runtimeMinutes == null || runtimeMinutes <= 0) return null;
-    return entry.add(Duration(minutes: runtimeMinutes));
+  /// The exit inputs to the minute, the wall clock stamped UTC, or null until
+  /// both are set.
+  DateTime? _exitInput() {
+    if (_exitDate == null || _exitTime == null) return null;
+    return DateTime.utc(
+      _exitDate!.year,
+      _exitDate!.month,
+      _exitDate!.day,
+      _exitTime!.hour,
+      _exitTime!.minute,
+    );
   }
+
+  /// The time inputs as the save reads them.
+  DiveTimeInputs _timeInputs() => DiveTimeInputs(
+    entry: _entryInput(),
+    exit: _exitInput(),
+    bottomTimeMinutes: _savedNumber(
+      _durationController,
+      integer: true,
+    )?.toInt(),
+    runtimeMinutes: _savedNumber(_runtimeController, integer: true)?.toInt(),
+  );
+
+  /// In-edit dive end time, wall-clock-as-UTC, as the save will leave it: the
+  /// exit, otherwise entry + runtime. An exit estimated from the bottom time
+  /// has no runtime behind it, so it ends at entry + bottom time, which
+  /// follows the entry as the estimate on the form does not. Null when none
+  /// of these is derivable. Feeds the flight-window warning banner.
+  DateTime? _currentDiveEndTime() =>
+      resolveDiveTimes(_timeInputs(), seeded: _seededTimes).end ??
+      (_exitInput() == null ? null : _entryPlusBottomTime());
 
   /// The form's dive, with its unsaved times, for the shared gear note
   /// (issue #2853): a new dive has no id yet, and the note follows time
@@ -927,42 +983,20 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
   /// exit, bottom time, runtime and water temperature. Call inside setState.
   void _seedSourceFields(Dive dive, UnitFormatter units) {
     // A refresh reseeds a form that already holds the previous primary's
-    // values, so clear what the branches below may leave unset.
-    _exitDate = null;
-    _exitTime = null;
-    _durationController.text = '';
-    _runtimeController.text = '';
-    // Use entryTime if available, otherwise fall back to dateTime
-    final entryDateTime = dive.entryTime ?? dive.dateTime;
-    _entryDate = entryDateTime;
-    _entryTime = TimeOfDay.fromDateTime(entryDateTime);
-    // Set exit time if available
-    if (dive.exitTime != null) {
-      _exitDate = dive.exitTime;
-      _exitTime = TimeOfDay.fromDateTime(dive.exitTime!);
-    } else if (dive.bottomTime != null) {
-      // Calculate exit time from entry + bottomTime
-      final exitDateTime = entryDateTime.add(dive.bottomTime!);
-      _exitDate = exitDateTime;
-      _exitTime = TimeOfDay.fromDateTime(exitDateTime);
-    }
-    // Bottom time (stored bottomTime, or auto-calculated from profile)
-    if (dive.bottomTime != null) {
-      _durationController.text = _seedInt(dive.bottomTime!.inMinutes);
-    } else if (dive.profile.isNotEmpty) {
-      // Auto-calculate from profile if no stored duration
-      final calculatedBottomTime = dive.calculateBottomTimeFromProfile();
-      if (calculatedBottomTime != null) {
-        _durationController.text = _seedInt(calculatedBottomTime.inMinutes);
-      }
-    }
-    // Runtime: use stored value, or calculate from entry/exit times
-    if (dive.runtime != null) {
-      _runtimeController.text = _seedInt(dive.runtime!.inMinutes);
-    } else if (dive.entryTime != null && dive.exitTime != null) {
-      final calculatedRuntime = dive.exitTime!.difference(dive.entryTime!);
-      _runtimeController.text = _seedInt(calculatedRuntime.inMinutes);
-    }
+    // values, so every input is written, blank where the dive has no value.
+    final seeded = SeededDiveTimes.of(dive);
+    final shown = seeded.shown;
+    _seededTimes = seeded;
+    _entryDate = shown.entry;
+    _entryTime = TimeOfDay.fromDateTime(shown.entry);
+    _exitDate = shown.exit;
+    _exitTime = shown.exit == null ? null : TimeOfDay.fromDateTime(shown.exit!);
+    _durationController.text = shown.bottomTimeMinutes == null
+        ? ''
+        : _seedInt(shown.bottomTimeMinutes!);
+    _runtimeController.text = shown.runtimeMinutes == null
+        ? ''
+        : _seedInt(shown.runtimeMinutes!);
     _waterTempController.text = dive.waterTemp != null
         ? _seedDecimal(units.convertTemperature(dive.waterTemp!), 0)
         : '';
@@ -990,12 +1024,16 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
         final settings = ref.read(settingsProvider);
         final units = UnitFormatter(settings);
 
-        final hasPrimarySource = await ref
-            .read(diveRepositoryProvider)
-            .hasPrimaryDataSource(dive.id);
+        // Independent reads, so they run together.
+        final (hasPrimarySource, loadedSwitches) = await (
+          repository.hasPrimaryDataSource(dive.id),
+          _loadGasSwitches(dive),
+        ).wait;
         if (!mounted) return;
         setState(() {
           _existingDive = dive;
+          _gasSwitches = loadedSwitches;
+          _loadedGasSwitchIds = {for (final s in loadedSwitches) s.id};
           _isPlanned = dive.isPlanned;
           _hasPrimarySource = hasPrimarySource;
           _diverRoleIds = dive.diverRoleIds;
@@ -1255,8 +1293,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
 
   @override
   Widget build(BuildContext context) {
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
+    final units = ref.watch(unitFormatterProvider);
 
     if (_isLoading) {
       if (widget.embedded) {
@@ -2624,9 +2661,15 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       } else {
         context.go('/dives');
       }
+      final stretched = tripDateStretchMessage(
+        l10n,
+        units,
+        snapshot.tripDateStretches,
+      );
+      final applied = l10n.diveLog_bulkEdit_applied(ids.length);
       messenger.showSnackBar(
         SnackBar(
-          content: Text(l10n.diveLog_bulkEdit_applied(ids.length)),
+          content: Text(stretched == null ? applied : '$applied\n$stretched'),
           duration: const Duration(seconds: 5),
           // A SnackBar with an action defaults to persist: true, which makes the
           // auto-dismiss timer a no-op so the banner never hides on its own.
@@ -3266,6 +3309,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (sheetContext) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -3286,7 +3330,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     );
 
     if (result == _createNewTripSentinel && mounted) {
-      final tripId = await context.push<String>('/trips/new');
+      final tripId = await newTripForDiveEdit(context, ref, _newTripFacts);
       if (tripId != null && mounted) {
         final trip = await ref.read(tripRepositoryProvider).getTripById(tripId);
         if (trip != null && mounted) _setTrip(trip);
@@ -3294,10 +3338,32 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     }
   }
 
+  /// What a trip created from this form learns from its dives (#3351): the
+  /// selected dives in bulk edit, else the dive as the form holds it, saved
+  /// or not.
+  Future<List<SelectionDiveFacts>> _newTripFacts() async {
+    if (widget.isBulk) return loadSelectionTripFacts(widget.bulkDiveIds!);
+    return [
+      SelectionDiveFacts(
+        diveId: '',
+        diveDateTime: DateTime.utc(
+          _entryDate.year,
+          _entryDate.month,
+          _entryDate.day,
+        ),
+        tripId: _selectedTrip?.id,
+        siteRegion: _selectedSite?.region,
+        siteCountry: _selectedSite?.country,
+        diveCenterName: _selectedDiveCenter?.name,
+      ),
+    ];
+  }
+
   Future<void> _showDiveCenterPicker() async {
     final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (sheetContext) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -3466,6 +3532,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       notesPlaceholder: context.l10n.diveLog_edit_notesHint,
       sightingsChild: _sightingsChild(),
       tagsChild: _tagsChild(),
+      onAnnotate: widget.isBulk ? null : _requestAnnotation,
     );
   }
 
@@ -3741,6 +3808,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       applyConfigChild: ApplyConfigurationMenu(
         onSelected: _applyCylinderConfig,
       ),
+      gasSwitchesChild: _buildGasSwitchesChild(units),
       equipmentChild: _equipmentChild(),
       weightChild: _weightChild(units),
       showTankControls: _diveMode != DiveMode.gauge,
@@ -4152,6 +4220,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       for (var i = 0; i < _tanks.length; i++) {
         _tanks[i] = _tanks[i].copyWith(order: i);
       }
+      _dropGasSwitchesWithoutTank();
     });
   }
 
@@ -4503,6 +4572,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -4515,6 +4585,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
             scrollController: scrollController,
             selectedEquipmentIds: _selectedEquipment.map((e) => e.id).toSet(),
             hideSpare: true,
+            hideAssemblyParts: true,
             // A dive logged after the fact may have used gear since retired
             // or sold (#3210).
             offerLeftKit: true,
@@ -4545,6 +4616,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -4670,6 +4742,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -4679,6 +4752,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
           scrollController: scrollController,
           selectedEquipmentIds: _equipmentMembers.map((e) => e.id).toSet(),
           hideSpare: true,
+          hideAssemblyParts: true,
           offerLeftKit: true,
           onEquipmentConfirmed: (items) {
             setState(() {
@@ -4705,6 +4779,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -5129,7 +5204,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     UnitFormatter units, {
     String? Function(String?)? validator,
   }) {
-    final scale = ref.watch(settingsProvider).visibilityScale;
+    final scale = ref.watch(settingsProvider.select((s) => s.visibilityScale));
     final band = effectiveVisibilityBand(
       band: _visibilityBand,
       rangeTouched: _rangeTouched,
@@ -5744,6 +5819,8 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
             endPressure: 50.0,
           ),
         );
+      // The copies carry new ids, so every gas switch loses its cylinder.
+      _dropGasSwitchesWithoutTank();
     });
     ScaffoldMessenger.of(
       context,
@@ -5754,6 +5831,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     final preset = await showModalBottomSheet<WeightPreset>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (sheetContext) => DraggableScrollableSheet(
         initialChildSize: 0.6,
         minChildSize: 0.4,
@@ -5990,6 +6068,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -6024,6 +6103,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => EditSightingSheet(
         sighting: sighting,
         onSave: (updatedSighting) {
@@ -6123,6 +6203,7 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
       setState(() {
         _markDirty();
         _exitTime = time;
+        _seededTimes = _seededTimes?.withExitPicked();
         // Also set exit date if not set
         _exitDate ??= _entryDate;
       });
@@ -6184,37 +6265,10 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
     final rulesAfterCreate = captureRulesAfterCreate(context, ref);
 
     try {
-      // Build entry DateTime from date and time
-      final entryDateTime = _currentEntryTime();
-
-      // Build exit DateTime if set
-      DateTime? exitDateTime;
-      if (_exitDate != null && _exitTime != null) {
-        exitDateTime = DateTime.utc(
-          _exitDate!.year,
-          _exitDate!.month,
-          _exitDate!.day,
-          _exitTime!.hour,
-          _exitTime!.minute,
-        );
-      }
-
-      // Calculate runtime from entry/exit times (total dive time)
-      Duration? runtime;
-      if (exitDateTime != null) {
-        runtime = exitDateTime.difference(entryDateTime);
-        if (runtime.isNegative) runtime = null;
-      } else if (_savedNumber(_runtimeController, integer: true)
-          case final minutes?) {
-        runtime = Duration(minutes: minutes.toInt());
-      }
-
-      // Bottom time is manually entered (time at depth, excluding descent/ascent)
-      Duration? duration;
-      if (_savedNumber(_durationController, integer: true)
-          case final minutes?) {
-        duration = Duration(minutes: minutes.toInt());
-      }
+      // The time inputs hold whole minutes; what the diver left alone saves
+      // its stored precision.
+      final times = resolveDiveTimes(_timeInputs(), seeded: _seededTimes);
+      final entryDateTime = times.entry;
 
       // Parse form values and convert to metric for storage
       final maxDepth = _savedNumber(
@@ -6259,9 +6313,9 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
             : null,
         dateTime: entryDateTime, // Keep for backward compatibility
         entryTime: entryDateTime,
-        exitTime: exitDateTime,
-        bottomTime: duration,
-        runtime: runtime,
+        exitTime: times.exit,
+        bottomTime: times.bottomTime,
+        runtime: times.runtime,
         maxDepth: maxDepth,
         avgDepth: avgDepth,
         waterTemp: waterTemp,
@@ -6390,6 +6444,10 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
 
       // Save using the notifier
       final notifier = ref.read(paginatedDiveListProvider.notifier);
+      // Read now: the stretch below runs even if the page goes away meanwhile.
+      final tripRepository = ref.read(tripRepositoryProvider);
+      final messenger = ScaffoldMessenger.of(context);
+      final l10n = context.l10n;
       String? savedDiveId;
       // A plan the diver just turned into a dive counts as logged by hand
       // for the logbook rules (#3513).
@@ -6454,6 +6512,11 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
 
       // A new visibility value sets the mode the next new dive opens in.
       if (_activeVisibilityTouched) _rememberVisibilityMode(savedVisibility);
+
+      // After the dive and its cylinders, so the cylinder ids exist.
+      await _saveGasSwitches(savedDiveId);
+      // After the notes, which the annotation rows are reconciled against.
+      await _reconcileAnnotations(savedDiveId);
 
       // Save sightings
       if (savedDiveId != null) {
@@ -6602,6 +6665,37 @@ class _DiveEditPageState extends ConsumerState<DiveEditPage> {
           !widget.isBulk &&
           (!widget.isEditing || promotedPlan)) {
         await rulesAfterCreate(subject: RuleSubject.dives, ids: [savedDiveId]);
+      }
+
+      // A dive put on a trip, or moved to another day on one, stretches the
+      // trip to cover it (#3351).
+      if (savedDiveId != null &&
+          diveSaveTouchesTrip(
+            tripId: _selectedTrip?.id,
+            previousTripId: _existingDive?.tripId ?? _existingDive?.trip?.id,
+            date: entryDateTime,
+            previousDate: _existingDive?.effectiveEntryTime,
+          )) {
+        try {
+          final message = tripDateStretchMessage(
+            l10n,
+            units,
+            await tripRepository.stretchToCoverDives([savedDiveId]),
+          );
+          if (message != null) {
+            messenger.showSnackBar(SnackBar(content: Text(message)));
+          }
+        } catch (e, stackTrace) {
+          // Reported, but it never undoes the dive save.
+          _log.error(
+            'Failed to stretch the trip of dive $savedDiveId',
+            error: e,
+            stackTrace: stackTrace,
+          );
+          messenger.showSnackBar(
+            SnackBar(content: Text(l10n.trips_dateStretch_failed)),
+          );
+        }
       }
 
       // Offer to log the dive for linked buddies (issue #2002). Runs before

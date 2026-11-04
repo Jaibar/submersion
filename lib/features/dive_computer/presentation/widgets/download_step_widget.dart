@@ -13,7 +13,6 @@ import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/app_date_picker.dart';
 import 'package:submersion/core/utils/log_failure.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 
 /// Widget for the download step of the discovery wizard.
 class DownloadStepWidget extends ConsumerStatefulWidget {
@@ -369,9 +368,7 @@ class _DownloadStepWidgetState extends ConsumerState<DownloadStepWidget> {
   Widget _buildCutoffPrompt(BuildContext context) {
     final theme = Theme.of(context);
     final cutoff = _cutoff!;
-    final dateLabel = UnitFormatter(
-      ref.watch(settingsProvider),
-    ).formatDate(cutoff);
+    final dateLabel = ref.watch(unitFormatterProvider).formatDate(cutoff);
 
     return Padding(
       padding: const EdgeInsets.all(24),
@@ -629,7 +626,7 @@ class _DownloadStepWidgetState extends ConsumerState<DownloadStepWidget> {
   ) {
     // #1512: hand-rolled M/D/YYYY with a 24-hour clock ignored both the date
     // and the time preference.
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
     final dateStr = units.formatDateTimeBullet(dive.startTime);
     final durationMin = dive.durationSeconds ~/ 60;
 
@@ -736,6 +733,17 @@ class _DownloadStepWidgetState extends ConsumerState<DownloadStepWidget> {
     }
     if (state.errorCode == 'discovery_stalled') {
       return l10n.diveComputer_download_discoveryStalled;
+    }
+    // Windows names the step a BLE connect broke at (issue #4094), so the
+    // ones a diver can act on get advice instead of a generic failure.
+    if (state.errorCode == 'ble_device_not_found') {
+      return l10n.diveComputer_download_bleDeviceNotFound;
+    }
+    if (state.errorCode == 'pairing_required') {
+      return l10n.diveComputer_download_blePairingRequired;
+    }
+    if (state.errorCode == 'device_unreachable') {
+      return l10n.diveComputer_download_bleUnreachable;
     }
     if (state.errorCode == 'connect_failed' && state.errorMessage != null) {
       return l10n.diveComputer_download_serialConnectFailedWithDetails(

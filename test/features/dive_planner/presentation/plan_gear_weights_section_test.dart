@@ -7,6 +7,7 @@ import 'package:submersion/core/buoyancy/weight_prediction_engine.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/units.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/pickers/equipment_picker_sheet.dart';
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
 import 'package:submersion/features/dive_planner/presentation/widgets/plan_gear_weights_section.dart';
 import 'package:submersion/features/divers/domain/entities/diver_weight_entry.dart';
@@ -16,6 +17,7 @@ import 'package:submersion/features/equipment/domain/entities/equipment_set.dart
 import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_set_providers.dart';
+import 'package:submersion/features/planner/presentation/providers/plan_canvas_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/weight_planner/presentation/providers/weight_planner_providers.dart';
 
@@ -135,9 +137,16 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // Add via the gear picker.
+    // Add via the gear picker, which leaves out the components of an
+    // assembly it offers (#2514).
     await tester.tap(find.byTooltip('Add gear'));
     await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<EquipmentPickerSheet>(find.byType(EquipmentPickerSheet))
+          .hideAssemblyParts,
+      isTrue,
+    );
     await tester.tap(find.text('5mm Suit').last);
     await tester.pumpAndSettle();
     expect(find.byType(InputChip), findsOneWidget);
@@ -459,7 +468,7 @@ void main() {
     ) async {
       await pumpSeeded(tester, [
         ...overridesFor(await getBaseOverrides()),
-        planResultsProvider.overrideWith(
+        planOutcomeProvider.overrideWith(
           (ref) => throw StateError('deco engine failed'),
         ),
       ]);

@@ -13,7 +13,6 @@ import 'package:submersion/features/media/presentation/providers/media_library_p
 import 'package:submersion/features/media/presentation/providers/media_smart_album_providers.dart';
 import 'package:submersion/features/media/presentation/widgets/media_library_filter_labels.dart';
 import 'package:submersion/features/media/presentation/widgets/media_smart_album_name_dialog.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/tags/presentation/providers/tag_providers.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
@@ -55,7 +54,7 @@ class MediaLibraryActiveFilterChips extends ConsumerWidget {
     final trips = ref.watch(allTripsProvider).value ?? const [];
     final species = ref.watch(allSpeciesProvider).value ?? const [];
     final tags = ref.watch(tagsProvider).value ?? const <Tag>[];
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
 
     Widget chip(String label, VoidCallback onClear) {
       return InputChip(
@@ -168,10 +167,10 @@ class MediaLibraryActiveFilterChips extends ConsumerWidget {
       );
     }
 
-    // Set by the Sources section's "browse this source", not by the filter
-    // sheet. Without a chip the library sits filtered with nothing on screen
-    // saying why. Labelled through the same helper the Sources list uses, so
-    // the chip names the source the way the row the user just tapped did.
+    // Set by the Sources section's "browse this source" as well as by the
+    // filter sheet's Source row. Labelled through the same helper the Sources
+    // list uses, so the chip names the source the way the row the user just
+    // tapped did.
     final sourceType = filter.sourceType;
     if (sourceType != null) {
       chips.add(

@@ -35,7 +35,7 @@ extension InsightsRepositoryFocus on InsightsRepository {
           s.longitude AS site_longitude,
           d.max_depth,
           d.avg_depth,
-          ${effectiveRuntimeSecondsSql('d')} / 60.0 AS duration_minutes,
+          ${measuredRuntimeSecondsSql('d')} / 60.0 AS duration_minutes,
           d.water_temp,
           CASE
             ${VisibilityBandSql.whenBranches('d.')}
@@ -61,10 +61,7 @@ extension InsightsRepositoryFocus on InsightsRepository {
             FROM dive_tanks t WHERE t.dive_id = d.id) AS gas_class,
           (SELECT t.volume FROM dive_tanks t WHERE t.dive_id = d.id
             ORDER BY t.tank_order LIMIT 1) AS first_tank_volume,
-          COALESCE(
-            (SELECT SUM(w.amount_kg) FROM dive_weights w WHERE w.dive_id = d.id),
-            d.weight_amount
-          ) AS weight_amount,
+          ${recordedWeightKgSql('d')} AS weight_amount,
           (SELECT CASE
               WHEN COUNT(e.id) = 0 THEN NULL
               WHEN MAX(e.type = 'drysuit') = 1 THEN 'drysuit'

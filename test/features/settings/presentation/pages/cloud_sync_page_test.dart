@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
 import 'package:submersion/core/services/accounts/account_group.dart';
 import 'package:submersion/core/services/accounts/account_kind.dart';
 import 'package:submersion/core/services/accounts/account_provider_adapter.dart';
@@ -40,6 +41,9 @@ import 'package:submersion/features/divers/data/repositories/diver_merge_reposit
 import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/pages/cloud_sync_page.dart';
+import 'package:submersion/features/settings/presentation/pages/troubleshoot_sync_page.dart';
+import 'package:submersion/features/settings/presentation/widgets/sync/nearby_devices_section.dart';
+import 'package:submersion/features/settings/presentation/widgets/web/web_sync_rows.dart';
 import 'package:submersion/features/settings/presentation/widgets/sync/sync_account_switch.dart'
     show connectionErrorMessage, errorDisplayText;
 import 'package:submersion/features/settings/presentation/widgets/accounts/account_group_tile.dart';
@@ -464,6 +468,8 @@ void main() {
     // no sync service can read (#311).
     bool customFolderIsDeviceVolumeOnly = false,
     List<AccountGroup> accountGroups = const [],
+    // A browser (issue #4121): no radios for device-to-device sync.
+    bool browser = false,
   }) async {
     final base = await getBaseOverrides();
     final fakeRepo = _FakeSyncRepository();
@@ -480,6 +486,10 @@ void main() {
       ProviderScope(
         overrides: [
           ...base,
+          if (browser)
+            deviceCapabilitiesProvider.overrideWithValue(
+              DeviceCapabilities.web,
+            ),
           syncStateProvider.overrideWith((ref) => fakeSync),
           syncRepositoryProvider.overrideWithValue(fakeRepo),
           accountGroupsProvider.overrideWith((ref) async => accountGroups),
@@ -672,6 +682,103 @@ void main() {
         connectionErrorMessage(l10n, CloudProviderType.s3, null, 'S3', 'boom'),
         l10n.settings_cloudSync_provider_connectionFailed('S3', 'boom'),
       );
+    });
+  });
+
+  group('CloudSyncPage - sign-in needed (#3811)', () {
+    testWidgets('a signed-out account says so and offers Sign in again', (
+      tester,
+    ) async {
+      await pumpPage(
+        tester,
+        selectedProvider: CloudProviderType.googledrive,
+        accountGroups: [_syncGroup('Google Drive')],
+      );
+
+      expect(find.text('Sign-in needed'), findsOneWidget);
+      expect(
+        find.text('Google Drive needs you to sign in again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(FilledButton, 'Sign in again'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a failed sync reads the same, in place of Sync error', (
+      tester,
+    ) async {
+      await pumpPage(
+        tester,
+        selectedProvider: CloudProviderType.googledrive,
+        syncState: const SyncState(
+          status: SyncStatus.error,
+          message: 'raw provider text',
+        ),
+        accountGroups: [_syncGroup('Google Drive')],
+      );
+
+      expect(find.text('Sync error'), findsNothing);
+      expect(find.text('raw provider text'), findsNothing);
+      expect(find.text('Sign-in needed'), findsOneWidget);
+    });
+
+    testWidgets('the rest of the card still opens Troubleshoot Sync', (
+      tester,
+    ) async {
+      await pumpPage(
+        tester,
+        selectedProvider: CloudProviderType.googledrive,
+        accountGroups: [_syncGroup('Google Drive')],
+      );
+
+      await tester.tap(find.text('Sign-in needed'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TroubleshootSyncPage), findsOneWidget);
+    });
+
+    testWidgets('nothing of it shows while sync runs', (tester) async {
+      await pumpPage(
+        tester,
+        selectedProvider: CloudProviderType.googledrive,
+        syncState: const SyncState(status: SyncStatus.syncing),
+        accountGroups: [_syncGroup('Google Drive')],
+        settle: false,
+      );
+
+      expect(find.text('Sign-in needed'), findsNothing);
+      expect(find.text('Sign in again'), findsNothing);
+    });
+
+    testWidgets('a signed-in account shows nothing of it', (tester) async {
+      await pumpPage(
+        tester,
+        selectedProvider: CloudProviderType.googledrive,
+        syncState: const SyncState(isAuthenticated: true),
+        accountGroups: [_syncGroup('Google Drive')],
+      );
+
+      expect(find.text('Sign-in needed'), findsNothing);
+      expect(find.text('Sign in again'), findsNothing);
+    });
+
+    testWidgets('with no account to offer, the message stands and no button', (
+      tester,
+    ) async {
+      await pumpPage(
+        tester,
+        selectedProvider: CloudProviderType.icloud,
+        syncState: const SyncState(
+          status: SyncStatus.error,
+          message: 'Sign in to iCloud in Settings',
+        ),
+      );
+
+      expect(find.text('Sign-in needed'), findsOneWidget);
+      expect(find.text('Sign in to iCloud in Settings'), findsOneWidget);
+      expect(find.text('Sign in again'), findsNothing);
     });
   });
 
@@ -1984,6 +2091,36 @@ void main() {
       );
 
       expect(find.text('Enter passphrase'), findsNothing);
+    });
+  });
+
+  group('in a browser (#4121)', () {
+    testWidgets('natively the nearby devices section shows', (tester) async {
+      await pumpPage(tester, selectedProvider: CloudProviderType.s3);
+      expect(find.byType(NearbyDevicesSection), findsOneWidget);
+    });
+
+    testWidgets('the nearby devices section is absent', (tester) async {
+      await pumpPage(
+        tester,
+        selectedProvider: CloudProviderType.s3,
+        browser: true,
+      );
+      expect(find.byType(NearbyDevicesSection), findsNothing);
+    });
+
+    testWidgets('the browser rows show', (tester) async {
+      await pumpPage(
+        tester,
+        selectedProvider: CloudProviderType.s3,
+        browser: true,
+      );
+      expect(find.byType(WebSyncRows), findsOneWidget);
+    });
+
+    testWidgets('natively there are no browser rows', (tester) async {
+      await pumpPage(tester, selectedProvider: CloudProviderType.s3);
+      expect(find.byType(WebSyncRows), findsNothing);
     });
   });
 }

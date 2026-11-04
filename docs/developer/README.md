@@ -9,8 +9,11 @@ Welcome to the Submersion developer documentation. This section covers architect
 - [State Management](state-management.md): Riverpod patterns
 - [Navigation](navigation.md): go_router setup
 - [Testing](testing.md): Test organization and running
+- [Agent access](agent-access.md): The in-app MCP server, its tools, security rules and lifecycle
 - [Local Test Performance](local-test-performance.md): Making local test runs fast
 - [Building](building.md): Build and run instructions
+- [The Web Build](web.md): The browser build: facades, workers, guards, tests and the smoke
+- [Submersion's Own Web Site](web-site-setup.md): web.submersion.app: how releases deploy there, its one-time setup, and rolling back
 - [Release Process](release-process.md): Beta and production releases
 - [Release Secrets](release-secrets-setup.md): Store and signing credentials
 - [Play Production Access](play-production-access.md): Google Play access record and Data safety declaration

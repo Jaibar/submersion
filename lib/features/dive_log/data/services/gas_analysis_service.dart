@@ -1,14 +1,21 @@
 import 'dart:math' as math;
 
 import 'package:submersion/core/constants/gas_model.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/utils/gas_compressibility.dart';
+import 'package:submersion/core/utils/time_weighted_mean.dart';
 import 'package:submersion/features/dive_log/domain/entities/cylinder_sac.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
 import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart';
+import 'package:submersion/features/dive_log/domain/services/ccr_cylinder_use.dart';
+import 'package:submersion/features/dive_log/domain/services/deco_stop_windows.dart';
 import 'package:submersion/features/dive_log/domain/services/multi_cylinder_consumption.dart';
 import 'package:submersion/features/dive_log/domain/services/tank_pressure_lookup.dart';
 import 'package:submersion/features/dive_log/domain/services/tank_usage_range.dart';
+
+part 'gas_analysis_service_ccr.dart';
+part 'gas_analysis_service_phases.dart';
 
 /// Service for calculating SAC (Surface Air Consumption) metrics
 /// per segment and per cylinder.
@@ -38,13 +45,16 @@ class GasAnalysisService {
 
   /// Calculate SAC segments using gas-switch segmentation.
   ///
-  /// Segments are divided at each gas/tank switch event.
+  /// Segments are divided at each gas/tank switch event, with the time before
+  /// the first switch on the cylinder the dive started on.
   /// Returns null if no gas switches recorded.
   List<SacSegment>? calculateGasSwitchSegments({
     required List<DiveProfilePoint> profile,
     required List<DiveTank> tanks,
     required List<GasSwitchWithTank> gasSwitches,
     Map<String, List<TankPressurePoint>>? tankPressures,
+    DiveEnvironment environment = DiveEnvironment.standard,
+    bool onLoop = false,
   }) {
     if (profile.isEmpty || gasSwitches.isEmpty) return null;
 
@@ -56,62 +66,45 @@ class GasAnalysisService {
     final sortedSwitches = List<GasSwitchWithTank>.from(gasSwitches)
       ..sort((a, b) => a.gasSwitch.timestamp.compareTo(b.gasSwitch.timestamp));
 
-    // Create segments from gas switch boundaries
-    for (int i = 0; i < sortedSwitches.length; i++) {
-      final currentSwitch = sortedSwitches[i];
-      final startTime = currentSwitch.gasSwitch.timestamp;
-      final endTime = i + 1 < sortedSwitches.length
-          ? sortedSwitches[i + 1].gasSwitch.timestamp
-          : diveEndTimestamp;
-
-      if (endTime - startTime < minSegmentDuration) continue;
-
-      // Find the tank for this segment
-      final tank = tanks.firstWhere(
-        (t) => t.id == currentSwitch.gasSwitch.tankId,
-        orElse: () => tanks.first,
-      );
-
-      // Get profile points for this segment
-      final segmentProfile = profile
-          .where((p) => p.timestamp >= startTime && p.timestamp < endTime)
-          .toList();
-
-      if (segmentProfile.isEmpty) continue;
+    void addStretch({
+      required int startTime,
+      required int until,
+      required DiveTank tank,
+      required String? tankName,
+      required GasMix gasMix,
+    }) {
+      // A switch can be recorded after the last sample.
+      final endTime = math.min(until, diveEndTimestamp);
+      if (endTime - startTime < minSegmentDuration) return;
 
       // Calculate depth statistics
-      final depths = segmentProfile.map((p) => p.depth).toList();
-      final avgDepth = depths.reduce((a, b) => a + b) / depths.length;
-      final minDepth = depths.reduce(math.min);
-      final maxDepth = depths.reduce(math.max);
+      final segmentDepths = _segmentDepths(profile, startTime, endTime);
+      if (segmentDepths == null) return;
+      final (:avgDepth, :minDepth, :maxDepth) = segmentDepths;
 
       // Calculate SAC for this segment
-      // Window to prorate a pressure-series-less tank across: its own
-      // usage range when the gas switches identify one, else the dive.
-      final usageRange = tankUsageRange(
-        tank: tank,
-        gasSwitches: sortedSwitches,
-        diveStart: profile.first.timestamp,
-        diveEnd: diveEndTimestamp,
-        tanks: tanks,
-      );
-
       final sacRate = _calculateSegmentSac(
-        profile: segmentProfile,
+        environment: environment,
+        avgDepth: avgDepth,
         tank: tank,
         tankVolume: consumptionVolume(tank, tanks),
         tankPressures: resolvedPressures[tank.id],
         startTime: startTime,
         endTime: endTime,
-        prorationStart: usageRange?.start ?? profile.first.timestamp,
-        prorationEnd: usageRange?.end ?? profile.last.timestamp,
+        prorationWindows: _prorationWindows(
+          tank: tank,
+          tanks: tanks,
+          profile: profile,
+          gasSwitches: sortedSwitches,
+          onLoop: onLoop,
+        ),
       );
 
-      if (sacRate == null) continue;
+      if (sacRate == null) return;
 
       // Calculate gas consumed
       final durationMin = (endTime - startTime) / 60.0;
-      final ambientPressureBar = (avgDepth / 10.0) + 1.0;
+      final ambientPressureBar = environment.pressureAtDepth(avgDepth);
       final gasConsumed = sacRate * durationMin * ambientPressureBar;
 
       segments.add(
@@ -124,12 +117,52 @@ class GasAnalysisService {
           sacRate: sacRate,
           gasConsumed: gasConsumed,
           tankId: tank.id,
-          tankName: currentSwitch.tankName,
-          gasMix: GasMix(
-            o2: currentSwitch.o2Fraction * 100,
-            he: currentSwitch.heFraction * 100,
-          ),
+          tankName: tankName,
+          gasMix: gasMix,
           segmentationType: SacSegmentationType.gasSwitch,
+        ),
+      );
+    }
+
+    // The dive starts on a cylinder too, though only some computers log a
+    // switch to it. Without this its time would be on no segment.
+    final startingTank = activeTankAt(
+      tanks: tanks,
+      gasSwitches: sortedSwitches,
+      timestamp: profile.first.timestamp,
+      diveStart: profile.first.timestamp,
+      onLoop: onLoop,
+    );
+    if (startingTank != null) {
+      addStretch(
+        startTime: profile.first.timestamp,
+        until: sortedSwitches.first.gasSwitch.timestamp,
+        tank: startingTank,
+        tankName: startingTank.name,
+        gasMix: startingTank.gasMix,
+      );
+    }
+
+    // Create segments from gas switch boundaries
+    for (int i = 0; i < sortedSwitches.length; i++) {
+      final currentSwitch = sortedSwitches[i];
+
+      // Find the tank for this segment
+      final tank = tanks.firstWhere(
+        (t) => t.id == currentSwitch.gasSwitch.tankId,
+        orElse: () => tanks.first,
+      );
+
+      addStretch(
+        startTime: currentSwitch.gasSwitch.timestamp,
+        until: i + 1 < sortedSwitches.length
+            ? sortedSwitches[i + 1].gasSwitch.timestamp
+            : diveEndTimestamp,
+        tank: tank,
+        tankName: currentSwitch.tankName,
+        gasMix: GasMix(
+          o2: currentSwitch.o2Fraction * 100,
+          he: currentSwitch.heFraction * 100,
         ),
       );
     }
@@ -140,11 +173,21 @@ class GasAnalysisService {
   /// Calculate SAC segments using depth-phase segmentation.
   ///
   /// Automatically detects dive phases: descent, bottom, ascent, safety stop.
+  /// A hold inside one of [decoStops], or on a sample [ndlCurve] reads as in
+  /// deco, is a deco stop, not a safety stop. The curve catches the short stops
+  /// that are too brief to be a window. A curve whose length does not match
+  /// [profile] is another series, and is treated as absent. A hold inside one
+  /// of [safetyStops] stays a safety stop, so this agrees with the chart.
   List<SacSegment>? calculatePhaseSegments({
     required List<DiveProfilePoint> profile,
     required List<DiveTank> tanks,
     Map<String, List<TankPressurePoint>>? tankPressures,
     List<GasSwitchWithTank>? gasSwitches,
+    DiveEnvironment environment = DiveEnvironment.standard,
+    List<StopWindow> decoStops = const [],
+    List<StopWindow> safetyStops = const [],
+    List<int> ndlCurve = const [],
+    bool onLoop = false,
   }) {
     if (profile.length < 10) return null;
 
@@ -154,11 +197,22 @@ class GasAnalysisService {
     final maxDepth = profile.map((p) => p.depth).reduce(math.max);
     if (maxDepth < 3.0) return null; // Too shallow
 
+    final alignedNdl = ndlCurve.length == profile.length
+        ? ndlCurve
+        : const <int>[];
+
     // Classify each profile point by phase
     final phasePoints = <({int timestamp, DivePhase phase})>[];
     for (int i = 0; i < profile.length; i++) {
-      final phase = _classifyPhase(profile, i, maxDepth);
-      phasePoints.add((timestamp: profile[i].timestamp, phase: phase));
+      final timestamp = profile[i].timestamp;
+      bool isInside(StopWindow w) => timestamp >= w.start && timestamp <= w.end;
+      var phase = _classifyPhase(profile, i, maxDepth);
+      if (phase == DivePhase.safetyStop &&
+          !safetyStops.any(isInside) &&
+          (decoStops.any(isInside) || isDecoSample(profile, alignedNdl, i))) {
+        phase = DivePhase.deco;
+      }
+      phasePoints.add((timestamp: timestamp, phase: phase));
     }
 
     // Group consecutive points by phase
@@ -197,54 +251,58 @@ class GasAnalysisService {
     // Calculate SAC for each phase segment
     final segments = <SacSegment>[];
     for (final seg in mergedSegments) {
-      final segmentProfile = profile
-          .where((p) => p.timestamp >= seg.start && p.timestamp < seg.end)
-          .toList();
-
-      if (segmentProfile.isEmpty) continue;
-
       // Find active tank for this segment
       final tank = activeTankAt(
         tanks: tanks,
         gasSwitches: gasSwitches,
         timestamp: seg.start,
         diveStart: profile.first.timestamp,
+        onLoop: onLoop,
       );
       if (tank == null) continue;
 
       // Calculate depth statistics
-      final depths = segmentProfile.map((p) => p.depth).toList();
-      final avgDepth = depths.reduce((a, b) => a + b) / depths.length;
-      final minD = depths.reduce(math.min);
-      final maxD = depths.reduce(math.max);
+      final segmentDepths = _segmentDepths(profile, seg.start, seg.end);
+      if (segmentDepths == null) continue;
+      final (:avgDepth, minDepth: minD, maxDepth: maxD) = segmentDepths;
 
       // Calculate SAC
-      // Same proration window as the gas-switch path: a tank that was only
-      // breathed for part of the dive must not have its drop spread across
-      // the whole of it.
-      final usageRange = tankUsageRange(
+      final usageWindows = _prorationWindows(
         tank: tank,
-        gasSwitches: gasSwitches,
-        diveStart: profile.first.timestamp,
-        diveEnd: profile.last.timestamp,
         tanks: tanks,
+        profile: profile,
+        gasSwitches: gasSwitches,
+        onLoop: onLoop,
       );
+      // A phase can outlast its cylinder's breathing time; only what was
+      // breathed of it drew on this tank, at the depths it was breathed.
+      final breathedWindows = usageWindows.within(seg.start, seg.end);
+      final breathedDepth =
+          timeWeightedMeanAcross(
+            profile,
+            windows: breathedWindows,
+            time: (p) => p.timestamp,
+            value: (p) => p.depth,
+          ) ??
+          avgDepth;
 
       final sacRate = _calculateSegmentSac(
-        profile: segmentProfile,
+        environment: environment,
+        avgDepth: breathedDepth,
         tank: tank,
         tankVolume: consumptionVolume(tank, tanks),
         tankPressures: resolvedPressures[tank.id],
         startTime: seg.start,
         endTime: seg.end,
-        prorationStart: usageRange?.start ?? profile.first.timestamp,
-        prorationEnd: usageRange?.end ?? profile.last.timestamp,
+        prorationWindows: usageWindows,
       );
 
       if (sacRate == null) continue;
 
-      final durationMin = (seg.end - seg.start) / 60.0;
-      final ambientPressureBar = (avgDepth / 10.0) + 1.0;
+      final breathedSec = breathedWindows.breathedSeconds;
+      final durationMin =
+          (breathedSec > 0 ? breathedSec : seg.end - seg.start) / 60.0;
+      final ambientPressureBar = environment.pressureAtDepth(breathedDepth);
       final gasConsumed = sacRate * durationMin * ambientPressureBar;
 
       segments.add(
@@ -272,6 +330,9 @@ class GasAnalysisService {
   ///
   /// Works with basic tank data (start/end pressures) and provides
   /// enhanced accuracy when time-series pressure data is available.
+  ///
+  /// On a CCR dive every cylinder gets a row, since nothing else says when an
+  /// O2 supply was used: see [_ccrCylinderSac].
   List<CylinderSac> calculateCylinderSac({
     required Dive dive,
     required List<DiveProfilePoint> profile,
@@ -279,6 +340,7 @@ class GasAnalysisService {
     Map<String, List<TankPressurePoint>>? tankPressures,
   }) {
     final results = <CylinderSac>[];
+    final environment = dive.environment;
 
     // Resolve each tank's time-series pressure, tolerating series that were
     // re-keyed under a stale tank id (see [resolveTankPressureSeries]).
@@ -288,7 +350,18 @@ class GasAnalysisService {
     );
 
     final diveEnd =
-        dive.effectiveRuntime?.inSeconds ?? profile.lastOrNull?.timestamp ?? 0;
+        dive.measuredRuntime?.inSeconds ?? profile.lastOrNull?.timestamp ?? 0;
+
+    if (dive.isCCR) {
+      return _ccrCylinderSac(
+        dive: dive,
+        profile: profile,
+        gasSwitches: gasSwitches,
+        resolvedPressures: resolvedPressures,
+        diveEnd: diveEnd,
+      );
+    }
+
     // Only a switch that says when a cylinder was breathed overrides a
     // recorded duration: not a stale id (#110), nor one after the dive.
     final hasGasSwitches = knownGasSwitches(
@@ -310,9 +383,9 @@ class GasAnalysisService {
 
       // Determine when this tank was in use. A recorded duration says how
       // long but not when, so its depth window is the whole dive.
-      final usageRange = hasRecordedUsage
-          ? (start: 0, end: diveEnd > 0 ? diveEnd : recordedSeconds)
-          : tankUsageRange(
+      final usageWindows = hasRecordedUsage
+          ? [(start: 0, end: diveEnd > 0 ? diveEnd : recordedSeconds)]
+          : tankUsageWindows(
               tank: tank,
               gasSwitches: gasSwitches,
               diveStart: 0,
@@ -320,27 +393,18 @@ class GasAnalysisService {
               tanks: dive.tanks,
             );
 
-      if (usageRange == null) continue;
+      if (usageWindows.isEmpty) continue;
       final usageSeconds = hasRecordedUsage
           ? recordedSeconds
-          : usageRange.end - usageRange.start;
-
-      // Get profile points during tank usage
-      final usageProfile = profile
-          .where(
-            (p) =>
-                p.timestamp >= usageRange.start &&
-                p.timestamp <= usageRange.end,
-          )
-          .toList();
+          : usageWindows.breathedSeconds;
 
       // Calculate average depth during usage
-      double? avgDepthDuringUse;
-      if (usageProfile.isNotEmpty) {
-        avgDepthDuringUse =
-            usageProfile.map((p) => p.depth).reduce((a, b) => a + b) /
-            usageProfile.length;
-      }
+      final avgDepthDuringUse = timeWeightedMeanAcross(
+        profile,
+        windows: usageWindows,
+        time: (p) => p.timestamp,
+        value: (p) => p.depth,
+      );
 
       // Check if we have time-series pressure data for this tank (matched by
       // id, or adopted from a re-keyed/orphaned series).
@@ -354,9 +418,12 @@ class GasAnalysisService {
         // Enhanced calculation using time-series data
         sacRate = _calculateSacFromTimeSeries(
           pressurePoints: tsPressures,
-          startTime: usageRange.start,
-          endTime: usageRange.end,
+          // A cylinder holds its pressure between breathing periods, so the
+          // drop from the first to the last is the gas breathed in them all.
+          startTime: usageWindows.first.start,
+          endTime: usageWindows.last.end,
           avgDepth: avgDepthDuringUse ?? dive.avgDepth ?? 10.0,
+          environment: environment,
           tankVolume: volume,
           gasMix: tank.gasMix,
           breathingSeconds: usageSeconds,
@@ -380,7 +447,9 @@ class GasAnalysisService {
         if (pressureUsed > 0) {
           final durationMin = usageSeconds / 60.0;
           if (durationMin > 0) {
-            final ambientPressureBar = (effectiveAvgDepth / 10.0) + 1.0;
+            final ambientPressureBar = environment.pressureAtDepth(
+              effectiveAvgDepth,
+            );
             if (volume != null) {
               sacRate = _zCorrectedSacRate(
                 tankVolume: volume,
@@ -410,6 +479,7 @@ class GasAnalysisService {
           sacRate: sacRate,
           startPressure: tank.startPressure,
           endPressure: tank.endPressure,
+          gasModel: gasModel,
           usageDuration: Duration(seconds: usageSeconds),
           avgDepthDuringUse: avgDepthDuringUse,
           hasTimeSeriesData: hasTsData,
@@ -426,6 +496,58 @@ class GasAnalysisService {
   // ─────────────────────────────────────────────────────────────────────────
   // Private Helper Methods
   // ─────────────────────────────────────────────────────────────────────────
+
+  /// When [tank]'s logged pressure drop happened, to share it among segments:
+  /// its usage windows when the gas switches identify any, else the whole
+  /// dive. A tank only breathed for part of the dive must not have its drop
+  /// spread across all of it. Empty when the switches name other cylinders
+  /// and never this one: a stale switch that fell back to it says nothing.
+  static List<TankUsageWindow> _prorationWindows({
+    required DiveTank tank,
+    required List<DiveTank> tanks,
+    required List<DiveProfilePoint> profile,
+    required List<GasSwitchWithTank>? gasSwitches,
+    required bool onLoop,
+  }) {
+    final diveStart = profile.first.timestamp;
+    final diveEnd = profile.last.timestamp;
+    final windows = tankUsageWindows(
+      tank: tank,
+      gasSwitches: gasSwitches,
+      diveStart: diveStart,
+      diveEnd: diveEnd,
+      tanks: tanks,
+      onLoop: onLoop,
+    );
+    if (windows.isNotEmpty) return windows;
+    return knownGasSwitches(tanks, gasSwitches, before: diveEnd).isEmpty
+        ? [(start: diveStart, end: diveEnd)]
+        : const [];
+  }
+
+  /// Depth over the whole of a segment, reading the profile at its edges so a
+  /// stint between two samples still has one. Null when the profile does not
+  /// reach the segment.
+  static ({double avgDepth, double minDepth, double maxDepth})? _segmentDepths(
+    List<DiveProfilePoint> profile,
+    int start,
+    int end,
+  ) {
+    final window = samplesInWindow(
+      profile,
+      start: start,
+      end: end,
+      time: (p) => p.timestamp,
+      value: (p) => p.depth,
+    );
+    if (window.isEmpty) return null;
+    final depths = window.map((s) => s.value);
+    return (
+      avgDepth: timeWeightedMeanOfWindow(window)!,
+      minDepth: depths.reduce(math.min),
+      maxDepth: depths.reduce(math.max),
+    );
+  }
 
   /// Compute SAC rate under [model], using its gas volumes.
   ///
@@ -464,125 +586,32 @@ class GasAnalysisService {
     return gasUsedLiters / tankVolume / durationMin / ambientPressureBar;
   }
 
-  /// Classify a profile point into a dive phase
-  DivePhase _classifyPhase(
-    List<DiveProfilePoint> profile,
-    int index,
-    double maxDepth,
-  ) {
-    final point = profile[index];
-    final depth = point.depth;
-
-    // Safety stop detection: 3-6m depth
-    if (depth >= safetyStopMinDepth && depth <= safetyStopMaxDepth) {
-      // Check if we're stable at this depth (could be safety stop)
-      // Look at surrounding points
-      int stableCount = 0;
-      for (
-        int i = math.max(0, index - 10);
-        i < math.min(profile.length, index + 10);
-        i++
-      ) {
-        if (profile[i].depth >= safetyStopMinDepth &&
-            profile[i].depth <= safetyStopMaxDepth) {
-          stableCount++;
-        }
-      }
-      // If we have many points in safety stop range, it's likely a safety stop
-      if (stableCount > 15) {
-        return DivePhase.safetyStop;
-      }
-    }
-
-    // Bottom: within 15% of max depth
-    final bottomThreshold = maxDepth * 0.85;
-    if (depth >= bottomThreshold) {
-      return DivePhase.bottom;
-    }
-
-    // Calculate rate of depth change
-    double depthRate = 0;
-    if (index > 0) {
-      final prevPoint = profile[index - 1];
-      final timeDiff = point.timestamp - prevPoint.timestamp;
-      if (timeDiff > 0) {
-        depthRate = (depth - prevPoint.depth) / (timeDiff / 60.0); // m/min
-      }
-    }
-
-    // Descent: significant depth increase
-    if (depthRate > 3.0) {
-      return DivePhase.descent;
-    }
-
-    // Ascent: significant depth decrease
-    if (depthRate < -1.0) {
-      return DivePhase.ascent;
-    }
-
-    // Default based on position in dive
-    // If before max depth, likely descent/bottom; after, likely ascent
-    final maxDepthIndex = profile.indexWhere((p) => p.depth == maxDepth);
-    if (index <= maxDepthIndex) {
-      return depth < bottomThreshold ? DivePhase.descent : DivePhase.bottom;
-    } else {
-      return DivePhase.ascent;
-    }
-  }
-
-  /// Merge small segments into adjacent ones
-  List<({int start, int end, DivePhase phase})> _mergeSmallSegments(
-    List<({int start, int end, DivePhase phase})> segments,
-  ) {
-    if (segments.length <= 1) return segments;
-
-    final merged = <({int start, int end, DivePhase phase})>[];
-    var current = segments.first;
-
-    for (int i = 1; i < segments.length; i++) {
-      final next = segments[i];
-      final currentDuration = current.end - current.start;
-
-      if (currentDuration < minSegmentDuration) {
-        // Merge into next segment
-        current = (start: current.start, end: next.end, phase: next.phase);
-      } else {
-        merged.add(current);
-        current = next;
-      }
-    }
-
-    // Add the last segment
-    merged.add(current);
-
-    return merged;
-  }
-
   /// Calculate SAC for a segment from profile data
   double? _calculateSegmentSac({
-    required List<DiveProfilePoint> profile,
+    required double avgDepth,
     required DiveTank tank,
     // The tank's own size, else its matched partner's (issue #3109).
     required double? tankVolume,
     List<TankPressurePoint>? tankPressures,
     required int startTime,
     required int endTime,
-    required int prorationStart,
-    required int prorationEnd,
+    required List<TankUsageWindow> prorationWindows,
+    required DiveEnvironment environment,
   }) {
-    if (profile.isEmpty) return null;
-
     final durationSec = endTime - startTime;
     if (durationSec < minSegmentDuration) return null;
 
-    // Calculate average depth
-    final depths = profile.map((p) => p.depth).toList();
-    final avgDepth = depths.reduce((a, b) => a + b) / depths.length;
     if (avgDepth <= 0) return null;
 
     double? pressureUsed;
     double? startPressure;
     double? endPressure;
+    // A phase can outlast the tank's breathing time, which is what its drop
+    // happened over. None at all is a segment a stale switch handed to it,
+    // where only a transmitter can say the tank was on the regulator.
+    final breathedInSegment = prorationWindows
+        .within(startTime, endTime)
+        .breathedSeconds;
 
     // Try time-series pressure data first
     if (tankPressures != null && tankPressures.length >= 2) {
@@ -597,21 +626,23 @@ class GasAnalysisService {
     if (pressureUsed == null || pressureUsed <= 0) {
       if (tank.startPressure != null && tank.endPressure != null) {
         // Prorate across the window the tank was actually breathed, NOT the
-        // segment's own span: the profile passed in is the segment slice, so
-        // dividing by it made proportion ~1.0 and charged every segment the
-        // entire cylinder (#110). The window is the tank's usage range when
-        // gas switches identify it -- spreading a stage/deco tank's drop over
-        // the whole dive would understate its SAC by the ratio of its stint
-        // to the dive, and calculateCylinderSac already prorates this way.
-        final totalDuration = prorationEnd - prorationStart;
+        // segment's own span: dividing by that made proportion ~1.0 and
+        // charged every segment the entire cylinder (#110). The window is the
+        // tank's usage range when gas switches identify it -- spreading a
+        // stage/deco tank's drop over the whole dive would understate its SAC
+        // by the ratio of its stint to the dive, and calculateCylinderSac
+        // already prorates this way. Time counts only inside the window,
+        // which a tank the diver came back to leaves and re-enters and a
+        // phase can outlast (#3900).
+        final totalDuration = prorationWindows.breathedSeconds;
         if (totalDuration > 0) {
           final tankPressureUsed = tank.startPressure! - tank.endPressure!;
-          final proportion = durationSec / totalDuration;
-          pressureUsed = tankPressureUsed * proportion;
+          final breathedBefore = prorationWindows.breathedBefore(startTime);
+          pressureUsed = tankPressureUsed * breathedInSegment / totalDuration;
           // Estimate absolute pressures for this segment
           startPressure =
               tank.startPressure! -
-              (tankPressureUsed * (startTime - prorationStart) / totalDuration);
+              (tankPressureUsed * breathedBefore / totalDuration);
           endPressure = startPressure - pressureUsed;
         }
       }
@@ -620,8 +651,9 @@ class GasAnalysisService {
     if (pressureUsed == null || pressureUsed <= 0) return null;
 
     // Calculate SAC under the configured gas model
-    final durationMin = durationSec / 60.0;
-    final ambientPressureBar = (avgDepth / 10.0) + 1.0;
+    final durationMin =
+        (breathedInSegment > 0 ? breathedInSegment : durationSec) / 60.0;
+    final ambientPressureBar = environment.pressureAtDepth(avgDepth);
 
     // Use volume-corrected SAC when tank data available
     if (tankVolume != null && startPressure != null && endPressure != null) {
@@ -647,10 +679,12 @@ class GasAnalysisService {
     required int startTime,
     required int endTime,
     required double avgDepth,
+    required DiveEnvironment environment,
     double? tankVolume,
     GasMix gasMix = const GasMix(),
     // The breathing time when it is not the window's length: a recorded
-    // usage duration (issue #1496) measured over a whole-dive window.
+    // usage duration (issue #1496) measured over a whole-dive window, or the
+    // periods of a cylinder the diver came back to (issue #3900).
     int? breathingSeconds,
   }) {
     if (pressurePoints.length < 2) return null;
@@ -666,7 +700,7 @@ class GasAnalysisService {
     final durationMin = (breathingSeconds ?? endTime - startTime) / 60.0;
     if (durationMin <= 0) return null;
 
-    final ambientPressureBar = (avgDepth / 10.0) + 1.0;
+    final ambientPressureBar = environment.pressureAtDepth(avgDepth);
 
     // Use volume-corrected SAC if tank size is known
     if (tankVolume != null && tankVolume > 0) {

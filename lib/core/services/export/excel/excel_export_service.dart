@@ -10,6 +10,7 @@ import 'package:submersion/core/services/export/excel/maintenance_excel_export_s
 import 'package:submersion/core/services/export/excel/observations_excel_export_service.dart';
 import 'package:submersion/core/services/export/excel/pre_dive_excel_export_service.dart';
 import 'package:submersion/core/services/export/shared/file_export_utils.dart';
+import 'package:submersion/core/services/export/shared/gas_percent_cells.dart';
 import 'package:submersion/core/services/export/shared/unit_converters.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/services/dive_participant_names.dart';
@@ -286,7 +287,7 @@ class ExcelExportService {
     for (var row = 0; row < dives.length; row++) {
       final dive = dives[row];
       final tank = dive.tanks.isNotEmpty ? dive.tanks.first : null;
-
+      final gas = gasMixCells(tank?.gasMix);
       final rowData = <dynamic>[
         dive.diveNumber ?? '',
         formatDateForExport(dive.dateTime, dateFormat),
@@ -296,7 +297,7 @@ class ExcelExportService {
         convertDepth(dive.maxDepth, depthUnit),
         convertDepth(dive.avgDepth, depthUnit),
         dive.bottomTime?.inMinutes ?? '',
-        dive.runtime?.inMinutes ?? '',
+        dive.measuredRuntime?.inMinutes ?? '',
         convertTemperature(dive.waterTemp, temperatureUnit),
         convertTemperature(dive.airTemp, temperatureUnit),
         dive.visibilityMeters?.toStringAsFixed(1) ?? '',
@@ -317,8 +318,8 @@ class ExcelExportService {
         convertPressure(tank?.startPressure, pressureUnit),
         convertPressure(tank?.endPressure, pressureUnit),
         convertVolume(tank?.volume, volumeUnit),
-        tank?.gasMix.o2.toStringAsFixed(0) ?? '',
-        tank?.gasMix.he.toStringAsFixed(0) ?? '',
+        gas?.o2 ?? '',
+        gas?.he ?? '',
         markdownToPlainText(dive.notes).replaceAll('\n', ' '),
         dive.windSpeed?.toStringAsFixed(1) ?? '',
         dive.windDirection?.displayName ?? '',
@@ -572,12 +573,12 @@ class ExcelExportService {
 
       final longestDive = dives.reduce(
         (a, b) =>
-            (a.effectiveRuntime?.inSeconds ?? 0) >
-                (b.effectiveRuntime?.inSeconds ?? 0)
+            (a.measuredRuntime?.inSeconds ?? 0) >
+                (b.measuredRuntime?.inSeconds ?? 0)
             ? a
             : b,
       );
-      final longestRuntime = longestDive.effectiveRuntime;
+      final longestRuntime = longestDive.measuredRuntime;
       if (longestRuntime != null) {
         addStat('Longest Dive', '${longestRuntime.inMinutes} min');
       }

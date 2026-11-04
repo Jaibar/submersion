@@ -73,10 +73,11 @@ void main() {
     'the latest dive lands 7 to 13 days back by the date the app shows',
     () async {
       // Dive times are wall-clock times stored as UTC, so the app shows this
-      // one on 12 October whatever the device's time zone. Late in the
+      // one on 12 August whatever the device's time zone. Late in the
       // evening, a reading in local time would land on another day far
-      // from UTC (run with TZ=Pacific/Kiritimati to see it).
-      final lateEvening = DateTime.utc(2026, 10, 12, 23, 30);
+      // from UTC (run with TZ=Pacific/Kiritimati to see it). Eleven weeks
+      // back, whole years cannot keep its season, so it moves by weeks.
+      final lateEvening = DateTime.utc(2026, 8, 12, 23, 30);
       await db.customStatement(
         'INSERT INTO dives (id, diver_id, dive_date_time, created_at, '
         "updated_at) VALUES ('c', 'd1', "
@@ -139,6 +140,49 @@ void main() {
       expect(progress.map((e) => e.$1), [for (var i = 1; i <= total; i++) i]);
     },
   );
+
+  test('prepare shifts the date attributes of equipment with the dives, '
+      'and leaves other values alone', () async {
+    final installed = ms - 86400000 * 10;
+    await db.customStatement(
+      'INSERT INTO equipment (id, diver_id, name, type, created_at, '
+      "updated_at) VALUES ('cell', 'd1', 'Oxygen cell', 'other', 0, 0)",
+    );
+    for (final (id, key, custom, value) in [
+      ('a1', 'installed_date', 0, installed),
+      ('a2', 'volume_l', 0, 12),
+      // A custom attribute has no kind, so its number is left as it is.
+      ('a3', 'installed_date', 1, installed),
+    ]) {
+      await db.customStatement(
+        'INSERT INTO equipment_attributes (id, equipment_id, attr_key, '
+        'is_custom, value_num, created_at, updated_at) '
+        "VALUES ('$id', 'cell', '$key', $custom, $value, 0, 0)",
+      );
+    }
+
+    await DemoDatabasePreparer().prepare(
+      db,
+      now: now,
+      photosDir: '/demo/photos',
+      deviceId: null,
+    );
+
+    final shift =
+        await intOf("SELECT dive_date_time FROM dives WHERE id = 'b'") - ms;
+    expect(shift, isNot(0));
+    Future<num> valueOf(String id) async =>
+        (await db
+                    .customSelect(
+                      "SELECT value_num FROM equipment_attributes WHERE id = '$id'",
+                    )
+                    .getSingle())
+                .data['value_num']!
+            as num;
+    expect(await valueOf('a1'), installed + shift);
+    expect(await valueOf('a2'), 12);
+    expect(await valueOf('a3'), installed);
+  });
 
   test('prepare leaves durations alone', () async {
     await DemoDatabasePreparer().prepare(
@@ -219,6 +263,40 @@ void main() {
     },
   );
 
+  test(
+    'in a browser the sample photos become links to the site (#4121)',
+    () async {
+      await db.customStatement(
+        'INSERT INTO media (id, dive_id, file_path, local_path, source_type, '
+        'origin_device_id, created_at, updated_at) '
+        r"VALUES ('m1', 'b', 'C:\build\photos\reef.jpg', NULL, "
+        "'localFile', 'builder', 0, 0)",
+      );
+
+      await DemoDatabasePreparer().prepare(
+        db,
+        now: now,
+        photosDir: '/opfs/support/demo_mode/photos',
+        photosUrl: Uri.parse('https://dive.example/log/demo/photos/'),
+        deviceId: 'device-1',
+      );
+
+      final row = await db
+          .customSelect(
+            'SELECT source_type, url, file_path, local_path, origin_device_id '
+            "FROM media WHERE id = 'm1'",
+          )
+          .getSingle();
+      const url = 'https://dive.example/log/demo/photos/reef.jpg';
+      expect(row.read<String>('source_type'), 'networkUrl');
+      expect(row.read<String>('url'), url);
+      expect(row.read<String>('file_path'), url);
+      expect(row.read<String?>('local_path'), null);
+      // A link resolves the same on every device, so no device owns it.
+      expect(row.read<String?>('origin_device_id'), null);
+    },
+  );
+
   test('prepare copies the unit settings onto the demo diver', () async {
     await DemoDatabasePreparer().prepare(
       db,
@@ -258,5 +336,16 @@ void main() {
     );
 
     expect(await intOf('SELECT COUNT(*) FROM scheduled_notifications'), 0);
+  });
+
+  test('preparing leaves nothing in the change log', () async {
+    await DemoDatabasePreparer().prepare(
+      db,
+      now: DateTime(2026, 7, 1),
+      photosDir: '/demo/photos',
+      deviceId: 'device-1',
+    );
+
+    expect(await intOf('SELECT COUNT(*) AS v FROM change_log_events'), 0);
   });
 }

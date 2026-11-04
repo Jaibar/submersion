@@ -37,5 +37,28 @@ extension BeforeOpenChildColumns on AppDatabase {
     // v325: trips.parent_trip_id (issue #3658). Every trip read selects the
     // whole row, for the same reason as the tank columns.
     await _assertTripParentColumn();
+
+    // v330: buddies.excluded_from_rankings (issue #3624). Every buddy read
+    // selects the whole row, for the same reason as the tank columns.
+    await _assertBuddyExcludedFromRankingsColumn();
+
+    // v331: equipment_locations.dive_center_id (issue #3623). Every place
+    // read selects the whole row, for the same reason as the tank columns.
+    await _assertEquipmentLocationCenterColumn();
+
+    // v333: dives.gas_switches_edited (issue #32). Every dive read selects
+    // the whole row, for the same reason as the tank columns.
+    await _assertDiveGasSwitchesEditedColumn();
+
+    // v334: equipment_locations.buddy_id (issue #3790), for the same reason.
+    await _assertEquipmentLocationBuddyColumn();
+
+    // v338: incidents.observation_id (issue #3062), for the same reason.
+    await _assertIncidentObservationColumn();
+
+    // v339: dive_computers.auto_download_disabled (issue #3361). Every
+    // computer read selects the whole row, for the same reason as the tank
+    // columns.
+    await _assertDiveComputerAutoDownloadDisabledColumn();
   }
 }

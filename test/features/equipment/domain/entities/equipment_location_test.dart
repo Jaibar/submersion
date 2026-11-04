@@ -17,6 +17,55 @@ void main() {
       );
       expect(EquipmentLocationKind.fromName(null), EquipmentLocationKind.other);
     });
+
+    test('diveCenter comes right after storage', () {
+      expect(EquipmentLocationKind.values.take(2), [
+        EquipmentLocationKind.storage,
+        EquipmentLocationKind.diveCenter,
+      ]);
+    });
+  });
+
+  group('EquipmentLocation.diveCenterId', () {
+    final place = EquipmentLocation(
+      id: 'p',
+      name: 'Reef locker',
+      kind: EquipmentLocationKind.diveCenter,
+      diveCenterId: 'reef',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    test('copyWith keeps the link unless told otherwise', () {
+      expect(place.copyWith(name: 'x').diveCenterId, 'reef');
+      expect(place.copyWith(diveCenterId: 'bay').diveCenterId, 'bay');
+      expect(place.copyWith(clearDiveCenterId: true).diveCenterId, isNull);
+    });
+
+    test('two places differing only in link are not equal', () {
+      expect(place, isNot(place.copyWith(diveCenterId: 'bay')));
+    });
+  });
+
+  group('EquipmentLocation.buddyId', () {
+    final place = EquipmentLocation(
+      id: 'p',
+      name: 'Anna',
+      kind: EquipmentLocationKind.person,
+      buddyId: 'anna',
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
+    test('copyWith keeps the link unless told otherwise', () {
+      expect(place.copyWith(name: 'x').buddyId, 'anna');
+      expect(place.copyWith(buddyId: 'sam').buddyId, 'sam');
+      expect(place.copyWith(clearBuddyId: true).buddyId, isNull);
+    });
+
+    test('two places differing only in link are not equal', () {
+      expect(place, isNot(place.copyWith(buddyId: 'sam')));
+    });
   });
 
   group('compareMovesNewestFirst', () {

@@ -9,6 +9,7 @@ import 'package:submersion/core/services/export/uddf/uddf_buddy_roles.dart';
 import 'package:submersion/core/services/export/uddf/uddf_computer_tissue.dart';
 import 'package:submersion/core/services/export/uddf/uddf_visibility_range.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dive_custom_fields.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dive_durations.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dive_logistics.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dump_codec.dart';
 import 'package:submersion/core/services/export/uddf/uddf_gradient_factor.dart';
@@ -20,6 +21,7 @@ import 'package:submersion/core/services/export/uddf/uddf_normalizer.dart';
 import 'package:submersion/core/services/export/uddf/uddf_operator_centers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_sighting_species.dart';
 import 'package:submersion/core/services/export/uddf/uddf_source_attribution.dart';
+import 'package:submersion/core/utils/off_isolate.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/services/transmitter_serial.dart';
 import 'package:submersion/features/universal_import/data/csv/transforms/dive_type_mapper.dart';
@@ -32,6 +34,13 @@ import 'package:submersion/features/universal_import/data/csv/transforms/dive_ty
 /// for every other entity (sites, gas mixes, buddies, equipment and so on)
 /// live in [UddfImportParsers].
 class UddfFullImportService {
+  UddfFullImportService({
+    @visibleForTesting
+    OffIsolateRunner runner = LoggerService.isolateRunKeepingLogs,
+  }) : _runner = runner;
+
+  final OffIsolateRunner _runner;
+
   /// Private marker `_parseFullDive` leaves on a dive whose `<link ref>`
   /// matched nothing the parser knows about, so the caller can count it and
   /// then strip it. Never reaches the payload.
@@ -83,7 +92,27 @@ class UddfFullImportService {
 
   /// Import ALL application data from UDDF file.
   /// Returns [UddfImportResult] with all parsed data.
-  Future<UddfImportResult> importAllDataFromUddf(String uddfContent) async {
+  ///
+  /// A file of any size runs one synchronous parse from start to finish, so a
+  /// large one goes to a worker isolate rather than stalling the import
+  /// wizard (#3865). A file that is not valid UDDF is an answer about the
+  /// data, and comes back as the [FormatException] it would be here.
+  Future<UddfImportResult> importAllDataFromUddf(String uddfContent) =>
+      _parseOffIsolate(uddfContent, _runner);
+
+  /// Minimal-scope hop to the worker isolate, kept static so the closure
+  /// carries the text alone and never this instance.
+  static Future<UddfImportResult> _parseOffIsolate(
+    String uddfContent,
+    OffIsolateRunner runner,
+  ) => runOffIsolate(
+    () => UddfFullImportService()._parseUddf(uddfContent),
+    bytes: uddfContent.length,
+    isExpected: (e) => e is FormatException,
+    runner: runner,
+  );
+
+  UddfImportResult _parseUddf(String uddfContent) {
     final normalized = UddfNormalizer.normalize(uddfContent);
     final document = XmlDocument.parse(normalized);
     // Namespace handling is performed by UddfNormalizer before parsing
@@ -670,8 +699,9 @@ class UddfFullImportService {
       if (entries.isNotEmpty) dive['dataSources'] = entries;
     }
 
-    // Which source recorded each tank and each tank pressure series (issue
-    // #2492), on the dive's own map for the same reason.
+    // Which source recorded each tank, each tank pressure series (issue
+    // #2492) and each depth series (issue #3965), on the dive's own map for
+    // the same reason.
     for (final (key, byDiveRef) in [
       (
         UddfSourceAttribution.tanksKey,
@@ -680,6 +710,10 @@ class UddfFullImportService {
       (
         UddfSourceAttribution.seriesKey,
         UddfSourceAttribution.parseSeries(uddfElement),
+      ),
+      (
+        UddfSourceAttribution.profilesKey,
+        UddfSourceAttribution.parseProfiles(uddfElement),
       ),
     ]) {
       if (byDiveRef.isEmpty) continue;
@@ -1632,6 +1666,13 @@ class UddfFullImportService {
       if (excludedFromGasStats?.toLowerCase() == 'true') {
         diveData['excludedFromGasStats'] = true;
       }
+      final gasSwitchesEdited = UddfImportParsers.getElementText(
+        afterElement,
+        'gasswitchesedited',
+      );
+      if (gasSwitchesEdited?.toLowerCase() == 'true') {
+        diveData['gasSwitchesEdited'] = true;
+      }
 
       // Parse additional weights (app-specific, beyond single weight)
       final weightsElement = afterElement.findElements('weights').firstOrNull;
@@ -1682,6 +1723,17 @@ class UddfFullImportService {
           );
           if (eventType != null) {
             event['eventType'] = eventType;
+          }
+          final id = UddfImportParsers.getElementText(eventElement, 'id');
+          if (id != null && id.isNotEmpty) {
+            event['id'] = id;
+          }
+          final source = UddfImportParsers.getElementText(
+            eventElement,
+            'source',
+          );
+          if (source != null && source.isNotEmpty) {
+            event['source'] = source;
           }
           final severity = UddfImportParsers.getElementText(
             eventElement,
@@ -1741,6 +1793,15 @@ class UddfFullImportService {
           final he = UddfImportParsers.getElementText(gsElement, 'hefraction');
           if (he != null) {
             gs['heFraction'] = double.tryParse(he);
+          }
+          // Which <source> of the dive recorded the computer that logged the
+          // switch (issue #3966), resolved once the source rows are restored.
+          final computer = UddfImportParsers.getElementText(
+            gsElement,
+            'computer',
+          );
+          if (computer != null) {
+            gs['computerOrdinal'] = int.tryParse(computer);
           }
           switchesList.add(gs);
         }
@@ -2648,6 +2709,12 @@ class UddfFullImportService {
         sensorReadings.forEach((index, value) {
           point['o2Sensor${index + 1}'] = value;
         });
+        UddfImportParsers.parseO2SensorMillivolts(
+          waypoint,
+          o2SensorOrder,
+        ).forEach((index, value) {
+          point['o2SensorMv${index + 1}'] = value;
+        });
 
         // Shearwater and other computers mark the circuit per sample rather
         // than on the dive. A dive that runs closed circuit for any part of
@@ -2836,16 +2903,13 @@ class UddfFullImportService {
         diveData['avgDepth'] = double.tryParse(avgDepthText);
       }
 
-      // UDDF diveduration is total dive time (runtime), not bottom time
-      final durationText = UddfImportParsers.getElementText(
-        afterElement,
-        'diveduration',
-      );
-      if (durationText != null) {
-        final seconds = UddfImportParsers.parseUddfInt(durationText);
-        if (seconds != null) {
-          diveData['runtime'] = Duration(seconds: seconds);
-        }
+      // UDDF diveduration is total dive time (runtime), not bottom time.
+      final durations = UddfDiveDurations.read(afterElement);
+      if (durations.runtime case final runtime?) {
+        diveData['runtime'] = runtime;
+      }
+      if (durations.bottomTime case final bottomTime?) {
+        diveData['bottomTime'] = bottomTime;
       }
 
       final waterTempText = UddfImportParsers.getElementText(

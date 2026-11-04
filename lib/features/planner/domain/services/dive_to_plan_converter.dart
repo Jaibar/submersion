@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/deco/entities/tissue_compartment.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
@@ -38,7 +39,10 @@ class PlanBreakpoint {
 /// deeper than half the max depth). The ascent, any decompression stops and
 /// the surfacing are deliberately not authored: the plan engine computes them
 /// from that point, so the planner shows its own TTS and deco schedule for the
-/// diver to compare against what the dive computer actually did.
+/// diver to compare against what the dive computer actually did. A caller that
+/// passes `throughTimestamp` (the Dive Lab, handing a branched scenario to the
+/// planner) gets the profile authored through that sample instead, ascent and
+/// stops included, ending exactly there.
 ///
 /// With `includeAscent` the plan instead follows the whole logged profile to
 /// its last sample: the ascent, stops and surfacing are authored too (still
@@ -86,8 +90,10 @@ class DiveToPlanConverter {
     required String planName,
     required DivePlanState defaults,
     List<TissueCompartment>? initialTissueState,
+    DiveEnvironment? initialTissueEnvironment,
     Duration? surfaceInterval,
     String Function()? idGenerator,
+    int? throughTimestamp,
   }) {
     assert(levels >= minLevels && levels <= maxLevels);
     final newId = idGenerator ?? _defaultId;
@@ -98,6 +104,7 @@ class DiveToPlanConverter {
       gasSwitches: gasSwitches,
       levels: levels,
       includeAscent: includeAscent,
+      throughTimestamp: throughTimestamp,
     );
     final firstTimestamp = profile.isEmpty
         ? 0
@@ -135,6 +142,7 @@ class DiveToPlanConverter {
       reservePressure: defaults.reservePressure,
       surfaceInterval: surfaceInterval,
       initialTissueState: initialTissueState,
+      initialTissueEnvironment: initialTissueEnvironment,
       sourceDiveId: dive.id,
       createdAt: now,
       updatedAt: now,
@@ -168,6 +176,7 @@ class DiveToPlanConverter {
     required List<GasSwitch> gasSwitches,
     required int levels,
     bool includeAscent = false,
+    int? throughTimestamp,
   }) {
     final sorted = [...profile]
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -182,11 +191,14 @@ class DiveToPlanConverter {
     final maxDepth = pts.fold(0.0, (m, p) => math.max(m, p.y));
     if (maxDepth <= 0) return const [];
 
-    // Whole-dive mode ends on the last sample (surfacing) instead of the last
-    // working-depth sample.
+    // Whole-dive mode (includeAscent) ends on the last sample (surfacing)
+    // instead of the last working-depth sample; throughTimestamp ends on the
+    // chosen sample.
     final endIndex = includeAscent
         ? pts.length - 1
-        : _workingEndIndex(pts, maxDepth);
+        : throughTimestamp == null
+        ? _workingEndIndex(pts, maxDepth)
+        : _indexAtOrBefore(pts, (throughTimestamp - t0).toDouble());
     final anchors = _anchorIndices(
       pts,
       endIndex: endIndex,
@@ -222,9 +234,12 @@ class DiveToPlanConverter {
     final resultIsAnchor = <bool>[];
     for (final i in ordered) {
       final isAnchor = anchors.all.contains(i);
+      // A plan authored through a chosen sample ends where the diver was at
+      // that sample, even when it falls inside a single-hold bottom.
       final isBottomEdge =
           bottomIsSingleHold &&
-          (i == anchors.bottomStart || i == anchors.bottomEnd);
+          (i == anchors.bottomStart || i == anchors.bottomEnd) &&
+          !(throughTimestamp != null && i == endIndex);
       final depth = isBottomEdge ? bottomDepth : _snapDepth(pts[i].y);
       final time = pts[i].x.round();
       if (result.isNotEmpty) {
@@ -246,9 +261,14 @@ class DiveToPlanConverter {
       result.add(PlanBreakpoint(timeSeconds: time, depth: depth));
       resultIsAnchor.add(isAnchor);
     }
-    // The trailing-ramp trim exists so the engine ascends from a level; with
-    // the ascent authored the plan legitimately ends on a ramp to the surface.
-    return includeAscent ? result : _trimTrailingRamp(result, maxDepth);
+    // A plan authored through a chosen sample ends exactly there: the caller
+    // continues it (the Dive Lab appends the branched remainder), so the
+    // trailing ramp must not be folded back onto the previous level. The same
+    // holds with the ascent authored (includeAscent): the plan legitimately
+    // ends on a ramp to the surface.
+    return includeAscent || throughTimestamp != null
+        ? result
+        : _trimTrailingRamp(result, maxDepth);
   }
 
   /// The plan must end on a hold so the engine ascends from a level, not from
@@ -356,6 +376,16 @@ class DiveToPlanConverter {
       return before.y + (after.y - before.y) * (time - before.x) / span;
     }
     return pts.last.y;
+  }
+
+  /// Index of the last sample at or before [time]; 0 when [time] precedes the
+  /// profile. The Dive Lab's branch is always a real sample, so this is exact
+  /// there and a floor everywhere else.
+  int _indexAtOrBefore(List<_Point> pts, double time) {
+    for (var i = pts.length - 1; i >= 0; i--) {
+      if (pts[i].x <= time) return i;
+    }
+    return 0;
   }
 
   /// Index of the sample at exactly [time], or null when the profile has none.

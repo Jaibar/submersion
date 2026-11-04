@@ -1,4 +1,4 @@
-name: Private test build
+name: Private test build (merge test, Dive Lab + what-if)
 
 # Fork-only workflow for the custom/** branches: no pull request needed.
 # Runs on every push to custom/** and can also be started by hand from the
@@ -64,26 +64,25 @@ jobs:
       - name: Analyze
         run: flutter analyze
 
-      - name: Tests for the what-if features
+      - name: Tests for the Dive Lab and the what-if
         run: >
           flutter test
+          test/features/dive_lab
+          test/features/planner/domain/services/dive_to_plan_converter_test.dart
           test/features/dive_log/domain/services/gas_gf_what_if_test.dart
           test/features/dive_log/presentation/widgets/what_if_sheet_test.dart
-          test/features/planner/domain/services/dive_to_plan_converter_test.dart
-          test/features/maps/data/services/region_download_layer_test.dart
-          test/features/maps/domain/region_size_estimate_test.dart
 
       - name: Build Windows release
         run: flutter build windows --release --dart-define=UPDATE_CHANNEL=github
 
       - name: Zip the build
         shell: pwsh
-        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath Submersion-custom-windows.zip
+        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath Submersion-lab-windows.zip
 
       - uses: actions/upload-artifact@v7
         with:
-          name: Submersion-custom-windows
-          path: Submersion-custom-windows.zip
+          name: Submersion-lab-windows
+          path: Submersion-lab-windows.zip
           retention-days: 14
 
   # Android APK, sideload only. Signed with a STABLE test key kept in the fork
@@ -138,8 +137,8 @@ jobs:
 
       - name: Give this build its own package name and label
         run: |
-          sed -i 's/applicationId = "app.submersion"/applicationId = "app.submersion.custom"/' android/app/build.gradle.kts
-          sed -i 's/android:label="Submersion"/android:label="Submersion Custom"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's/applicationId = "app.submersion"/applicationId = "app.submersion.lab"/' android/app/build.gradle.kts
+          sed -i 's/android:label="Submersion"/android:label="Submersion Lab"/' android/app/src/main/AndroidManifest.xml
           grep -n 'applicationId' android/app/build.gradle.kts
           grep -n 'android:label="Submersion' android/app/src/main/AndroidManifest.xml
 
@@ -160,7 +159,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: Submersion-custom-android
+          name: Submersion-lab-android
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 14
 
@@ -178,20 +177,20 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
-          name: Submersion-custom-android
+          name: Submersion-lab-android
 
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           base="$(grep -m1 '^version:' pubspec.yaml | sed -E 's/^version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
-          tag="v${base}-custom.${{ github.run_number }}"
-          mv app-release.apk "Submersion-custom-${tag}.apk"
-          gh release create "$tag" "Submersion-custom-${tag}.apk" \
+          tag="v${base}-lab.${{ github.run_number }}"
+          mv app-release.apk "Submersion-lab-${tag}.apk"
+          gh release create "$tag" "Submersion-lab-${tag}.apk" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "Submersion custom ${tag}" \
-            --notes "Private test build of custom/v1.8. Sideload only."
+            --title "Submersion lab ${tag}" \
+            --notes "Private test build of custom/merge-test. Sideload only."
 
   # Tells the owner a new working build exists: an issue on this fork (GitHub
   # emails it). Runs only when BOTH builds succeeded; a failed run already gets
@@ -210,5 +209,5 @@ jobs:
         run: |
           subject="$(printf '%s' "$COMMIT_MSG" | head -n 1)"
           gh issue create --repo "${{ github.repository }}" \
-            --title "New build ready: ${subject:-custom/v1.8}" \
+            --title "New build ready: ${subject:-custom/merge-test}" \
             --body "Windows and Android builds passed. Download them under Artifacts at: $RUN_URL"

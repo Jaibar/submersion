@@ -19,6 +19,7 @@ import 'package:submersion/l10n/arb/app_localizations.dart';
 import '../../../../helpers/mock_providers.dart';
 
 import '../../../../helpers/detail_row_finders.dart';
+import '../../../../support/clipboard_recorder.dart';
 
 /// The Details card's values sit beside their labels on one shared column
 /// instead of at the card's far edge (issue #3678).
@@ -32,7 +33,7 @@ void main() {
     serialNumber: 'AX-55120',
   );
 
-  Future<void> pumpWide(WidgetTester tester) async {
+  Future<void> pumpWide(WidgetTester tester, {int diveTimeSeconds = 0}) async {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = const Size(1400, 1600);
     addTearDown(() {
@@ -54,6 +55,9 @@ void main() {
           equipmentDiveCountProvider(
             equipment.id,
           ).overrideWith((ref) async => 3),
+          equipmentDiveTimeProvider(
+            equipment.id,
+          ).overrideWith((ref) async => diveTimeSeconds),
           equipmentTripCountProvider(
             equipment.id,
           ).overrideWith((ref) async => 0),
@@ -110,6 +114,49 @@ void main() {
     }
     // Beside the labels, not out at the far edge of a 1400 px window.
     expect(column, lessThan(700));
+  });
+
+  testWidgets('only the serial number offers to be copied (issue #3362)', (
+    tester,
+  ) async {
+    final calls = recordClipboardCalls();
+    await pumpWide(tester);
+
+    expect(find.byTooltip('Copy'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: detailRowFor('Serial Number'),
+        matching: find.byTooltip('Copy'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.longPress(find.text('AX-55120'));
+    await tester.pump();
+
+    expect(copiedText(calls), 'AX-55120');
+  });
+
+  testWidgets('Dive Time sits between Dives and Trips, on the shared column', (
+    tester,
+  ) async {
+    await pumpWide(tester, diveTimeSeconds: 113040);
+
+    double top(String label) => tester.getTopLeft(find.text(label)).dy;
+    expect(top('Dives'), lessThan(top('Dive Time')));
+    expect(top('Dive Time'), lessThan(top('Trips')));
+    expect(find.text('31.4 hours'), findsOneWidget);
+    expect(
+      detailValueLeft(tester, 'Dive Time'),
+      detailValueLeft(tester, 'Status'),
+    );
+  });
+
+  testWidgets('no recorded time leaves the Dive Time row out', (tester) async {
+    await pumpWide(tester);
+
+    expect(find.text('3 dives'), findsOneWidget);
+    expect(find.text('Dive Time'), findsNothing);
   });
 
   testWidgets('the Dives count stays tappable, and a zero count does not', (

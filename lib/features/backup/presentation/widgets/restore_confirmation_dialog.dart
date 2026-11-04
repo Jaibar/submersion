@@ -5,7 +5,6 @@ import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/backup/domain/entities/backup_record.dart';
 import 'package:submersion/features/backup/domain/entities/backup_type.dart';
 import 'package:submersion/features/backup/domain/entities/restore_mode.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Confirmation dialog shown before restoring from a backup.
@@ -21,11 +20,17 @@ class RestoreConfirmationDialog extends ConsumerStatefulWidget {
   final int currentSchemaVersion;
   final bool offerReplace;
 
+  /// Whether [BackupRecord.timestamp] says when the backup was made. A
+  /// browser's picker gives no file date (issue #4121), so the dialog names
+  /// the file instead.
+  final bool knownTime;
+
   const RestoreConfirmationDialog({
     super.key,
     required this.record,
     required this.currentSchemaVersion,
     this.offerReplace = false,
+    this.knownTime = true,
   });
 
   /// Shows the dialog. Returns the chosen restore mode, or null on cancel.
@@ -34,6 +39,7 @@ class RestoreConfirmationDialog extends ConsumerStatefulWidget {
     BackupRecord record, {
     required int currentSchemaVersion,
     bool offerReplace = false,
+    bool knownTime = true,
   }) {
     return showDialog<RestoreMode>(
       context: context,
@@ -41,6 +47,7 @@ class RestoreConfirmationDialog extends ConsumerStatefulWidget {
         record: record,
         currentSchemaVersion: currentSchemaVersion,
         offerReplace: offerReplace,
+        knownTime: knownTime,
       ),
     );
   }
@@ -64,7 +71,7 @@ class _RestoreConfirmationDialogState
 
   Widget _buildManual(BuildContext context) {
     final theme = Theme.of(context);
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
     final record = widget.record;
 
     return AlertDialog(
@@ -85,7 +92,12 @@ class _RestoreConfirmationDialogState
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    units.formatDateTime(record.timestamp, l10n: context.l10n),
+                    widget.knownTime
+                        ? units.formatDateTime(
+                            record.timestamp,
+                            l10n: context.l10n,
+                          )
+                        : record.filename,
                     style: theme.textTheme.titleSmall,
                   ),
                   if (record.note != null) ...[
@@ -246,7 +258,7 @@ class _RestoreConfirmationDialogState
   Widget _buildPreMigration(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = context.l10n;
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
     final record = widget.record;
     final fromSchemaVersion = record.fromSchemaVersion;
     final toSchemaVersion = record.toSchemaVersion;

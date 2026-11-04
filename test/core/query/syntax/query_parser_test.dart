@@ -1,8 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/units.dart';
+import 'package:submersion/core/query/domain/query_error_code.dart';
 import 'package:submersion/core/query/domain/query_node.dart';
 import 'package:submersion/core/query/domain/query_subject.dart';
 import 'package:submersion/core/query/syntax/query_parser.dart';
+import 'package:submersion/core/query/syntax/query_printer.dart';
 import 'package:submersion/core/query/units/unit_prefs.dart';
 
 import '../fixtures/fixture_registry.dart';
@@ -401,7 +403,6 @@ void main() {
 
   test('every unfinished construct names what it expected', () {
     expect(bad(metric(), 'waterType in [salt').error.message, contains(']'));
-    expect(bad(metric(), 'waterType in salt').error.message, contains('['));
     expect(bad(metric(), 'depth between 1 or').error.message, contains('and'));
     expect(bad(metric(), 'weights[amount > 1').error.message, contains(']'));
     expect(
@@ -462,6 +463,62 @@ void main() {
     );
   });
 
+  group('in and between after a word (#3457)', () {
+    AndNode words(List<String> terms) => AndNode([
+      for (final t in terms) TextNode([t]),
+    ]);
+
+    test('in after a word that names nothing reads as plain words', () {
+      expect(ok(metric(), 'ressel in 2018'), words(['ressel', 'in', '2018']));
+    });
+
+    test('in after a field or relation with no list reads as words', () {
+      expect(ok(metric(), 'depth in 2018'), words(['depth', 'in', '2018']));
+      expect(ok(metric(), 'site in 2018'), words(['site', 'in', '2018']));
+    });
+
+    test('between after a word that names nothing reads as words', () {
+      expect(
+        ok(metric(), 'ressel between 2018 and 2020'),
+        words(['ressel', 'between', '2018', '2020']),
+      );
+    });
+
+    test('between after a relation reads as words', () {
+      expect(
+        ok(metric(), 'site between 2018 and 2020'),
+        words(['site', 'between', '2018', '2020']),
+      );
+    });
+
+    test('between after a field that cannot compare it reads as words', () {
+      expect(
+        ok(metric(), 'favorite between 2018 and 2020'),
+        words(['favorite', 'between', '2018', '2020']),
+      );
+    });
+
+    test('in stays an operator for a date field or a list', () {
+      expect(ok(metric(), 'date in 2025'), isA<ConditionNode>());
+      expect(ok(metric(), 'depth in [10, 20]'), isA<ConditionNode>());
+    });
+
+    test('between stays an operator for a field', () {
+      expect(ok(metric(), 'depth between 18 and 30'), isA<ConditionNode>());
+    });
+
+    test('a mistyped field before a list still suggests the field', () {
+      expect(
+        bad(metric(), 'dpeth in [10, 20]').error.suggestions,
+        contains('depth'),
+      );
+    });
+
+    test('a word ending the text at in is no operator', () {
+      expect(ok(metric(), 'ressel in'), words(['ressel', 'in']));
+    });
+  });
+
   test('reversed between bounds are put in order', () {
     expect(
       ok(metric(), 'depth between 30 and 18'),
@@ -492,4 +549,190 @@ void main() {
       expect(a, b);
     },
   );
+
+  group('presence phrases (#3810)', () {
+    final siteEmpty = ConditionNode(FieldPath(['site']), QueryOp.isEmpty, null);
+    final siteSet = ConditionNode(FieldPath(['site']), QueryOp.isSet, null);
+
+    test('the words a diver reaches for mean :none', () {
+      for (final text in const [
+        'site is blank',
+        'site is null',
+        'site is empty',
+        'site is none',
+        'site is unset',
+        'site is not set',
+      ]) {
+        expect(ok(metric(), text), siteEmpty, reason: text);
+      }
+    });
+
+    test('their opposites mean :any', () {
+      for (final text in const [
+        'site is set',
+        'site is not blank',
+        'site is not null',
+        'site is not empty',
+        'site is not none',
+        'site is not unset',
+      ]) {
+        expect(ok(metric(), text), siteSet, reason: text);
+      }
+    });
+
+    test('the phrase folds case, as the reporter typed it', () {
+      expect(ok(metric(), 'Site is Blank'), siteEmpty);
+      expect(ok(metric(), 'SITE IS NOT NULL'), siteSet);
+    });
+
+    test('a field works like a relation, under any alias', () {
+      expect(
+        ok(metric(), 'notes is empty'),
+        ConditionNode(FieldPath(['notes']), QueryOp.isEmpty, null),
+      );
+      expect(
+        ok(metric(), 'maxDepth is blank'),
+        ConditionNode(FieldPath(['depth']), QueryOp.isEmpty, null),
+      );
+      expect(
+        ok(metric(), 'site.country is empty'),
+        ConditionNode(FieldPath(['site', 'country']), QueryOp.isEmpty, null),
+      );
+    });
+
+    test('it combines with the rest of the grammar', () {
+      expect(
+        ok(metric(), 'site is blank and depth > 30'),
+        AndNode([
+          siteEmpty,
+          ConditionNode(
+            FieldPath(['depth']),
+            QueryOp.gt,
+            const NumberValue(30, null),
+          ),
+        ]),
+      );
+      expect(ok(metric(), 'not site is blank'), NotNode(siteEmpty));
+      expect(ok(metric(), 'wreck site is blank'), isA<AndNode>());
+    });
+
+    test('a first word that names no field stays free text', () {
+      expect(
+        ok(metric(), 'boat is empty'),
+        AndNode([
+          TextNode(const ['boat']),
+          TextNode(const ['is']),
+          TextNode(const ['empty']),
+        ]),
+      );
+    });
+
+    test('a word that is no presence word stays free text', () {
+      expect(
+        ok(metric(), 'site is lovely'),
+        AndNode([
+          TextNode(const ['site']),
+          TextNode(const ['is']),
+          TextNode(const ['lovely']),
+        ]),
+      );
+      expect(
+        ok(metric(), 'site is not lovely'),
+        isNot(anyOf(siteEmpty, siteSet)),
+      );
+      expect(ok(metric(), 'site is'), isA<AndNode>());
+    });
+
+    test('text that ends before a phrase does parses as it did', () {
+      expect(ok(metric(), 'depth'), TextNode(const ['depth']));
+      expect(ok(metric(), 'empty'), TextNode(const ['empty']));
+      expect(
+        ok(metric(), 'site is'),
+        AndNode([
+          TextNode(const ['site']),
+          TextNode(const ['is']),
+        ]),
+      );
+      expect(bad(metric(), 'site is not').error, isNotNull);
+    });
+
+    test('a quoted sentence stays a phrase search', () {
+      expect(
+        ok(metric(), '"site is blank"'),
+        TextNode(const ['site', 'is', 'blank']),
+      );
+    });
+
+    test('an enum storing the value none refuses it like :none', () {
+      expect(
+        bad(metric(), 'current is none').error.code,
+        QueryErrorCode.noneAmbiguous,
+      );
+      expect(
+        bad(metric(), 'current is blank').error.code,
+        QueryErrorCode.noneAmbiguous,
+      );
+      expect(
+        bad(metric(), 'current is not none').error.code,
+        QueryErrorCode.noneAmbiguous,
+      );
+      expect(ok(metric(), 'current is set'), isA<ConditionNode>());
+      expect(ok(metric(), 'current is not blank'), isA<ConditionNode>());
+    });
+
+    test('inside a group it reads the fields of that relation', () {
+      expect(
+        ok(metric(), 'site[country is empty]'),
+        ScopedNode(
+          FieldPath(['site']),
+          ConditionNode(FieldPath(['country']), QueryOp.isEmpty, null),
+        ),
+      );
+    });
+
+    test('a field that cannot be empty is refused, not searched as text', () {
+      final error = bad(metric(), 'favorite is blank').error;
+      expect(error.code, QueryErrorCode.opNotForFieldQuoted);
+      expect(error.args['op'], 'blank');
+      expect(error.offset, 'favorite is '.length);
+    });
+
+    test('reads back through the printer as the canonical form', () {
+      final printer = QueryPrinter(fixtureRegistry, fixtureDives, kMetricPrefs);
+      final tree = ok(metric(), 'site is blank');
+      expect(printer.print(tree), 'site:none');
+      expect(ok(metric(), printer.print(tree)), tree);
+    });
+
+    test('three separate words already saved do not change meaning', () {
+      // A saved query is a tree, not text: the words print with explicit
+      // ANDs, so the phrase never forms on the way back in.
+      final saved = AndNode([
+        TextNode(const ['site']),
+        TextNode(const ['is']),
+        TextNode(const ['blank']),
+      ]);
+      final printer = QueryPrinter(fixtureRegistry, fixtureDives, kMetricPrefs);
+      expect(ok(metric(), printer.print(saved)), saved);
+    });
+  });
+
+  group('field names fold case (#3810)', () {
+    test('a key or alias matches whatever the case', () {
+      expect(ok(metric(), 'Depth > 30'), ok(metric(), 'depth > 30'));
+      expect(ok(metric(), 'MAXDEPTH > 30'), ok(metric(), 'depth > 30'));
+      expect(ok(metric(), 'Site:none'), ok(metric(), 'site:none'));
+      expect(
+        ok(metric(), 'SITE.Country:none'),
+        ok(metric(), 'site.country:none'),
+      );
+    });
+
+    test('the tree holds the canonical spelling', () {
+      expect(
+        (ok(metric(), 'WATERTEMP > 20') as ConditionNode).path,
+        FieldPath(['waterTemp']),
+      );
+    });
+  });
 }

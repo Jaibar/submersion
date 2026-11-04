@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/equipment/domain/constants/equipment_fitting.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_condition_providers.dart';
@@ -13,22 +13,11 @@ import 'package:submersion/features/equipment/presentation/utils/child_installed
 import 'package:submersion/features/equipment/presentation/utils/equipment_enum_display.dart';
 import 'package:submersion/features/equipment/presentation/utils/equipment_type_icon.dart';
 import 'package:submersion/features/equipment/presentation/utils/service_severity_colors.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
-/// Types whose detail page shows the children card: the parents a cell
-/// or a battery can be installed in. The edit page's parent picker offers
-/// a battery exactly this set, so a host the picker allows always shows the
-/// battery it holds.
-const childHostTypes = {
-  EquipmentType.rebreather,
-  EquipmentType.computer,
-  EquipmentType.transmitter,
-  EquipmentType.light,
-  EquipmentType.videoLight,
-  EquipmentType.dpv,
-};
+export 'package:submersion/features/equipment/domain/constants/equipment_fitting.dart'
+    show childHostTypes;
 
 /// The cells and batteries installed in a parent: slot, age since
 /// install, worst service clock, and a one-tap replace that retires the
@@ -48,7 +37,7 @@ class ChildrenCard extends ConsumerWidget {
     }
     final l10n = context.l10n;
     final theme = Theme.of(context);
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
     final childrenAsync = ref.watch(childEquipmentProvider(equipment.id));
     // The rollup, not the own-clocks map, for the same reason the
     // Components card uses it (#2260).

@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/unit_formatter.dart';
 
 import 'package:submersion/features/media/domain/entities/media_item.dart';
 import 'package:submersion/features/media/presentation/pages/species_photo_viewer_page.dart';
 import 'package:submersion/features/media/presentation/providers/species_media_providers.dart';
 import 'package:submersion/features/media/presentation/widgets/media_grid.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// The photos tagged with one species, on the species detail page.
@@ -29,7 +30,7 @@ class SpeciesPhotosSection extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = context.l10n;
     final mediaAsync = ref.watch(mediaForSpeciesProvider(speciesId));
-    final settings = ref.watch(settingsProvider);
+    final settings = ref.watch(unitFormatterProvider).settings;
     final items = mediaAsync.value ?? const <MediaItem>[];
 
     return Column(
@@ -53,7 +54,9 @@ class SpeciesPhotosSection extends ConsumerWidget {
                 icon: const Icon(Icons.sell_outlined),
                 label: Text(l10n.marineLife_speciesPhotos_tagPhotos),
               ),
-            if (onAddPhotos != null)
+            // A browser links no new media (issue #4121).
+            if (onAddPhotos != null &&
+                ref.watch(deviceCapabilitiesProvider).mediaAttach)
               TextButton.icon(
                 key: const ValueKey('species_add_photos'),
                 onPressed: onAddPhotos,

@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:submersion/core/utils/unit_formatter.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/trips/presentation/providers/side_trip_providers.dart';
@@ -25,8 +24,7 @@ class TripDivesTab extends ConsumerWidget {
       for (final t in ref.watch(sideTripsProvider(tripId)).value ?? const [])
         t.id: t.name,
     };
-    final settings = ref.watch(settingsProvider);
-    final units = UnitFormatter(settings);
+    final units = ref.watch(unitFormatterProvider);
     final theme = Theme.of(context);
 
     return divesAsync.when(
@@ -106,13 +104,13 @@ class TripDivesTab extends ConsumerWidget {
                               fontWeight: FontWeight.w500,
                             ),
                           ),
-                        // Runtime with a bottom-time fallback, matching the
-                        // trip totals so these rows add up to the figure the
-                        // Overview tab reports (issue #889).
-                        if ((dive.runtime ?? dive.bottomTime) != null)
+                        // Measured runtime, matching the trip totals so these
+                        // rows add up to the figure the Overview tab reports
+                        // (issue #889).
+                        if (dive.measuredRuntime case final runtime?)
                           Text(
                             context.l10n.diveLog_sources_minutes(
-                              (dive.runtime ?? dive.bottomTime)!.inMinutes,
+                              runtime.inMinutes,
                             ),
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,

@@ -4,14 +4,13 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/checklists/domain/entities/trip_checklist_item.dart';
 import 'package:submersion/features/checklists/presentation/providers/checklist_providers.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/app_date_picker.dart';
 import 'package:submersion/shared/widgets/forms/autocomplete_options_list.dart';
 
-/// Bottom sheet for creating or editing a trip checklist item.
+/// Bottom sheet for creating or editing one checklist's item.
 ///
-/// [categorySuggestions] lists the trip's existing section titles.
+/// [categorySuggestions] lists the checklist's existing section titles.
 /// [currentSectionTitle] is the title of [item]'s current section when
 /// editing (resolved by the caller, which already holds the sections list);
 /// the entity itself only carries a `sectionId`. Saving resolves the typed
@@ -20,7 +19,7 @@ import 'package:submersion/shared/widgets/forms/autocomplete_options_list.dart';
 /// today's free-text category field, but backed by real section rows.
 Future<void> showChecklistItemEditSheet({
   required BuildContext context,
-  required String tripId,
+  required String checklistId,
   TripChecklistItem? item,
   List<String> categorySuggestions = const [],
   String? currentSectionTitle,
@@ -28,8 +27,9 @@ Future<void> showChecklistItemEditSheet({
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
+    useSafeArea: true,
     builder: (context) => _ChecklistItemEditSheet(
-      tripId: tripId,
+      checklistId: checklistId,
       item: item,
       categorySuggestions: categorySuggestions,
       currentSectionTitle: currentSectionTitle,
@@ -38,13 +38,13 @@ Future<void> showChecklistItemEditSheet({
 }
 
 class _ChecklistItemEditSheet extends ConsumerStatefulWidget {
-  final String tripId;
+  final String checklistId;
   final TripChecklistItem? item;
   final List<String> categorySuggestions;
   final String? currentSectionTitle;
 
   const _ChecklistItemEditSheet({
-    required this.tripId,
+    required this.checklistId,
     this.item,
     this.categorySuggestions = const [],
     this.currentSectionTitle,
@@ -121,12 +121,12 @@ class _ChecklistItemEditSheetState
         currentTitle.toLowerCase() == category.toLowerCase();
     final sectionId = keepsSection
         ? existing.sectionId
-        : await repository.findOrCreateSectionId(widget.tripId, category);
+        : await repository.findOrCreateSectionId(widget.checklistId, category);
     if (existing == null) {
       await repository.createItem(
         TripChecklistItem(
           id: '',
-          tripId: widget.tripId,
+          checklistId: widget.checklistId,
           title: _titleController.text.trim(),
           sectionId: sectionId,
           notes: _notesController.text.trim(),
@@ -150,7 +150,7 @@ class _ChecklistItemEditSheetState
 
   @override
   Widget build(BuildContext context) {
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
     return Padding(
       padding: EdgeInsets.only(
         left: 16,

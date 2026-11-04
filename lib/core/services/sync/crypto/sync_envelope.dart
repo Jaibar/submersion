@@ -1,17 +1,28 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:cryptography/dart.dart';
+import 'package:meta/meta.dart';
 import 'package:uuid/uuid_value.dart';
 
+import 'package:submersion/core/platform/compute/compute_jobs.dart';
+import 'package:submersion/core/platform/zlib/platform_zlib.dart';
 import 'package:submersion/core/services/sync/crypto/crypto_errors.dart';
 import 'package:submersion/core/utils/bounded_inflate.dart';
+import 'package:submersion/core/utils/concat_bytes.dart';
+import 'package:submersion/core/utils/off_isolate.dart';
 
 /// Single-shot SBE1 envelope: the byte form of every encrypted sync file.
 ///
 /// Layout (spec 3.3): "SBE1"(4) | libraryKeyId(16) | flags(1) | nonce(12)
 /// | AES-256-GCM ciphertext || 16-byte tag. AAD = UTF-8 logical filename.
+///
+/// A large payload is compressed and, where the cipher is pure Dart, encrypted
+/// on another isolate, so a base part does not stall the isolate that called
+/// sync (issue #3829). Output is the same either way. The helpers below stay
+/// separate small functions so that the closures they hand to [runOffIsolate]
+/// capture their own arguments and nothing else from [seal] or [open].
 /// flags bit0 = payload was gzipped before encryption.
 abstract final class SyncEnvelope {
   static const List<int> magic = [0x53, 0x42, 0x45, 0x31]; // "SBE1"
@@ -34,6 +45,12 @@ abstract final class SyncEnvelope {
   static const int defaultMaxPlaintextBytes = 256 * 1024 * 1024;
 
   static final AesGcm _aesGcm = AesGcm.with256bits();
+
+  /// Pure Dart AES-GCM costs about eight times what the off-isolate threshold
+  /// was set for: some 60 ms per MiB, so 256 KiB would still block for 14 ms.
+  /// Its own threshold is that much lower, and gzip may have left little of a
+  /// large part by the time it gets here.
+  static const int _dartAesCostFactor = 8;
 
   static bool hasMagic(List<int> bytes) =>
       bytes.length >= magic.length &&
@@ -58,6 +75,8 @@ abstract final class SyncEnvelope {
     bool compress = true,
     int maxPlaintextBytes = defaultMaxPlaintextBytes,
     List<int>? nonceForTest,
+    @visibleForTesting int offIsolateMinBytes = kOffIsolateMinBytes,
+    @visibleForTesting OffIsolateRunner offIsolateRunner = isolateRun,
   }) async {
     var payload = plaintext;
     var flags = 0;
@@ -68,19 +87,33 @@ abstract final class SyncEnvelope {
     // single changeset of a quarter gigabyte, which the in-memory encode
     // above it would already be struggling with.
     if (compress && plaintext.length <= maxPlaintextBytes) {
-      final gz = Uint8List.fromList(gzip.encode(plaintext));
+      final gz = await _gzippedOffIsolate(
+        plaintext,
+        offIsolateMinBytes,
+        offIsolateRunner,
+      );
       if (gz.length < plaintext.length) {
         payload = gz;
         flags |= _flagGzip;
       }
     }
     final nonce = nonceForTest ?? _aesGcm.newNonce();
-    final box = await _aesGcm.encrypt(
-      payload,
-      secretKey: dataKey,
-      nonce: nonce,
-      aad: utf8.encode(filename),
-    );
+    final aad = utf8.encode(filename);
+    final box = _aesGcm is DartAesGcm
+        ? await _encryptedOffIsolate(
+            payload,
+            await dataKey.extractBytes(),
+            nonce,
+            aad,
+            offIsolateMinBytes ~/ _dartAesCostFactor,
+            offIsolateRunner,
+          )
+        : await _aesGcm.encrypt(
+            payload,
+            secretKey: dataKey,
+            nonce: nonce,
+            aad: aad,
+          );
     final keyIdBytes = UuidValue.withValidation(libraryKeyId).toBytes();
     final out = BytesBuilder(copy: false)
       ..add(magic)
@@ -98,6 +131,8 @@ abstract final class SyncEnvelope {
     required String expectedLibraryKeyId,
     required String filename,
     int maxPlaintextBytes = defaultMaxPlaintextBytes,
+    @visibleForTesting int offIsolateMinBytes = kOffIsolateMinBytes,
+    @visibleForTesting OffIsolateRunner offIsolateRunner = isolateRun,
   }) async {
     if (!hasMagic(envelope) || envelope.length < _headerLength + 16) {
       throw const EnvelopeCorruptException('Not an SBE1 envelope');
@@ -118,19 +153,24 @@ abstract final class SyncEnvelope {
       mac: Mac(Uint8List.sublistView(body, body.length - 16)),
     );
     final List<int> payload;
+    final aad = utf8.encode(filename);
     try {
-      payload = await _aesGcm.decrypt(
-        box,
-        secretKey: dataKey,
-        aad: utf8.encode(filename),
-      );
+      payload = _aesGcm is DartAesGcm
+          ? await _decryptedOffIsolate(
+              box,
+              await dataKey.extractBytes(),
+              aad,
+              offIsolateMinBytes ~/ _dartAesCostFactor,
+              offIsolateRunner,
+            )
+          : await _aesGcm.decrypt(box, secretKey: dataKey, aad: aad);
     } on SecretBoxAuthenticationError {
       throw const EnvelopeCorruptException(
         'Envelope failed authentication (corrupt, tampered, or wrong name)',
       );
     }
     if ((flags & _flagGzip) != 0) {
-      // Bounded and chunked. gzip.decode is a single native call that has
+      // Bounded and chunked. A whole-body gunzip is a single call that has
       // already allocated the whole body by the time it returns, so a
       // length check after the fact buys nothing; the guard has to abort
       // from inside the inflate.
@@ -152,11 +192,11 @@ abstract final class SyncEnvelope {
       // and the alternative is copying it whole into the native filter
       // before the first chunk comes back.
       try {
-        return inflateBounded(
+        return await _inflatedOffIsolate(
           payload,
-          decoder: gzip.decoder,
-          maxBytes: maxPlaintextBytes,
-          maxBlobBytes: maxPlaintextBytes,
+          maxPlaintextBytes,
+          offIsolateMinBytes ~/ kCompressedCostFactor,
+          offIsolateRunner,
         );
       } on BoundedInflateException catch (e) {
         throw EnvelopeCorruptException(
@@ -166,4 +206,85 @@ abstract final class SyncEnvelope {
     }
     return Uint8List.fromList(payload);
   }
+
+  static Future<Uint8List> _gzippedOffIsolate(
+    Uint8List plaintext,
+    int minBytes,
+    OffIsolateRunner runner,
+  ) => ComputeJobs.gzip(plaintext, minBytes: minBytes, runner: runner);
+
+  static Future<SecretBox> _encryptedOffIsolate(
+    List<int> payload,
+    List<int> key,
+    List<int> nonce,
+    List<int> aad,
+    int minBytes,
+    OffIsolateRunner runner,
+  ) async {
+    final sealed = await ComputeJobs.aesGcmEncrypt(
+      key: _bytes(key),
+      nonce: _bytes(nonce),
+      plaintext: _bytes(payload),
+      aad: _bytes(aad),
+      minBytes: minBytes,
+      runner: runner,
+    );
+    final split = sealed.length - 16;
+    return SecretBox(
+      Uint8List.sublistView(sealed, 0, split),
+      nonce: nonce,
+      mac: Mac(Uint8List.sublistView(sealed, split)),
+    );
+  }
+
+  static Future<List<int>> _decryptedOffIsolate(
+    SecretBox box,
+    List<int> key,
+    List<int> aad,
+    int minBytes,
+    OffIsolateRunner runner,
+  ) => ComputeJobs.aesGcmDecrypt(
+    key: _bytes(key),
+    nonce: _bytes(box.nonce),
+    ciphertextWithMac: concatBytes(box.cipherText, box.mac.bytes),
+    aad: _bytes(aad),
+    minBytes: minBytes,
+    runner: runner,
+  );
+
+  /// The bounded gunzip of `inflateBounded`, with the blob cap checked here
+  /// and the zlib errors translated to the same [BoundedInflateException]
+  /// messages, so the envelope reads the same whichever side runs it.
+  static Future<Uint8List> _inflatedOffIsolate(
+    List<int> payload,
+    int maxBytes,
+    int minBytes,
+    OffIsolateRunner runner,
+  ) async {
+    if (payload.length > maxBytes) {
+      throw BoundedInflateException(
+        'blob of ${payload.length} byte(s) exceeds the $maxBytes allowed',
+      );
+    }
+    try {
+      return await ComputeJobs.inflateBounded(
+        _bytes(payload),
+        maxBytes: maxBytes,
+        framing: ZlibFraming.gzip,
+        minBytes: minBytes,
+        runner: runner,
+      );
+    } on ZlibBoundExceeded {
+      throw BoundedInflateException(
+        'inflated body exceeds the $maxBytes byte(s) allowed',
+      );
+    } on ZlibFormatException catch (e) {
+      throw BoundedInflateException(
+        'not a valid compressed stream: ${e.message}',
+      );
+    }
+  }
+
+  static Uint8List _bytes(List<int> bytes) =>
+      bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
 }

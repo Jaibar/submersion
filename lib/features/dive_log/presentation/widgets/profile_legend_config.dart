@@ -41,11 +41,16 @@ class LegendOverlaySource {
   final bool tintByMetric;
   final Color color;
 
+  /// This source's band is its computer's stops while its ceiling line is
+  /// calculated, so its ceiling entry says so (issue #2552).
+  final bool labelCeilingAsCalculated;
+
   const LegendOverlaySource({
     required this.name,
     required this.metrics,
     this.tintByMetric = true,
     this.color = Colors.transparent,
+    this.labelCeilingAsCalculated = false,
   });
 }
 
@@ -65,6 +70,10 @@ class ProfileLegendConfig {
   final bool hasHeartRateData;
   final bool hasSacCurve;
   final bool hasCeilingCurve;
+
+  /// The active source's band is the computer's stops while its ceiling line
+  /// is calculated, so the ceiling is named "Ceiling (calc)" (issue #2552).
+  final bool labelCeilingAsCalculated;
   final bool hasDecoStopCurve;
   final bool hasAscentRates;
   final bool hasEvents;
@@ -75,6 +84,10 @@ class ProfileLegendConfig {
   /// (issue #1523).
   final bool hasComputedEvents;
   final bool hasImportedEvents;
+
+  /// Whether the dive carries annotations (#4109), which get their own
+  /// toggle beside Events.
+  final bool hasAnnotations;
   final bool hasMaxDepthMarker;
   final bool hasPressureMarkers;
   final bool hasGasSwitches;
@@ -130,11 +143,13 @@ class ProfileLegendConfig {
     this.hasHeartRateData = false,
     this.hasSacCurve = false,
     this.hasCeilingCurve = false,
+    this.labelCeilingAsCalculated = false,
     this.hasDecoStopCurve = false,
     this.hasAscentRates = false,
     this.hasEvents = false,
     this.hasComputedEvents = false,
     this.hasImportedEvents = false,
+    this.hasAnnotations = false,
     this.hasMaxDepthMarker = false,
     this.hasPressureMarkers = false,
     this.hasGasSwitches = false,

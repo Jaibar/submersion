@@ -3,20 +3,36 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:submersion/core/query/domain/query_node.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/insights/domain/tank_configuration/tank_configuration.dart';
+import 'package:submersion/features/insights/presentation/providers/insights_filter_provider.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
 import 'package:submersion/features/insights/presentation/widgets/horizontal_category_bar_chart.dart';
 import 'package:submersion/features/insights/presentation/widgets/tank_configuration_card.dart';
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/test_app.dart';
+import '../recording_insights_repository.dart';
 
 /// Issue #3421: the Gas page's tank configuration card.
 void main() {
+  const noCandidates = (tankIds: <String>[], diveIds: <String>[]);
+
   Future<void> pumpCard(WidgetTester tester, TankConfigurationStats stats) {
     return tester
         .pumpWidget(
           ProviderScope(
             overrides: [
               tankConfigurationStatsProvider.overrideWith((ref) async => stats),
+              twinSetCandidatesProvider.overrideWith(
+                (ref) async => noCandidates,
+              ),
             ],
             child: const MaterialApp(
               locale: Locale('en'),
@@ -109,15 +125,61 @@ void main() {
   testWidgets('shows the note', (tester) async {
     await pumpCard(tester, tenDives);
 
-    expect(find.textContaining('Sidemount Left and Right'), findsOneWidget);
+    expect(find.textContaining('Twin Set'), findsOneWidget);
   });
+
+  testWidgets(
+    'shows the twin set note above the explanation when there are candidates',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            tankConfigurationStatsProvider.overrideWith(
+              (ref) async => tenDives,
+            ),
+            twinSetCandidatesProvider.overrideWith(
+              (ref) async => (tankIds: ['t1', 't2'], diveIds: ['d1', 'd2']),
+            ),
+            sharedPreferencesProvider.overrideWithValue(prefs),
+            settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+            currentDiverIdProvider.overrideWith(
+              (ref) => MockCurrentDiverIdNotifier(),
+            ),
+          ],
+          child: const MaterialApp(
+            locale: Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: SingleChildScrollView(child: TankConfigurationCard()),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final note = find.text(
+        '2 dives have cylinders that look like a twin set.',
+      );
+      expect(note, findsOneWidget);
+      expect(
+        tester.getTopLeft(note).dy,
+        lessThan(tester.getTopLeft(find.textContaining('role is Twin Set')).dy),
+      );
+    },
+  );
 
   Future<void> pumpWith(
     WidgetTester tester,
     Future<TankConfigurationStats> Function() load,
   ) => tester.pumpWidget(
     ProviderScope(
-      overrides: [tankConfigurationStatsProvider.overrideWith((ref) => load())],
+      overrides: [
+        tankConfigurationStatsProvider.overrideWith((ref) => load()),
+        twinSetCandidatesProvider.overrideWith((ref) async => noCandidates),
+      ],
       child: const MaterialApp(
         locale: Locale('en'),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -145,10 +207,153 @@ void main() {
     expect(find.text('Unable to load tank configuration'), findsOneWidget);
   });
 
+  testWidgets('the twin set note shows even when the filter leaves no dives', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          tankConfigurationStatsProvider.overrideWith(
+            (ref) async => TankConfigurationStats.empty,
+          ),
+          twinSetCandidatesProvider.overrideWith(
+            (ref) async => (tankIds: ['t1'], diveIds: ['d1']),
+          ),
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+          currentDiverIdProvider.overrideWith(
+            (ref) => MockCurrentDiverIdNotifier(),
+          ),
+        ],
+        child: const MaterialApp(
+          locale: Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: SingleChildScrollView(child: TankConfigurationCard()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('No dives to show'), findsOneWidget);
+    expect(
+      find.text('1 dive has a cylinder that looks like a twin set.'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('empty stats show the empty state', (tester) async {
     await pumpCard(tester, TankConfigurationStats.empty);
 
     expect(find.text('No dives to show'), findsOneWidget);
     expect(find.byType(HorizontalCategoryBarChart), findsNothing);
+  });
+
+  group('tapping a bar (#3804)', () {
+    late RecordingInsightsRepository repository;
+
+    setUp(() => repository = RecordingInsightsRepository());
+
+    Future<ProviderContainer> pumpRouted(
+      WidgetTester tester,
+      TankConfigurationStats stats, {
+      DiveFilterState insightsFilter = const DiveFilterState(),
+    }) async {
+      tester.view.physicalSize = const Size(800, 1000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final router = GoRouter(
+        initialLocation: '/insights',
+        routes: [
+          GoRoute(
+            path: '/insights',
+            builder: (_, _) => const Scaffold(
+              body: SingleChildScrollView(child: TankConfigurationCard()),
+            ),
+          ),
+          GoRoute(path: '/dives', builder: (_, _) => const Text('dive list')),
+        ],
+      );
+      await tester.pumpWidget(
+        testAppRouter(
+          router: router,
+          overrides: [
+            ...await getBaseOverrides(),
+            insightsFilterProvider.overrideWith((ref) => insightsFilter),
+            insightsRepositoryProvider.overrideWithValue(repository),
+            tankConfigurationStatsProvider.overrideWith((ref) async => stats),
+            twinSetCandidatesProvider.overrideWith((ref) async => noCandidates),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      return ProviderScope.containerOf(
+        tester.element(find.byType(TankConfigurationCard)),
+      );
+    }
+
+    ConditionNode field(String key, QueryValue value) =>
+        ConditionNode(FieldPath([key]), QueryOp.eq, value);
+
+    // The count sort puts Sidemount above Single backmount, the reverse of
+    // the stats' own order, so the row index alone says nothing.
+    testWidgets('a bar opens the configuration it shows after the sort', (
+      tester,
+    ) async {
+      final container = await pumpRouted(
+        tester,
+        tenDives,
+        insightsFilter: const DiveFilterState(minDepth: 18),
+      );
+
+      await tester.tap(find.text('Single backmount'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('dive list'), findsOneWidget);
+      expect(repository.lastFilter?.minDepth, 18);
+      expect(
+        repository.lastFilter?.query,
+        AndNode([
+          field('tankConfig', const EnumValue('singleBackmount')),
+          field('planned', const BoolValue(false)),
+          field('excludedFromStats', const BoolValue(false)),
+        ]),
+      );
+      expect(
+        container.read(diveFilterProvider).diveIdsLabel,
+        'Tank configuration: Single backmount',
+      );
+    });
+
+    testWidgets('an extra opens that extra', (tester) async {
+      final container = await pumpRouted(
+        tester,
+        const TankConfigurationStats(
+          totalDives: 10,
+          baseCounts: {TankBaseConfiguration.singleBackmount: 10},
+          extraCounts: {
+            TankConfigurationExtra.stages: 2,
+            TankConfigurationExtra.multiGas: 7,
+          },
+        ),
+      );
+
+      await tester.tap(find.text('Stage(s)'));
+      await tester.pumpAndSettle();
+
+      expect(
+        repository.lastFilter?.query,
+        AndNode([
+          field('stages', const BoolValue(true)),
+          field('planned', const BoolValue(false)),
+          field('excludedFromStats', const BoolValue(false)),
+        ]),
+      );
+      expect(container.read(diveFilterProvider).diveIds, ['d1']);
+    });
   });
 }

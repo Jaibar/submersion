@@ -1,5 +1,6 @@
 import 'dart:isolate';
 
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_planner/domain/entities/plan_result.dart';
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
@@ -31,11 +32,12 @@ Future<MissionOutcome> runMissionEngineInIsolate(
   DpvMission mission,
   PlanEngineConfig config,
 ) {
-  return Isolate.run(
-    () => MissionEngine(
-      scenarios: MissionScenarioService(engine: PlanEngine(config: config)),
-    ).compute(plan: plan, mission: mission),
-  );
+  MissionOutcome compute() => MissionEngine(
+    scenarios: MissionScenarioService(engine: PlanEngine(config: config)),
+  ).compute(plan: plan, mission: mission);
+  // A browser has no isolates; the engine shares the main thread there.
+  if (HostPlatform.isWeb) return Future.sync(compute);
+  return Isolate.run(compute);
 }
 
 final missionEngineRunnerProvider = Provider<MissionEngineRunner>(
@@ -49,17 +51,10 @@ final missionSettleDelayProvider = Provider<Duration>(
   (ref) => const Duration(milliseconds: 150),
 );
 
-final _epoch = DateTime.utc(2000);
-
-/// What the engine reads: the plan without its name, notes and timestamps,
-/// which change on a rename or a save and never change the outcome.
 (domain.DivePlan?, DpvMission?) _missionInputs(DivePlanState s) {
   final mission = s.mission;
   if (mission == null) return (null, null);
-  final plan = divePlanFromState(
-    s,
-  ).copyWith(name: '', notes: '', createdAt: _epoch, updatedAt: _epoch);
-  return (plan, mission);
+  return (planForEngine(s), mission);
 }
 
 /// The failure-scenario outcome of the plan's DPV mission, or null when the

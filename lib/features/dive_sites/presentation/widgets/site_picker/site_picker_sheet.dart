@@ -17,7 +17,6 @@ import 'package:submersion/features/dive_sites/presentation/providers/site_provi
 import 'package:submersion/features/dive_sites/presentation/widgets/similar_value_hint.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_picker/grouped_site_list_view.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_picker/site_picker_site_tile.dart';
-import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Identifies the picker's scrolling list, for tests.
@@ -70,6 +69,7 @@ Future<SitePickerResult?> showSitePicker(
   return showModalBottomSheet<SitePickerResult>(
     context: context,
     isScrollControlled: true,
+    useSafeArea: true,
     builder: (sheetContext) => DraggableScrollableSheet(
       initialChildSize: 0.7,
       minChildSize: 0.5,
@@ -300,7 +300,7 @@ class _SitePickerSheetState extends ConsumerState<SitePickerSheet> {
   @override
   Widget build(BuildContext context) {
     final sitesAsync = ref.watch(sitesProvider);
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
     final colorScheme = Theme.of(context).colorScheme;
     final query = SiteQuery(_searchQuery);
     final sites = sitesAsync.value ?? const <DiveSite>[];

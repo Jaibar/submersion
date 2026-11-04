@@ -1,8 +1,7 @@
-import 'dart:io';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
 
@@ -164,9 +163,20 @@ class MetadataWriteService {
   @visibleForTesting
   static bool? debugSupportedOverride;
 
+  /// Whether [item] is something this service can write to at all: a photo in
+  /// a device library, on a platform with a native writer.
+  ///
+  /// Media with no library asset (a Files tab pick, a cloud-backed row, a
+  /// linked URL) has no original to edit in place, so the action is not
+  /// offered for it (issue #3808).
+  bool canWriteTo(MediaItem item) =>
+      isSupported && item.isGalleryPhoto && !item.isVideo;
+
   /// Write dive metadata to a photo in the device library.
   ///
-  /// [platformAssetId] - The platform-specific asset identifier.
+  /// [platformAssetId] - This device's identifier for the asset. A row's stored
+  ///                     id belongs to the device that linked it, so pass the
+  ///                     id `AssetResolutionService` resolves.
   /// [metadata] - The dive metadata to write.
   /// [isVideo] - Whether the caller believes the asset is a video. Videos are
   ///             refused two ways. When this is true the refusal happens here,
@@ -281,7 +291,8 @@ class MetadataWriteService {
 
   /// Check if metadata writing is supported on this platform.
   bool get isSupported {
-    var supported = Platform.isIOS || Platform.isMacOS || Platform.isAndroid;
+    var supported =
+        HostPlatform.isIOS || HostPlatform.isMacOS || HostPlatform.isAndroid;
     // The override is read inside an assert so it is compiled out of release
     // builds entirely: production behavior cannot be changed by assigning it,
     // whatever the analyzer's @visibleForTesting enforcement does or does not
@@ -297,9 +308,9 @@ class MetadataWriteService {
 
   /// Get supported file types for the current platform.
   List<String> get supportedTypes {
-    if (Platform.isIOS || Platform.isMacOS) {
+    if (HostPlatform.isIOS || HostPlatform.isMacOS) {
       return ['JPEG', 'HEIC', 'HEIF', 'PNG'];
-    } else if (Platform.isAndroid) {
+    } else if (HostPlatform.isAndroid) {
       return ['JPEG', 'PNG'];
     }
     return [];

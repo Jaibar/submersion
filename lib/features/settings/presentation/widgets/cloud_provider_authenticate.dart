@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/data/repositories/sync_repository.dart'
     show CloudProviderType;
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
@@ -30,20 +30,29 @@ class CloudAuthCancelled implements Exception {
 ///
 /// Throws [CloudAuthCancelled] if the user cancels.
 ///
+/// [signIn] replaces [CloudStorageProvider.authenticate] for a caller that
+/// has more to say about the sign-in, such as which account it expects.
+///
 /// [debugForceBrowserWait] overrides the platform check so the dialog branch
 /// is reachable in tests on any host; production callers leave it null.
 Future<void> authenticateWithBrowserWait(
   BuildContext context,
   CloudStorageProvider cloudProvider,
   CloudProviderType provider, {
+  Future<void> Function()? signIn,
   @visibleForTesting bool? debugForceBrowserWait,
+  // A web page reporting a desktop OS has no loopback flow to wait for
+  // (issue #4121).
+  bool isBrowser = false,
 }) async {
+  final authenticate = signIn ?? cloudProvider.authenticate;
   final needsDialog =
       debugForceBrowserWait ??
-      (provider == CloudProviderType.googledrive &&
-          (Platform.isWindows || Platform.isLinux));
+      (!isBrowser &&
+          provider == CloudProviderType.googledrive &&
+          (HostPlatform.isWindows || HostPlatform.isLinux));
   if (!needsDialog) {
-    await cloudProvider.authenticate();
+    await authenticate();
     return;
   }
 
@@ -61,7 +70,7 @@ Future<void> authenticateWithBrowserWait(
     navigator.pop(cancelled);
   }
 
-  final auth = cloudProvider.authenticate();
+  final auth = authenticate();
   unawaited(
     auth.then((_) => closeDialog(false), onError: (_) => closeDialog(false)),
   );

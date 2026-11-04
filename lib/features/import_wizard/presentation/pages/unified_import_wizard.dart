@@ -19,6 +19,7 @@ import 'package:submersion/shared/widgets/wizard/wizard_step_def.dart';
 import 'package:submersion/features/import_wizard/domain/services/step_skip_calculator.dart';
 import 'package:submersion/features/import_wizard/presentation/providers/import_job_provider.dart';
 import 'package:submersion/features/import_wizard/presentation/providers/import_wizard_providers.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/dive_computer_scan_scope.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/running_import_gate.dart';
 import 'package:submersion/features/rules/presentation/providers/rule_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
@@ -27,88 +28,10 @@ import 'package:submersion/features/import_wizard/presentation/widgets/import_pr
 import 'package:submersion/features/import_wizard/presentation/pages/step_indicator_view.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/import_summary_step.dart';
 import 'package:submersion/features/import_wizard/presentation/widgets/review_step.dart';
+import 'package:submersion/features/import_wizard/presentation/widgets/wizard_message.dart';
 import 'package:submersion/shared/widgets/wizard/wizard_step_indicator.dart';
 
-/// The unified import wizard shell.
-///
-/// Accepts an [ImportSourceAdapter] and orchestrates the full import flow:
-/// acquisition steps (source-specific), review, import progress, and summary.
-///
-/// The adapter is a per-session object: it accumulates acquisition state
-/// (a dive computer download, a picked file) that the later steps consume.
-/// The wizard therefore pins the adapter it is first built with and keeps
-/// using it even if an ancestor rebuilds this widget with a different
-/// instance. Route builders create their adapter in `build`, so a provider
-/// re-emitting mid-session (the dive computer download route watches the
-/// computer record, which the download itself writes on completion) would
-/// otherwise swap in a fresh, empty adapter between the download and the
-/// Review step.
-class UnifiedImportWizard extends StatefulWidget {
-  const UnifiedImportWizard({
-    super.key,
-    required this.adapter,
-    this.initialPageOverride,
-    this.notifierFactoryOverride,
-  });
-
-  /// The adapter this widget was built with. The session adapter is the one
-  /// the wizard was FIRST built with; see the class doc.
-  final ImportSourceAdapter adapter;
-
-  /// Optional starting page for widget tests that need to exercise behavior
-  /// on pages past the acquisition/review flow (e.g. the cancel dialog on
-  /// the import-progress page) without driving the full adapter through
-  /// [ImportSourceAdapter.buildBundle] and [performImport].
-  @visibleForTesting
-  final int? initialPageOverride;
-
-  /// Optional notifier factory for tests that need to inject a pre-configured
-  /// [ImportWizardNotifier] (e.g. one whose state already has
-  /// `isCancellationRequested: true` so the "already cancelling" dialog
-  /// branch can be exercised).
-  @visibleForTesting
-  final ImportWizardNotifier Function(Ref ref)? notifierFactoryOverride;
-
-  @override
-  State<UnifiedImportWizard> createState() => _UnifiedImportWizardState();
-}
-
-class _UnifiedImportWizardState extends State<UnifiedImportWizard> {
-  /// The session adapter, captured once. Deliberately not refreshed in
-  /// didUpdateWidget: a replacement instance carries none of the state the
-  /// acquisition steps already committed to this one.
-  late final ImportSourceAdapter _adapter = widget.adapter;
-
-  @override
-  Widget build(BuildContext context) {
-    return RunningImportGate(
-      title: _adapter.displayName,
-      child: ProviderScope(
-        overrides: [
-          importWizardNotifierProvider.overrideWith(
-            widget.notifierFactoryOverride ??
-                (ref) => ImportWizardNotifier(
-                  _adapter,
-                  tagRepository: ref.read(tagRepositoryProvider),
-                  ruleEngine: ref.read(ruleEngineProvider),
-                  gpsTrackMatchService: ref.read(gpsTrackMatchServiceProvider),
-                  equipmentDefaulter: DiveEquipmentDefaulter(),
-                  job: ref.read(importJobProvider.notifier),
-                  // Only the universal adapters read through a container
-                  // that outlives the wizard (#3554); every other source
-                  // stops when the wizard goes away.
-                  continuesWithoutWizard: _adapter is UniversalAdapter,
-                ),
-          ),
-        ],
-        child: _UnifiedImportWizardBody(
-          adapter: _adapter,
-          initialPageOverride: widget.initialPageOverride,
-        ),
-      ),
-    );
-  }
-}
+part 'unified_import_wizard_session.dart';
 
 class _UnifiedImportWizardBody extends ConsumerStatefulWidget {
   const _UnifiedImportWizardBody({
@@ -138,9 +61,18 @@ class _UnifiedImportWizardBodyState
   /// the whole advance (bundle build included) a second time.
   bool _advancing = false;
 
+  /// True while a step's work runs, which is what the bottom bar shows: a
+  /// large file can take a while on a worker, with the app live around it.
+  /// Back is held as well as Next, because [_advance] carries on from
+  /// wherever the wizard is when that work ends.
+  bool _stepWorking = false;
+
   /// Why the last Next tap did not move the wizard on, shown above the bottom
   /// bar until the next attempt. Null while nothing has failed.
   String? _advanceError;
+
+  /// The step whose `onBeforeAdvance` is running, if any.
+  WizardStepDef? _advancingStep;
 
   static const _log = LoggerService('UnifiedImportWizard');
 
@@ -206,6 +138,7 @@ class _UnifiedImportWizardBodyState
 
   @override
   void dispose() {
+    _advancingStep?.onCancelAdvance?.call();
     _pageController.dispose();
     super.dispose();
   }
@@ -257,13 +190,17 @@ class _UnifiedImportWizardBodyState
     }
     try {
       await _advance();
+    } on ImportStepCancelled {
+      // The diver stopped the step, so there is nothing to report. As with a
+      // failure, the wizard has to stop arming auto-advance on this step.
+      _navigatingForward = false;
     } catch (e, stackTrace) {
       // An ImportStepFailure carries text the step wrote for the user.
-      // Anything else -- a database read the duplicate check made, a parser
-      // blowing up on an unexpected shape -- is unexpected, so log it and
-      // wrap it. Before this, the future returned by _onNext was dropped on
-      // the floor by the Next button's VoidCallback, so either kind of throw
-      // surfaced nowhere at all and the button simply looked dead.
+      // Anything else, such as a failed database read or a parser blowing up
+      // on an unexpected shape, is unexpected, so log it and wrap it. Before
+      // this, the future returned by _onNext was dropped on the floor by the
+      // Next button's VoidCallback, so either kind of throw surfaced nowhere
+      // at all and the button simply looked dead.
       if (e is! ImportStepFailure) {
         _log.error(
           'Import wizard could not advance',
@@ -287,15 +224,22 @@ class _UnifiedImportWizardBodyState
       });
     } finally {
       _advancing = false;
+      _setStepWorking(false);
     }
+  }
+
+  void _setStepWorking(bool working) {
+    if (!mounted || _stepWorking == working) return;
+    setState(() => _stepWorking = working);
   }
 
   Future<void> _advance() async {
     _navigatingForward = true;
     if (_currentPage < _reviewIndex) {
+      _setStepWorking(true);
+
       // Let the current step commit any pending state before we leave it.
-      final step = _acquisitionSteps[_currentPage];
-      await step.onBeforeAdvance?.call();
+      await _beforeAdvance(_acquisitionSteps[_currentPage]);
       if (!mounted) return;
 
       // Determine the next page. Skip any remaining acquisition steps whose
@@ -313,7 +257,7 @@ class _UnifiedImportWizardBodyState
 
       // Run onBeforeAdvance for each skipped step so it can finalize state.
       for (final step in skipped) {
-        await step.onBeforeAdvance?.call();
+        await _beforeAdvance(step);
         if (!mounted) return;
       }
 
@@ -321,7 +265,7 @@ class _UnifiedImportWizardBodyState
       if (nextPage >= _reviewIndex) {
         final bundle = await widget.adapter.buildBundle();
         if (!mounted) return;
-        // Duplicate detection reads the whole existing library and is only an
+        // Duplicate detection reads the existing library and is only an
         // advisory overlay on the review list. Letting it throw here used to
         // abandon the advance entirely, which is what a large or unhappy
         // library looked like from the outside: Next did nothing, forever.
@@ -353,9 +297,21 @@ class _UnifiedImportWizardBodyState
               autoTagImports: ref.read(settingsProvider).autoTagImports,
             );
       }
+      _setStepWorking(false);
       await _animateToPage(nextPage);
     } else if (_currentPage == _reviewIndex) {
       await _startImport();
+    }
+  }
+
+  /// Runs [step]'s `onBeforeAdvance`, remembering the step so that leaving
+  /// while it runs can stop it.
+  Future<void> _beforeAdvance(WizardStepDef step) async {
+    _advancingStep = step;
+    try {
+      await step.onBeforeAdvance?.call();
+    } finally {
+      _advancingStep = null;
     }
   }
 
@@ -555,7 +511,7 @@ class _UnifiedImportWizardBodyState
             ),
           ),
           if (_advanceError != null && _currentPage < _reviewIndex)
-            _WizardMessage(
+            WizardMessage(
               message: _advanceError!,
               icon: Icons.error_outline,
               isError: true,
@@ -570,7 +526,7 @@ class _UnifiedImportWizardBodyState
                 ),
               ) &&
               _currentPage == _reviewIndex)
-            _WizardMessage(
+            WizardMessage(
               message: context.l10n.universalImport_error_duplicateCheckFailed,
               icon: Icons.warning_amber_outlined,
               isError: false,
@@ -594,10 +550,12 @@ class _UnifiedImportWizardBodyState
                 style: OutlinedButton.styleFrom(
                   minimumSize: const Size(100, 48),
                 ),
-                onPressed: () {
-                  _navigatingForward = false;
-                  _animateToPage(_currentPage - 1);
-                },
+                onPressed: _stepWorking
+                    ? null
+                    : () {
+                        _navigatingForward = false;
+                        _animateToPage(_currentPage - 1);
+                      },
                 child: Text(context.l10n.common_action_back),
               ),
             const Spacer(),
@@ -605,6 +563,7 @@ class _UnifiedImportWizardBodyState
               _AcquisitionNextButton(
                 stepIndex: _currentPage,
                 step: _acquisitionSteps[_currentPage],
+                working: _stepWorking,
                 onNext: _onNext,
               )
             else if (_currentPage == _reviewIndex)
@@ -615,51 +574,6 @@ class _UnifiedImportWizardBodyState
               ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Inline message strip shown between the step content and the bottom bar
-// ---------------------------------------------------------------------------
-
-class _WizardMessage extends StatelessWidget {
-  const _WizardMessage({
-    required this.message,
-    required this.icon,
-    required this.isError,
-  });
-
-  final String message;
-  final IconData icon;
-  final bool isError;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final foreground = isError
-        ? theme.colorScheme.onErrorContainer
-        : theme.colorScheme.onTertiaryContainer;
-
-    return Container(
-      width: double.infinity,
-      color: isError
-          ? theme.colorScheme.errorContainer
-          : theme.colorScheme.tertiaryContainer,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ExcludeSemantics(child: Icon(icon, size: 20, color: foreground)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              message,
-              style: theme.textTheme.bodySmall?.copyWith(color: foreground),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -720,21 +634,33 @@ class _AcquisitionNextButton extends ConsumerWidget {
   const _AcquisitionNextButton({
     required this.stepIndex,
     required this.step,
+    required this.working,
     required this.onNext,
   });
 
   final int stepIndex;
   final WizardStepDef step;
+  final bool working;
   final VoidCallback onNext;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final canAdvance = ref.watch(step.canAdvance);
 
-    return FilledButton(
+    return FilledButton.icon(
       style: FilledButton.styleFrom(minimumSize: const Size(120, 48)),
-      onPressed: canAdvance ? onNext : null,
-      child: Text(context.l10n.universalImport_action_next),
+      onPressed: canAdvance && !working ? onNext : null,
+      icon: working
+          ? SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                semanticsLabel: context.l10n.common_label_loading,
+              ),
+            )
+          : null,
+      label: Text(context.l10n.universalImport_action_next),
     );
   }
 }

@@ -44,6 +44,8 @@ class EquipmentLocationRepository {
     required String? diverId,
     required String name,
     required EquipmentLocationKind kind,
+    String? diveCenterId,
+    String? buddyId,
     String notes = '',
   }) async {
     final trimmed = _requireName(name);
@@ -60,6 +62,8 @@ class EquipmentLocationRepository {
               diverId: Value(diverId),
               name: trimmed,
               kind: Value(kind.name),
+              diveCenterId: Value(diveCenterId),
+              buddyId: Value(buddyId),
               notes: Value(notes.trim()),
               createdAt: now,
               updatedAt: now,
@@ -71,7 +75,7 @@ class EquipmentLocationRepository {
     return (await getLocation(id))!;
   }
 
-  /// Saves [location]'s name, kind, notes and archived flag.
+  /// Saves [location]'s name, kind, links, notes and archived flag.
   Future<void> updateLocation(EquipmentLocation location) async {
     final trimmed = _requireName(location.name);
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -82,6 +86,8 @@ class EquipmentLocationRepository {
         EquipmentLocationsCompanion(
           name: Value(trimmed),
           kind: Value(location.kind.name),
+          diveCenterId: Value(location.diveCenterId),
+          buddyId: Value(location.buddyId),
           notes: Value(location.notes.trim()),
           isArchived: Value(location.isArchived),
           updatedAt: Value(now),
@@ -156,6 +162,30 @@ class EquipmentLocationRepository {
     );
   }
 
+  /// The diver's active Person place linked to [buddyId], the most recently
+  /// updated of several; failing that, a new one called [name]. An archived
+  /// link is left archived, so lending never brings a retired place back.
+  Future<EquipmentLocation> findOrCreateForBuddy({
+    required String? diverId,
+    required String buddyId,
+    required String name,
+  }) async {
+    final linked = [
+      for (final l in await getLocations(diverId: diverId))
+        if (l.buddyId == buddyId &&
+            l.kind == EquipmentLocationKind.person &&
+            !l.isArchived)
+          l,
+    ]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    if (linked.isNotEmpty) return linked.first;
+    return createLocation(
+      diverId: diverId,
+      name: name,
+      kind: EquipmentLocationKind.person,
+      buddyId: buddyId,
+    );
+  }
+
   String _requireName(String name) {
     final trimmed = name.trim();
     if (trimmed.isEmpty) {
@@ -172,6 +202,8 @@ class EquipmentLocationRepository {
     diverId: r.diverId,
     name: r.name,
     kind: EquipmentLocationKind.fromName(r.kind),
+    diveCenterId: r.diveCenterId,
+    buddyId: r.buddyId,
     notes: r.notes,
     isArchived: r.isArchived,
     createdAt: DateTime.fromMillisecondsSinceEpoch(r.createdAt),

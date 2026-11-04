@@ -214,6 +214,7 @@ class _FillSheetState extends ConsumerState<_FillSheet> {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (sheetContext) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -391,7 +392,7 @@ class _FillSheetState extends ConsumerState<_FillSheet> {
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final theme = Theme.of(context);
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
     final centers =
         ref.watch(allDiveCentersProvider).value ?? const <DiveCenter>[];
     final centerName = centers

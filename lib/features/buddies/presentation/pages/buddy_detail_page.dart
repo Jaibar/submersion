@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:submersion/features/change_log/presentation/widgets/change_log_history_menu_item.dart';
 import 'package:submersion/features/connections/domain/entities/connection_kind.dart';
 import 'package:submersion/features/connections/domain/entities/node_ref.dart';
 import 'package:submersion/features/connections/presentation/widgets/open_in_connections.dart';
@@ -19,6 +20,7 @@ import 'package:submersion/features/buddies/data/repositories/buddy_repository.d
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
 import 'package:submersion/features/buddies/presentation/widgets/buddy_favorite_button.dart';
+import 'package:submersion/features/buddies/presentation/widgets/buddy_gear_section.dart';
 import 'package:submersion/features/buddies/presentation/widgets/buddy_photos_section.dart';
 import 'package:submersion/features/buddies/presentation/widgets/buddy_shared_dives_section.dart';
 import 'package:submersion/features/buddies/presentation/widgets/buddy_card_details_section.dart';
@@ -30,6 +32,7 @@ import 'package:submersion/features/certification_agencies/presentation/provider
 import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
 import 'package:submersion/features/documents/presentation/widgets/documents_section.dart';
 import 'package:submersion/features/documents/domain/entities/document.dart';
+import 'package:submersion/features/equipment/presentation/widgets/lend_gear_flow.dart';
 import 'package:submersion/shared/widgets/detail_row/detail_row_group.dart';
 import 'package:submersion/shared/widgets/markdown_notes/markdown_notes_view.dart';
 
@@ -137,7 +140,7 @@ class _BuddyDetailContent extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(certificationCatalogSyncProvider);
     final statsAsync = ref.watch(buddyStatsProvider(buddy.id));
-    final units = UnitFormatter(ref.watch(settingsProvider));
+    final units = ref.watch(unitFormatterProvider);
 
     final body = SingleChildScrollView(
       controller: DetailScrollController.maybeOf(context),
@@ -171,6 +174,10 @@ class _BuddyDetailContent extends ConsumerWidget {
           // Statistics
           _buildStatsSection(context, statsAsync, units),
           const SizedBox(height: 24),
+
+          // Gear they have (issue #3790), with its own spacing: most buddies
+          // have none and show no gap.
+          BuddyGearSection(buddy: buddy),
 
           // Notes
           if (buddy.notes.isNotEmpty) ...[
@@ -217,6 +224,8 @@ class _BuddyDetailContent extends ConsumerWidget {
                   context,
                   NodeRef(ConnectionKind.buddy, buddy.id),
                 );
+              } else if (value == 'lend') {
+                await showLendGearFlow(context, ref, buddy);
               } else if (value == 'share') {
                 await _shareDivesWithBuddy(context, ref);
               } else if (value == 'delete') {
@@ -224,7 +233,22 @@ class _BuddyDetailContent extends ConsumerWidget {
               }
             },
             itemBuilder: (context) => [
+              changeLogHistoryMenuItem(
+                context,
+                rootTable: 'buddies',
+                rootId: buddy.id,
+              ),
               openInConnectionsMenuItem(context),
+              PopupMenuItem(
+                value: 'lend',
+                child: Row(
+                  children: [
+                    const Icon(Icons.volunteer_activism_outlined),
+                    const SizedBox(width: 8),
+                    Text(context.l10n.buddies_action_lendGear),
+                  ],
+                ),
+              ),
               PopupMenuItem(
                 value: 'share',
                 child: Row(
@@ -333,6 +357,8 @@ class _BuddyDetailContent extends ConsumerWidget {
                   context,
                   NodeRef(ConnectionKind.buddy, buddy.id),
                 );
+              } else if (value == 'lend') {
+                await showLendGearFlow(context, ref, buddy);
               } else if (value == 'share') {
                 await _shareDivesWithBuddy(context, ref);
               } else if (value == 'delete') {
@@ -340,7 +366,22 @@ class _BuddyDetailContent extends ConsumerWidget {
               }
             },
             itemBuilder: (context) => [
+              changeLogHistoryMenuItem(
+                context,
+                rootTable: 'buddies',
+                rootId: buddy.id,
+              ),
               openInConnectionsMenuItem(context),
+              PopupMenuItem(
+                value: 'lend',
+                child: Row(
+                  children: [
+                    const Icon(Icons.volunteer_activism_outlined, size: 20),
+                    const SizedBox(width: 8),
+                    Text(context.l10n.buddies_action_lendGear),
+                  ],
+                ),
+              ),
               PopupMenuItem(
                 value: 'share',
                 child: Row(
@@ -581,10 +622,33 @@ class _BuddyDetailContent extends ConsumerWidget {
                 error: (error, _) =>
                     Text(context.l10n.buddies_error_unableToLoadStats),
               ),
+              if (buddy.excludedFromRankings) ...[
+                const SizedBox(height: 12),
+                _buildExcludedFromRankingsNote(context),
+              ],
             ],
           ),
         ),
       ),
+    );
+  }
+
+  /// Says why a buddy with plenty of dives is missing from the rankings
+  /// (issue #3624).
+  Widget _buildExcludedFromRankingsNote(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = theme.colorScheme.onSurfaceVariant;
+    return Row(
+      children: [
+        Icon(Icons.leaderboard_outlined, size: 20, color: color),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            context.l10n.buddies_stat_excludedFromRankings,
+            style: theme.textTheme.bodyMedium?.copyWith(color: color),
+          ),
+        ),
+      ],
     );
   }
 

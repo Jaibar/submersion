@@ -7,7 +7,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/equipment/domain/models/equipment_arrangement.dart';
 import 'package:submersion/core/theme/feature_accent_colors.dart';
-import 'package:submersion/features/auto_update/domain/entities/update_status.dart';
 import 'package:submersion/features/auto_update/presentation/providers/update_providers.dart';
 import 'package:submersion/features/auto_update/presentation/widgets/update_banner.dart';
 import 'package:submersion/features/dive_computer/domain/entities/downloaded_dive.dart';
@@ -23,6 +22,8 @@ import 'package:submersion/shared/widgets/master_detail/list_memory_scope.dart';
 import 'package:submersion/shared/widgets/nav/nav_order_provider.dart';
 import 'package:submersion/shared/widgets/shell_chrome_scope.dart';
 import 'package:submersion/features/gas_calculators/domain/blending/blender_preferences.dart';
+
+import '../../helpers/main_scaffold_stubs.dart';
 
 Future<Widget> _buildTestApp({
   String initialLocation = '/dashboard',
@@ -87,9 +88,9 @@ Future<Widget> _buildTestApp({
     overrides: [
       sharedPreferencesProvider.overrideWithValue(prefs),
       updateServiceProvider.overrideWith((ref) async => null),
-      updateStatusProvider.overrideWith((ref) => _StubUpdateStatusNotifier()),
-      downloadNotifierProvider.overrideWith((ref) => _StubDownloadNotifier()),
-      settingsProvider.overrideWith((ref) => _StubSettingsNotifier(settings)),
+      updateStatusProvider.overrideWith((ref) => StubUpdateStatusNotifier()),
+      downloadNotifierProvider.overrideWith((ref) => StubDownloadNotifier()),
+      settingsProvider.overrideWith((ref) => StubSettingsNotifier(settings)),
       ...extraOverrides.cast(),
     ],
     child: MaterialApp.router(
@@ -102,24 +103,6 @@ Future<Widget> _buildTestApp({
       supportedLocales: AppLocalizations.supportedLocales,
     ),
   );
-}
-
-/// Stub that avoids the 5-second timer in the real [UpdateStatusNotifier].
-class _StubUpdateStatusNotifier extends StateNotifier<UpdateStatus>
-    implements UpdateStatusNotifier {
-  _StubUpdateStatusNotifier() : super(const UpToDate());
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
-
-/// Stub that avoids platform channel dependencies.
-class _StubDownloadNotifier extends StateNotifier<DownloadState>
-    implements DownloadNotifier {
-  _StubDownloadNotifier() : super(const DownloadState());
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// Reports a download in flight, so tapping a destination raises the exit
@@ -135,16 +118,6 @@ class _DownloadingStubNotifier extends StateNotifier<DownloadState>
   Future<void> cancelDownload() async {
     cancelled = true;
   }
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
-
-/// Stub settings notifier so the accent tests can drive the toggles without
-/// touching the database.
-class _StubSettingsNotifier extends StateNotifier<AppSettings>
-    implements SettingsNotifier {
-  _StubSettingsNotifier(super.initial);
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -329,8 +302,9 @@ void main() {
       await tester.pumpWidget(await _buildTestApp());
       await tester.pumpAndSettle();
 
-      // Tracks is rail index 13 (after Transfer, before Settings; Media and
-      // Documents, issue #3631, share one slot earlier in the rail).
+      // Tracks is rail index 13 (after Transfer, before Search and
+      // Settings; Media and Documents, issue #3631, share one slot earlier
+      // in the rail).
       final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
       rail.onDestinationSelected!(13);
       await tester.pumpAndSettle();
@@ -512,13 +486,13 @@ void main() {
           sharedPreferencesProvider.overrideWithValue(prefs),
           updateServiceProvider.overrideWith((ref) async => null),
           updateStatusProvider.overrideWith(
-            (ref) => _StubUpdateStatusNotifier(),
+            (ref) => StubUpdateStatusNotifier(),
           ),
           downloadNotifierProvider.overrideWith(
-            (ref) => downloadNotifier?.call() ?? _StubDownloadNotifier(),
+            (ref) => downloadNotifier?.call() ?? StubDownloadNotifier(),
           ),
           settingsProvider.overrideWith(
-            (ref) => _StubSettingsNotifier(const AppSettings()),
+            (ref) => StubSettingsNotifier(const AppSettings()),
           ),
         ],
         child: MaterialApp.router(
@@ -934,7 +908,7 @@ void main() {
       expect(find.widgetWithText(NavigationDestination, 'Trips'), findsNothing);
     });
 
-    testWidgets('wide-screen rail still shows all 15 default destinations', (
+    testWidgets('wide-screen rail still shows all 16 default destinations', (
       tester,
     ) async {
       // Wide viewport (desktop-extended so rail labels are rendered as Text).
@@ -948,12 +922,12 @@ void main() {
       await tester.pumpAndSettle();
 
       // The rail reads its own storage key, which this repo leaves unset, so
-      // it keeps the default 15-entry order no matter how the phone bottom
+      // it keeps the default 16-entry order no matter how the phone bottom
       // bar was customized. That independence is the point of the two keys.
       // NavigationRailDestination is a descriptor (not a Widget), so inspect
       // the NavigationRail.destinations list directly.
       final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
-      expect(rail.destinations, hasLength(15));
+      expect(rail.destinations, hasLength(16));
 
       String labelOf(NavigationRailDestination d) {
         final label = d.label;
@@ -977,6 +951,7 @@ void main() {
         'Planning',
         'Transfer',
         'Tracks',
+        'Search',
         'Settings',
       ]);
     });
@@ -1024,7 +999,7 @@ void main() {
       await tester.pumpAndSettle();
 
       final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
-      expect(rail.destinations, hasLength(15));
+      expect(rail.destinations, hasLength(16));
 
       String labelOf(NavigationRailDestination d) {
         final label = d.label;
@@ -1041,7 +1016,7 @@ void main() {
         'Dives',
       ]);
       // Nothing is lost: every destination still has a rail row.
-      expect(labels.toSet(), hasLength(15));
+      expect(labels.toSet(), hasLength(16));
     });
 
     testWidgets('rail customization leaves the phone bottom bar alone', (

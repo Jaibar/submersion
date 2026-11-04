@@ -6,6 +6,9 @@ import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_files.dart';
+
 /// A full base export that has been written to disk but not yet fully uploaded.
 ///
 /// A backend wipe forces the whole library to be republished as a fresh base --
@@ -60,8 +63,8 @@ class ResumableBasePublish {
 
   /// Reused rather than regenerated. The nonce is written into the exported
   /// bytes, so it cannot be restamped at manifest time without desyncing the
-  /// manifest from the base it describes. It was recorded before the first
-  /// attempt, so twin detection still recognises it as ours.
+  /// manifest from the base it describes. Twin detection learns it when the
+  /// manifest carrying it is written, whichever attempt that turns out to be.
   final String? uploadNonce;
 
   /// The watermark this base publishes, from the export. Rows written after the
@@ -118,22 +121,41 @@ class ResumableBasePublish {
 /// apart or outlive one another. It also keeps this off the schema ladder
 /// entirely, so recovering an interrupted publish needs no migration.
 class ResumableBasePublishStore {
-  ResumableBasePublishStore({Future<Directory> Function()? directory})
-    : _directory = directory ?? resolveBasePublishDir;
+  ResumableBasePublishStore({
+    Future<Directory> Function()? directory,
+    bool? persistent,
+  }) : _directory = directory ?? resolveBasePublishDir,
+       persistent = persistent ?? !HostPlatform.isWeb;
 
   final Future<Directory> Function() _directory;
 
-  /// How recently an unreferenced export must have been touched to be spared
-  /// as "probably still being written" rather than swept as an orphan.
+  /// Whether an export can outlive this attempt. A browser has no directory
+  /// to park one in (issue #4121): the export stays in the sync temp files,
+  /// nothing is recorded, and a publish cut short starts over, its leftover
+  /// removed by the temp sweep.
+  final bool persistent;
+
+  /// How recently an export no publish here will resume must have been touched
+  /// to be spared as "probably still in flight" rather than swept: one with no
+  /// sidecar, or one recorded under another device id.
   static const Duration _orphanGrace = Duration(minutes: 5);
+
+  /// How long an export parked under another backend waits for the diver to
+  /// come back to it, before it counts as left behind.
+  static const Duration _otherBackendGrace = Duration(days: 30);
 
   Future<Directory> get directory => _directory();
 
   /// Record [publish], overwriting any previous record for its data file.
+  ///
+  /// Through a rename, so [find] cannot catch a half-written record and delete
+  /// the export as corrupt. A temp file a crash strands has no sidecar, so
+  /// [_pruneUnreferencedExports] reclaims it.
   Future<void> save(ResumableBasePublish publish) async {
-    await File(
-      publish.sidecarPath,
-    ).writeAsString(jsonEncode(publish.toJson()), flush: true);
+    if (!persistent) return;
+    final temp = File('${publish.sidecarPath}.tmp');
+    await temp.writeAsString(jsonEncode(publish.toJson()), flush: true);
+    await temp.rename(publish.sidecarPath);
   }
 
   /// The resumable publish for [providerId]/[deviceId] under [epochId], or null
@@ -141,14 +163,17 @@ class ResumableBasePublishStore {
   ///
   /// Anything unusable is deleted on the way past, so a doomed export cannot
   /// accumulate: a sidecar whose data file is gone or the wrong size (the OS
-  /// purged or truncated it), one stamped with a different epoch, one whose
-  /// record will not parse, and -- via [_pruneUnreferencedExports] -- an export
-  /// with no sidecar at all.
+  /// purged or truncated it), one stamped with a different epoch, one left by a
+  /// device id this install has since given up (twin split, Reset Sync State),
+  /// one left under another backend for [_otherBackendGrace], one whose record
+  /// will not parse, and (via [_pruneUnreferencedExports]) an export with no
+  /// sidecar at all.
   Future<ResumableBasePublish?> find({
     required String providerId,
     required String deviceId,
     String? epochId,
   }) async {
+    if (!persistent) return null;
     final dir = await directory;
     if (!await dir.exists()) return null;
 
@@ -175,7 +200,14 @@ class ResumableBasePublishStore {
       }
 
       referenced.add(record.dataPath);
-      if (record.providerId != providerId || record.deviceId != deviceId) {
+      if (record.providerId != providerId) {
+        if (await _outlivedGrace(entity, grace: _otherBackendGrace)) {
+          await discard(record);
+        }
+        continue;
+      }
+      if (record.deviceId != deviceId) {
+        if (await _outlivedGrace(entity)) await discard(record);
         continue;
       }
       if (record.epochId != epochId) {
@@ -217,7 +249,6 @@ class ResumableBasePublishStore {
     Directory dir,
     Set<String> referenced,
   ) async {
-    final cutoff = DateTime.now().subtract(_orphanGrace);
     await for (final entity in dir.list(followLinks: false)) {
       if (entity is! File) continue;
       final path = entity.path;
@@ -228,23 +259,41 @@ class ResumableBasePublishStore {
       if (await File(ResumableBasePublish.sidecarPathFor(path)).exists()) {
         continue;
       }
-      try {
-        if ((await entity.stat()).modified.isAfter(cutoff)) continue;
-      } catch (_) {
-        continue;
-      }
-      await _deleteQuietly(path);
+      if (await _outlivedGrace(entity)) await _deleteQuietly(path);
+    }
+  }
+
+  /// Whether [file] has gone untouched for [grace]. A stat that throws reports
+  /// false: when in doubt, nothing here gets deleted.
+  static Future<bool> _outlivedGrace(
+    File file, {
+    Duration grace = _orphanGrace,
+  }) async {
+    final cutoff = DateTime.now().subtract(grace);
+    try {
+      return !(await file.stat()).modified.isAfter(cutoff);
+    } catch (_) {
+      return false;
     }
   }
 
   /// Delete a record and the export it describes.
   Future<void> discard(ResumableBasePublish publish) async {
+    if (!persistent) {
+      // Quiet, as the file path is: the publish this follows has landed,
+      // and the temp sweep reaps a leftover.
+      try {
+        await SyncTempFiles.delete(publish.dataPath);
+      } catch (_) {}
+      return;
+    }
     await _deleteQuietly(publish.sidecarPath);
     await _deleteQuietly(publish.dataPath);
   }
 
   /// Drop every record for [providerId], used when sync state is reset.
   Future<void> clearForProvider(String providerId) async {
+    if (!persistent) return;
     final dir = await directory;
     if (!await dir.exists()) return;
     await for (final entity in dir.list(followLinks: false)) {

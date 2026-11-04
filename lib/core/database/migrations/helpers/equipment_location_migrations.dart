@@ -9,7 +9,12 @@ extension EquipmentLocationMigrations on AppDatabase {
   /// point nowhere. Safe from both the v268 rung and the beforeOpen
   /// backstop.
   Future<void> _assertEquipmentLocationSchema() async {
-    for (final parent in const ['equipment', 'divers']) {
+    for (final parent in const [
+      'equipment',
+      'divers',
+      'dive_centers',
+      'buddies',
+    ]) {
       final rows = await customSelect(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
         variables: [Variable<String>(parent)],
@@ -18,5 +23,25 @@ extension EquipmentLocationMigrations on AppDatabase {
     }
     await Migrator(this).createTable(equipmentLocations);
     await Migrator(this).createTable(equipmentLocationMoves);
+  }
+
+  /// `equipment_locations.dive_center_id` (v331, issue #3623). Safe from
+  /// both the v331 rung and the beforeOpen backstop.
+  Future<void> _assertEquipmentLocationCenterColumn() async {
+    await _addColumnIfMissing(
+      'equipment_locations',
+      'dive_center_id',
+      'TEXT REFERENCES dive_centers(id) ON DELETE SET NULL',
+    );
+  }
+
+  /// `equipment_locations.buddy_id` (v334, issue #3790). Safe from both the
+  /// v334 rung and the beforeOpen backstop.
+  Future<void> _assertEquipmentLocationBuddyColumn() async {
+    await _addColumnIfMissing(
+      'equipment_locations',
+      'buddy_id',
+      'TEXT REFERENCES buddies(id) ON DELETE SET NULL',
+    );
   }
 }

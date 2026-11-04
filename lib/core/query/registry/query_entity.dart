@@ -34,8 +34,15 @@ class QueryEntity {
   final List<String> textSearchTables;
 
   /// Text search alternatives whose binds come from the term itself rather
-  /// than from a LIKE, for names the database does not hold.
+  /// than from a LIKE: names the database does not hold, or a word that means
+  /// an exact value.
   final List<TextSearchExpansion> textSearchExpansions;
+
+  /// Set where a sentence typed in plain words should be understood: date
+  /// phrases filter by date and filler words drop (#3457). Null on any entity
+  /// with no date field to filter by, because global search parses one text
+  /// once per record type and a phrase must not refuse the search there.
+  final PlainWordReading? plainWords;
 
   const QueryEntity({
     required this.subject,
@@ -48,6 +55,7 @@ class QueryEntity {
     this.textSearchSql = const [],
     this.textSearchTables = const [],
     this.textSearchExpansions = const [],
+    this.plainWords,
   });
 
   QueryField? field(String keyOrAlias) =>
@@ -63,8 +71,21 @@ class QueryEntity {
   ];
 }
 
-/// One text search alternative matched in Dart rather than by a LIKE: a
-/// built-in row's translated labels live in the app, not in its table.
+/// How an entity reads a sentence typed in plain words (#3457).
+@immutable
+class PlainWordReading {
+  /// The date field a date phrase filters on.
+  final String dateField;
+
+  /// Whether these lower-cased words, in order, are one term (`salt water`).
+  final bool Function(List<String> words) isPhrase;
+
+  const PlainWordReading({required this.dateField, required this.isPhrase});
+}
+
+/// One text search alternative worked out in Dart rather than by a LIKE: a
+/// built-in row's translated labels live in the app, not in its table, and a
+/// whole number names one exact dive number, not a substring.
 ///
 /// [values] maps the raw search term to the bind values; [sql] is a template
 /// over `{r}` whose `{values}` becomes one `?` per value. No values leaves the

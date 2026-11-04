@@ -76,30 +76,17 @@ List<LineChartBarData> buildMultiTankPressureLines(
   required WithFlatSurfaceLeadIn withFlatSurfaceLeadIn,
   required SeriesGetsLeadIn seriesGetsLeadIn,
   Color? singleTankColor,
+  String? emphasizedTankId,
 }) {
   if (!hasMultiTankPressure) return [];
 
   final tanks = tankPressures!;
   final lines = <LineChartBarData>[];
 
-  // Global min/max pressure across all tanks, for consistent scaling.
-  final range = tankPressureRange(tanks);
-  if (range == null) return [];
-  final globalMinPressure = range.min;
-  final globalMaxPressure = range.max;
-
-  // Add some padding to the pressure range
-  final pressureRange = globalMaxPressure - globalMinPressure;
-
-  // A zero span means every sample across every tank is identical -- in
-  // practice a computer that logged a pressure channel with no transmitter
-  // paired (all zeros). There is no pressure information to plot, and mapping
-  // a constant value through a zero-width range yields NaN spot coordinates
-  // that crash fl_chart's touch/tooltip painter (Offset NaN). Skip it.
-  if (pressureRange <= 0) return [];
-
-  final minPressure = globalMinPressure - (pressureRange * 0.05);
-  final maxPressure = globalMaxPressure + (pressureRange * 0.05);
+  // One scale across all tanks, for consistent scaling.
+  final scale = tankPressureScale(tanks);
+  if (scale == null) return [];
+  final (min: minPressure, max: maxPressure) = scale;
 
   final sortedIds = sortedTankIds(tanks.keys);
   final computerIds = tankComputerIds();
@@ -152,7 +139,7 @@ List<LineChartBarData> buildMultiTankPressureLines(
         // spline overshoots it and hooks below the curve at the left edge.
         preventCurveOverShooting: seriesGetsLeadIn(tankSpots, profile),
         color: color,
-        barWidth: 1,
+        barWidth: tankId == emphasizedTankId ? 3 : 1,
         isStrokeCapRound: true,
         dotData: const FlDotData(show: false),
         dashArray: dashPattern,

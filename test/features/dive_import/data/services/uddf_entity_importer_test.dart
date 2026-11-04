@@ -24,6 +24,7 @@ import 'package:submersion/features/dive_roles/data/repositories/dive_role_repos
 import 'package:submersion/features/certifications/data/repositories/certification_repository.dart';
 import 'package:submersion/features/certifications/domain/entities/certification.dart';
 import 'package:submersion/features/courses/data/repositories/course_repository.dart';
+import 'package:submersion/features/courses/domain/entities/course.dart';
 import 'package:submersion/features/dive_centers/data/repositories/dive_center_repository.dart';
 import 'package:submersion/features/dive_centers/domain/entities/dive_center.dart';
 import 'package:submersion/features/dive_import/data/repositories/imported_file_repository.dart';
@@ -2568,6 +2569,126 @@ void main() {
       expect(dive.gear.map((g) => g.item.id), ['existing-eq-1']);
     });
 
+    test('preResolvedDiveCenterIds links a skipped duplicate center to the '
+        'existing record without creating a twin (#3852)', () async {
+      final existing = DiveCenter(
+        id: 'existing-center-1',
+        name: 'Reef Divers',
+        createdAt: now,
+        updatedAt: now,
+      );
+      when(
+        mockDiveCenterRepo.getDiveCenterById('existing-center-1'),
+      ).thenAnswer((_) async => existing);
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        diveCenters: [
+          {'name': 'Reef Divers', 'uddfId': 'diveoperator:reef divers'},
+        ],
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 25.0,
+            'diveCenterRef': 'diveoperator:reef divers',
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        // The center index is NOT selected: the reviewer chose Skip (or Link
+        // to existing) for the flagged duplicate.
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedDiveCenterIds: const {
+          'diveoperator:reef divers': 'existing-center-1',
+        },
+      );
+
+      verifyNever(mockDiveCenterRepo.createDiveCenter(any));
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+      expect(dive.diveCenter?.id, 'existing-center-1');
+    });
+
+    test('preResolvedTripIds links a skipped duplicate trip to the existing '
+        'record without creating a twin (#3852)', () async {
+      when(mockDiveRepo.createDive(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Dive,
+      );
+
+      final data = UddfImportResult(
+        trips: [
+          {'name': 'Bonaire', 'uddfId': 'trip-1'},
+        ],
+        dives: [
+          {'dateTime': now, 'maxDepth': 25.0, 'tripRef': 'trip-1'},
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(dives: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedTripIds: const {'trip-1': 'existing-trip-1'},
+      );
+
+      verifyNever(mockTripRepo.createTrip(any));
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.single as Dive;
+      expect(dive.tripId, 'existing-trip-1');
+    });
+
+    test('preResolvedCertificationIds links a course to the existing '
+        'certification of a skipped duplicate (#3852)', () async {
+      when(mockCertificationRepo.getCertificationById(any)).thenAnswer(
+        (_) async => Certification(
+          id: 'existing-cert-1',
+          name: 'Open Water',
+          agency: CertificationAgency.padi.name,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      when(mockCourseRepo.createCourse(any)).thenAnswer(
+        (invocation) async => invocation.positionalArguments[0] as Course,
+      );
+      when(
+        mockCourseRepo.setCourseCertifications(any, any),
+      ).thenAnswer((_) async {});
+
+      const data = UddfImportResult(
+        certifications: [
+          {'name': 'Open Water', 'uddfId': 'cert-1'},
+        ],
+        courses: [
+          {
+            'name': 'Open Water Course',
+            'uddfId': 'course-1',
+            'certificationRefs': ['cert-1'],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: const UddfImportSelections(courses: {0}),
+        repositories: repos,
+        diverId: diverId,
+        preResolvedCertificationIds: const {'cert-1': 'existing-cert-1'},
+      );
+
+      verifyNever(mockCertificationRepo.createCertification(any));
+      verify(
+        mockCourseRepo.setCourseCertifications(any, ['existing-cert-1']),
+      ).called(1);
+    });
+
     test('creates inline buddies for unmatched names', () async {
       final inlineBuddy = Buddy(
         id: 'inline-1',
@@ -2576,11 +2697,8 @@ void main() {
         updatedAt: now,
       );
       when(
-        mockBuddyRepo.findOrCreateByName(
-          'Charlie',
-          diverId: anyNamed('diverId'),
-        ),
-      ).thenAnswer((_) async => inlineBuddy);
+        mockBuddyRepo.resolveByName('Charlie', diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => (buddy: inlineBuddy, created: true));
       when(
         mockBuddyRepo.addBuddyToDiveWithRoles(any, any, any),
       ).thenAnswer((_) async {});
@@ -2608,7 +2726,7 @@ void main() {
       // Inline buddy counted in buddies total
       expect(result.buddies, 1);
       verify(
-        mockBuddyRepo.findOrCreateByName('Charlie', diverId: diverId),
+        mockBuddyRepo.resolveByName('Charlie', diverId: diverId),
       ).called(1);
     });
 
@@ -4108,6 +4226,79 @@ void main() {
       expect(events[0].timestamp, 300);
       expect(events[0].value, 1.2);
       expect(events[0].source, EventSource.imported);
+    });
+
+    test('an event id the log already holds takes a fresh one, and the Notes '
+        'links follow it', () async {
+      when(
+        mockDiveRepo.existingProfileEventIds(any),
+      ).thenAnswer((_) async => {'taken'});
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 30.0,
+            'notes': '[felt sick](annotation:taken), [ok](annotation:free)',
+            'profileEvents': [
+              {
+                'id': 'taken',
+                'eventType': 'annotation',
+                'timestamp': 300,
+                'description': 'felt sick',
+              },
+              {
+                'id': 'free',
+                'eventType': 'annotation',
+                'timestamp': 400,
+                'description': 'ok',
+              },
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      final events =
+          verify(mockDiveRepo.insertProfileEvents(captureAny)).captured.first
+              as List<ProfileEvent>;
+      final fresh = events[0].id;
+      expect(fresh, isNot('taken'));
+      expect(events[1].id, 'free');
+      final dive =
+          verify(mockDiveRepo.createDive(captureAny)).captured.first as Dive;
+      expect(
+        dive.notes,
+        '[felt sick](annotation:$fresh), [ok](annotation:free)',
+      );
+    });
+
+    test('events without an id ask nothing of the log', () async {
+      final data = UddfImportResult(
+        dives: [
+          {
+            'dateTime': now,
+            'maxDepth': 30.0,
+            'events': [
+              {'eventType': 'setpointChange', 'timestamp': 300, 'value': 1.2},
+            ],
+          },
+        ],
+      );
+
+      await importer.import(
+        data: data,
+        selections: UddfImportSelections.selectAll(data),
+        repositories: repos,
+        diverId: diverId,
+      );
+
+      verifyNever(mockDiveRepo.existingProfileEventIds(any));
     });
 
     test('does not call insertProfileEvents for unknown event type', () async {

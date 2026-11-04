@@ -3,13 +3,12 @@ import 'package:clock/clock.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/local_day_changes.dart';
 import 'package:submersion/features/checklists/presentation/providers/checklist_providers.dart';
-import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/marine_life/domain/entities/species.dart';
 import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
-import 'package:submersion/features/media/domain/entities/media_item.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/features/trips/domain/entities/trip_media_preview.dart';
 import 'package:submersion/features/trips/domain/entities/trip_story.dart';
 import 'package:submersion/features/trips/domain/services/trip_story_builder.dart';
 import 'package:submersion/features/trips/presentation/providers/liveaboard_providers.dart';
@@ -67,23 +66,21 @@ final tripStoryProvider = FutureProvider.family<TripStory, String>((
   }
   final dives = await ref.watch(divesForTripProvider(tripId).future);
   final itineraryDays = await ref.watch(itineraryDaysProvider(tripId).future);
-  final checklistItems = await ref.watch(tripChecklistProvider(tripId).future);
+  final checklistItems = await ref.watch(
+    tripChecklistAllItemsProvider(tripId).future,
+  );
 
   // Media and sightings are best-effort enrichments: read their current value
   // synchronously rather than awaiting (an errored provider future never
   // resolves, which would hang the Overview). While loading or on error this
   // yields empty, so the story renders without photo strips / species badges;
   // the watch re-composes the story once the source resolves or recovers.
-  final mediaByDive =
-      ref.watch(mediaForTripProvider(tripId)).asData?.value ??
-      const <Dive, List<MediaItem>>{};
+  final mediaPreview =
+      ref.watch(tripMediaPreviewProvider(tripId)).asData?.value ??
+      TripMediaPreview.empty;
   final sightingsByDiveId =
       ref.watch(tripSightingsByDiveProvider(tripId)).asData?.value ??
       const <String, List<Sighting>>{};
-
-  final mediaByDiveId = <String, List<MediaItem>>{
-    for (final entry in mediaByDive.entries) entry.key.id: entry.value,
-  };
 
   // Liveaboard endpoints are best-effort geometry: read synchronously so a
   // failing/loading details source degrades to no port markers rather than
@@ -96,7 +93,7 @@ final tripStoryProvider = FutureProvider.family<TripStory, String>((
     trip: trip,
     dives: dives,
     itineraryDays: itineraryDays,
-    mediaByDiveId: mediaByDiveId,
+    mediaByDiveId: mediaPreview.byDiveId,
     sightingsByDiveId: sightingsByDiveId,
     checklistItems: checklistItems,
     today: clock.now(),

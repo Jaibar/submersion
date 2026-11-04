@@ -1,25 +1,62 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
-import 'package:submersion/core/services/sync/changeset_log/base_chunker.dart';
+import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
+import 'package:submersion/core/services/sync/changeset_log/base_part_hasher.dart';
+import 'package:submersion/core/services/sync/changeset_log/base_part_hasher_logged.dart';
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/services/sync/changeset_log/sync_temp_dir.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_files.dart';
+import 'package:submersion/core/services/sync/crypto/crypto_errors.dart';
+
+/// [BasePartFileSink.assemble] stopped for a reason that says nothing about the
+/// base in the cloud: a download failed or the checksum worker died.
+///
+/// Distinct from its null result on purpose. Pull is additive, so it can treat
+/// both as "retry next sync". Adopt and the retirement fence are delete-all
+/// refills, and they read "nothing assembled" as "no readable library": the
+/// fence then drops the device's retirement marker and republishes from local.
+/// A dropped connection must not be able to say that.
+///
+/// A refused download is not one of these: no later sync gets past it, so it
+/// leaves [BasePartFileSink.assemble] as itself for the sync to offer a sign-in.
+class BaseFetchInterrupted implements Exception {
+  BaseFetchInterrupted(this.cause);
+
+  final Object cause;
+
+  @override
+  String toString() => 'BaseFetchInterrupted: $cause';
+}
 
 /// Downloads a base's parts one at a time into a single temp file, verifying
 /// integrity as bytes land so the whole base is never held in memory. Each part
 /// is checked against its manifest checksum before being written; a rolling
-/// SHA-256 verifies the whole-file checksum at the end. Any failure deletes the
-/// partial file and returns null (transient -> the caller retries next sync).
+/// SHA-256 verifies the whole-file checksum at the end. The hashing runs on a
+/// worker isolate for a large base, so it does not stall the isolate that
+/// called sync (issue #3829).
 class BasePartFileSink {
-  BasePartFileSink({Future<Directory> Function()? tempDirProvider})
-    : _tempDir = tempDirProvider ?? resolveSyncTempDir;
+  BasePartFileSink({
+    Future<Directory> Function()? tempDirProvider,
+    BasePartHasherOpener openHasher = openLoggedBasePartHasher,
+  }) : _tempDir = tempDirProvider ?? resolveSyncTempDir,
+       _openHasher = openHasher;
 
   final Future<Directory> Function() _tempDir;
+  final BasePartHasherOpener _openHasher;
   static const _uuid = Uuid();
 
+  /// Returns the assembled file's path.
+  ///
+  /// Returns null, with the partial file deleted, when the cloud's copy cannot
+  /// be used: a part is missing, a checksum does not match, an envelope is
+  /// corrupt, or it needs a key this device lacks. Throws
+  /// [BaseFetchInterrupted], also with the partial file deleted, for any other
+  /// failure but a refused download, which it throws as itself. See that class
+  /// for why these must stay apart.
   Future<String?> assemble({
     required String name,
     required int partCount,
@@ -28,14 +65,38 @@ class BasePartFileSink {
     required Future<Uint8List?> Function(int index) downloadPart,
     void Function(int downloaded, int total)? onPartDownloaded,
   }) async {
-    final dir = await _tempDir();
-    final path = basePartTempPath(dir.path, name, _uuid.v4());
-    final file = File(path);
-    final out = file.openWrite();
+    // The browser has one temp directory and ignores the provider, which
+    // would otherwise ask path_provider for a directory it does not have.
+    String? directoryPath;
+    try {
+      if (!HostPlatform.isWeb) directoryPath = (await _tempDir()).path;
+    } catch (e, st) {
+      Error.throwWithStackTrace(BaseFetchInterrupted(e), st);
+    }
 
-    // Rolling whole-file SHA-256 so we never hold the full base to checksum it.
-    final digestSink = _DigestSink();
-    final wholeInput = sha256.startChunkedConversion(digestSink);
+    // Opened when the first part lands. A failed write is remembered rather
+    // than thrown, and the remaining parts are still fetched and checked:
+    // the cloud's copy failing stays the answer, so a local fault cannot
+    // upgrade a null into an interruption.
+    SyncTempSink? out;
+    (Object, StackTrace)? writeFailure;
+    Future<void> write(Uint8List part) async {
+      if (writeFailure != null) return;
+      try {
+        final sink = out ??= await SyncTempFiles.create(
+          basePartTempName(name, _uuid.v4()),
+          directoryPath: directoryPath,
+        );
+        await sink.add(part);
+      } catch (e, st) {
+        writeFailure = (e, st);
+      }
+    }
+
+    // Created once the first part lands, as its size picks inline or worker.
+    BasePartHasher? hasher;
+    Object? interruption;
+    StackTrace? interruptionStack;
 
     var ok = true;
     try {
@@ -45,43 +106,70 @@ class BasePartFileSink {
           ok = false;
           break;
         }
-        if (i < partChecksums.length &&
-            BaseChunker.checksum(part) != partChecksums[i]) {
+        final parts = hasher ??= await _openHasher(part.length);
+        final digest = await parts.addPart(part);
+        if (i < partChecksums.length && digest != partChecksums[i]) {
           ok = false;
           break;
         }
-        wholeInput.add(part);
-        out.add(part);
+        await write(part);
         onPartDownloaded?.call(i + 1, partCount);
       }
-    } catch (_) {
+      if (ok && wholeChecksum != null) {
+        final whole = hasher ??= await _openHasher(0);
+        if (await whole.finish() != wholeChecksum) ok = false;
+      }
+      // No parts at all still assembles a file, as the stream sink did.
+      if (ok && out == null) await write(Uint8List(0));
+    } on EnvelopeCorruptException {
+      ok = false;
+    } on SyncEncryptionRequired {
+      ok = false;
+    } catch (e, st) {
+      ok = false;
+      interruption = e;
+      interruptionStack = st;
+    }
+
+    try {
+      await out?.close();
+    } catch (e, st) {
+      writeFailure ??= (e, st);
+    } finally {
+      await hasher?.dispose();
+    }
+
+    final failedWrite = writeFailure;
+    if (failedWrite != null && ok) {
+      interruption = failedWrite.$1;
+      interruptionStack = failedWrite.$2;
       ok = false;
     }
 
-    await out.close();
-    wholeInput.close();
-
-    if (ok && wholeChecksum != null) {
-      final computed = 'sha256:${digestSink.value}';
-      if (computed != wholeChecksum) ok = false;
+    final path = out?.path;
+    if (!ok && path != null) await deleteQuietly(path);
+    if (interruption != null) {
+      Error.throwWithStackTrace(
+        isAccessRefused(interruption)
+            ? interruption
+            : BaseFetchInterrupted(interruption),
+        interruptionStack!,
+      );
     }
-
-    if (!ok) {
-      await deleteQuietly(path);
-      return null;
-    }
-    return path;
+    return ok ? path : null;
   }
 
   Future<void> deleteQuietly(String path) async {
     try {
-      final f = File(path);
-      if (await f.exists()) await f.delete();
+      await SyncTempFiles.delete(path);
     } catch (_) {
-      // Best effort: a leftover temp file is harmless; the OS reaps systemTemp.
+      // Best effort: a leftover temp file is harmless; the sweep reaps it.
     }
   }
 }
+
+/// File name a downloaded base is assembled under: `<name>.<uuid>.base`.
+String basePartTempName(String name, String id) => '$name.$id.base';
 
 /// Path a downloaded base is assembled into: `<temp dir>/<name>.<uuid>.base`.
 ///
@@ -106,17 +194,4 @@ String basePartTempPath(
   String name,
   String id, {
   p.Context? context,
-}) => (context ?? p.context).join(dirPath, '$name.$id.base');
-
-/// Minimal `Sink<Digest>` that captures the single digest emitted at close.
-/// Avoids depending on `package:convert`'s `AccumulatorSink` (not exported by
-/// `crypto`).
-class _DigestSink implements Sink<Digest> {
-  Digest? value;
-
-  @override
-  void add(Digest data) => value = data;
-
-  @override
-  void close() {}
-}
+}) => (context ?? p.context).join(dirPath, basePartTempName(name, id));

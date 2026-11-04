@@ -1,11 +1,10 @@
-import 'dart:io' show Platform;
-
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/core/services/location_service.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
@@ -612,7 +611,7 @@ class _DiveCenterEditPageState extends ConsumerState<DiveCenterEditPage> {
           DiveCenterFillHoursSection(
             opensAt: _fillOpensAt,
             closesAt: _fillClosesAt,
-            units: UnitFormatter(ref.watch(settingsProvider)),
+            units: ref.watch(unitFormatterProvider),
             errorText: _fillHoursChecked ? _fillHoursErrorText(context) : null,
             onChanged: (opens, closes) => setState(() {
               _fillOpensAt = opens;
@@ -937,7 +936,8 @@ class _DiveCenterEditPageState extends ConsumerState<DiveCenterEditPage> {
 
       if (result == null) {
         if (mounted) {
-          final isMobile = !kIsWeb && (Platform.isIOS || Platform.isAndroid);
+          final isMobile =
+              !kIsWeb && (HostPlatform.isIOS || HostPlatform.isAndroid);
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
@@ -945,6 +945,7 @@ class _DiveCenterEditPageState extends ConsumerState<DiveCenterEditPage> {
                     ? context.l10n.diveCenters_error_locationPermission
                     : context.l10n.diveCenters_error_locationUnavailable,
               ),
+              persist: false,
               action: isMobile
                   ? SnackBarAction(
                       label: context.l10n.diveCenters_action_settings,

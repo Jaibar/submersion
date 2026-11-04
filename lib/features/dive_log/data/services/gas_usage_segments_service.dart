@@ -1,5 +1,9 @@
+import 'package:collection/collection.dart';
+
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
+import 'package:submersion/features/dive_log/domain/services/multi_cylinder_consumption.dart';
 
 /// One contiguous period during a dive when a single gas mix was breathed.
 ///
@@ -26,7 +30,8 @@ class GasUsageSegment {
 /// Builds gas-usage segments for the dive profile gas-timeline strip.
 ///
 /// Algorithm:
-/// 1. Pick the starting tank (lowest [DiveTank.order], or the first tank).
+/// 1. Pick the starting tank: the diluent on a rebreather, else the back gas,
+///    else the lowest [DiveTank.order].
 /// 2. Sort gas switches by timestamp and clamp to dive bounds.
 /// 3. A switch at or before [firstSampleSeconds] is the dive's initial-gas
 ///    declaration rather than a mid-dive switch, and owns the window from t=0.
@@ -43,6 +48,10 @@ class GasUsageSegment {
 /// segment is invented from the lowest-order tank, which renders a sliver of
 /// the wrong gas whenever that tank holds a different mix (issue #679).
 ///
+/// [loopGas] is the gas a rebreather dive's loop runs on, which no cylinder
+/// need hold (#4020). It fills the starting window in place of the starting
+/// tank's mix.
+///
 /// Returns an empty list when there are no tanks or the dive has no
 /// duration — the caller should hide the strip in that case.
 List<GasUsageSegment> buildGasUsageSegments({
@@ -50,15 +59,17 @@ List<GasUsageSegment> buildGasUsageSegments({
   required List<GasSwitchWithTank> gasSwitches,
   required int diveDurationSeconds,
   int firstSampleSeconds = 0,
+  GasMix? loopGas,
+  bool onLoop = true,
 }) {
   if (tanks.isEmpty || diveDurationSeconds <= 0) {
     return const <GasUsageSegment>[];
   }
 
   final tankById = {for (final t in tanks) t.id: t};
-  final startingTank = ([
-    ...tanks,
-  ]..sort((a, b) => a.order.compareTo(b.order))).first;
+  final startingTank = _startingTankOf(tanks, onLoop: onLoop);
+  final startingGas = loopGas ?? startingTank.gasMix;
+  final startingTankName = loopGas == null ? startingTank.name : null;
 
   final inBoundsSwitches =
       ([...gasSwitches]..sort((a, b) => a.timestamp.compareTo(b.timestamp)))
@@ -70,9 +81,9 @@ List<GasUsageSegment> buildGasUsageSegments({
       GasUsageSegment(
         startSeconds: 0,
         endSeconds: diveDurationSeconds,
-        gasMix: startingTank.gasMix,
-        label: startingTank.gasMix.name,
-        tankName: startingTank.name,
+        gasMix: startingGas,
+        label: startingGas.name,
+        tankName: startingTankName,
       ),
     ];
   }
@@ -89,9 +100,9 @@ List<GasUsageSegment> buildGasUsageSegments({
       GasUsageSegment(
         startSeconds: 0,
         endSeconds: inBoundsSwitches.first.timestamp,
-        gasMix: startingTank.gasMix,
-        label: startingTank.gasMix.name,
-        tankName: startingTank.name,
+        gasMix: startingGas,
+        label: startingGas.name,
+        tankName: startingTankName,
       ),
     );
   }
@@ -117,6 +128,23 @@ List<GasUsageSegment> buildGasUsageSegments({
   }
 
   return _mergeAdjacentSameGas(segments);
+}
+
+/// The cylinder a dive starts on when no switch declares it: the same choice
+/// the deco model and SAC make, so a stage or deco bottle listed first does not
+/// read as breathed from the surface. The diluent comes first because back gas
+/// is the role an import gives a cylinder it knows nothing about, which on a
+/// rebreather may be a bailout. [DiveTank.order] settles a tie, since the list
+/// itself may be in any order. [tanks] is non-empty.
+///
+/// [onLoop] false is a dive known to be off the loop, where a diluent tag does
+/// not take the start, as in [startingTankOf].
+DiveTank _startingTankOf(List<DiveTank> tanks, {bool onLoop = true}) {
+  final byOrder = [...tanks]..sort((a, b) => a.order.compareTo(b.order));
+  final diluent = onLoop
+      ? byOrder.firstWhereOrNull((t) => t.role == TankRole.diluent)
+      : null;
+  return diluent ?? sacReferenceTankOf(byOrder)!;
 }
 
 /// Index into [sorted] of the switch that declares the dive's starting gas, or
@@ -165,7 +193,7 @@ List<GasUsageSegment> _mergeAdjacentSameGas(List<GasUsageSegment> segments) {
 /// [start, end) windows during which it was the breathed gas.
 ///
 /// Uses the same starting-tank + switch-walk rules as [buildGasUsageSegments]
-/// (starting tank = lowest [DiveTank.order]; switches sorted and clamped to
+/// (the starting tank from [_startingTankOf]; switches sorted and clamped to
 /// [0, diveDurationSeconds]; a switch at or before [firstSampleSeconds] is the
 /// initial-gas declaration and owns the window from t=0, otherwise that window
 /// goes to the starting tank), but keys by tankId with no gas-mix merging.
@@ -180,9 +208,7 @@ Map<String, List<({int start, int end})>> buildActiveTankIntervals({
   final result = <String, List<({int start, int end})>>{};
   if (tanks.isEmpty || diveDurationSeconds <= 0) return result;
 
-  final startingTank = ([
-    ...tanks,
-  ]..sort((a, b) => a.order.compareTo(b.order))).first;
+  final startingTank = _startingTankOf(tanks);
 
   final inBounds =
       ([...gasSwitches]..sort((a, b) => a.timestamp.compareTo(b.timestamp)))
