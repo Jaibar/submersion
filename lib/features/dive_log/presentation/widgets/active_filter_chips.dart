@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/query/presentation/query_tree_edit.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_providers.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_providers.dart';
 import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/active_filter_chip_labels.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_date_chip_label.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/dive_types/presentation/dive_type_display.dart';
 import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
@@ -209,7 +211,12 @@ List<Widget> activeDiveFilterChips(
   if (filter.diveIds.isNotEmpty) {
     chips.add(
       axisChip(
-        context.l10n.connections_selection_dives(filter.diveIds.length),
+        filter.diveIdsLabel == null
+            ? context.l10n.connections_selection_dives(filter.diveIds.length)
+            : context.l10n.diveLog_filterChip_namedDives(
+                filter.diveIdsLabel!,
+                filter.diveIds.length,
+              ),
         () {
           ref.read(filterProvider.notifier).state = filter.copyWith(
             clearDiveIds: true,
@@ -286,14 +293,20 @@ List<Widget> activeDiveFilterChips(
     filter.query,
     ref.watch(queryUnitPrefsProvider),
   );
+  final queryParts = topLevelConjuncts(filter.query);
   for (var i = 0; i < queryLabels.length; i++) {
+    final date = diveDateChipLabel(
+      queryParts[i],
+      l10n: context.l10n,
+      units: units,
+    );
     chips.add(
-      _chip(context, queryLabels[i], () {
+      _chip(context, date ?? queryLabels[i], () {
         ref.read(filterProvider.notifier).state = removeDiveQueryChip(
           filter,
           i,
         );
-      }),
+      }, isDate: date != null),
     );
   }
 
@@ -305,12 +318,32 @@ Widget _chip(
   String label,
   VoidCallback? onRemove, {
   bool dimmed = false,
+  bool isDate = false,
 }) {
+  final scheme = Theme.of(context).colorScheme;
   final chip = Padding(
     padding: const EdgeInsetsDirectional.only(end: 8),
     child: Chip(
-      label: Text(label, style: const TextStyle(fontSize: 12)),
+      // A date is understood, not searched for as text (#3457), so it reads
+      // apart from the word chips beside it.
+      avatar: isDate
+          ? Icon(
+              Icons.calendar_today,
+              size: 14,
+              color: scheme.onPrimaryContainer,
+            )
+          : null,
+      backgroundColor: isDate ? scheme.primaryContainer : null,
+      side: isDate ? BorderSide(color: scheme.primary) : null,
+      label: Text(
+        label,
+        style: TextStyle(
+          fontSize: 12,
+          color: isDate ? scheme.onPrimaryContainer : null,
+        ),
+      ),
       deleteIcon: const Icon(Icons.close, size: 16),
+      deleteIconColor: isDate ? scheme.onPrimaryContainer : null,
       onDeleted: onRemove,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
       visualDensity: VisualDensity.compact,

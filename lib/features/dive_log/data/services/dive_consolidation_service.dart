@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/features/courses/data/dive_course_links.dart';
@@ -10,7 +11,10 @@ import 'package:submersion/features/dive_log/data/repositories/dive_repository_i
 import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_series_repository.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_source_links.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/features/dive_log/data/services/dive_consolidation_field_fill.dart';
+import 'package:submersion/features/dive_log/data/services/user_event_preservation.dart';
+import 'package:submersion/features/dive_log/domain/services/annotation_links.dart';
 import 'package:submersion/features/dive_log/data/services/dive_fold_links.dart';
 import 'package:submersion/features/dive_log/data/services/dive_merge_snapshot.dart';
 import 'package:submersion/features/dive_log/domain/services/dive_consolidation_builder.dart';
@@ -72,6 +76,20 @@ class DiveConsolidationService {
     required String targetDiveId,
     required List<String> secondaryDiveIds,
     ConsolidationAlignment? alignment,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.merge,
+    body: () => _applyInner(
+      targetDiveId: targetDiveId,
+      secondaryDiveIds: secondaryDiveIds,
+      alignment: alignment,
+    ),
+  );
+
+  Future<DiveConsolidationOutcome> _applyInner({
+    required String targetDiveId,
+    required List<String> secondaryDiveIds,
+    ConsolidationAlignment? alignment,
   }) async {
     final allIds = [targetDiveId, ...secondaryDiveIds];
     // Every series this operation will carry across has to decode: it
@@ -126,6 +144,7 @@ class DiveConsolidationService {
       }
     }
 
+    final foldedEventIds = <String, String>{}; // old event id -> id on target
     await _db.transaction(() async {
       await _diveRepo.backfillPrimaryDataSource(targetDiveId);
 
@@ -172,8 +191,13 @@ class DiveConsolidationService {
         // With a fresh clock: stamping moves these events into any scope
         // tombstone the computer already has on this dive (#1926), and with
         // their old clocks a relayed copy of that scope would delete them.
+        // Not the diver's own events (#4109): a computer that owned them
+        // could take them away from the Notes that link them.
         await (_db.update(_db.diveProfileEvents)..where(
-              (t) => t.diveId.equals(targetDiveId) & t.computerId.isNull(),
+              (t) =>
+                  t.diveId.equals(targetDiveId) &
+                  t.computerId.isNull() &
+                  nonUserEvent(t),
             ))
             .write(
               DiveProfileEventsCompanion(
@@ -484,6 +508,7 @@ class DiveConsolidationService {
           (r) => r.diveId == secondary.id,
         )) {
           final eventId = _uuid.v4();
+          foldedEventIds[row.id] = eventId;
           await _db
               .into(_db.diveProfileEvents)
               .insert(
@@ -498,7 +523,12 @@ class DiveConsolidationService {
                             ? null
                             : tankIdMap[row.tankId] ?? row.tankId,
                       ),
-                      computerId: Value(secRow.computerId),
+                      // The diver's own stay nobody's, as on the target.
+                      computerId: Value(
+                        row.source == EventSource.user.name
+                            ? row.computerId
+                            : secRow.computerId,
+                      ),
                     ),
               );
           await _sync.markRecordPending(
@@ -776,6 +806,13 @@ class DiveConsolidationService {
         for (final secondary in plan.secondaries)
           snapshot.diveRows.firstWhere((r) => r.id == secondary.id),
       ], targetHasProfile: plan.primary.profile.isNotEmpty);
+      // The events above came across under fresh ids, so annotation links in
+      // Notes a secondary fills in follow them (#4109).
+      if (fieldFill['notes'] case final Variable<String> notes) {
+        fieldFill['notes'] = Variable<String>(
+          renameAnnotationLinks(notes.value ?? '', foldedEventIds),
+        );
+      }
 
       // Every target cylinder nobody shares is marked as recorded, so the
       // open-time inference (backfillTankSharedComputers) never guesses for
@@ -880,7 +917,13 @@ class DiveConsolidationService {
   /// deleted -- it was modified in place, not created, so its original row
   /// is restored by the verbatim insertOrReplace re-inserts below rather
   /// than by re-creating it.
-  Future<void> undo(DiveMergeSnapshot snapshot) async {
+  Future<void> undo(DiveMergeSnapshot snapshot) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.undoMerge,
+    body: () => _undoInner(snapshot),
+  );
+
+  Future<void> _undoInner(DiveMergeSnapshot snapshot) async {
     final now = DateTime.now().millisecondsSinceEpoch;
 
     await _db.transaction(() async {
@@ -1165,6 +1208,7 @@ class DiveConsolidationService {
       for (final r in snapshot.tankSeriesRows) {
         await _tankSeries.restoreSeriesRow(r, now: now);
       }
+      await _profileSeries.restoreRevisions(snapshot.profileRevisions);
       for (final r in snapshot.weightRows) {
         await _db
             .into(_db.diveWeights)

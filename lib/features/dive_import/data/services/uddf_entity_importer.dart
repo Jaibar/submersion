@@ -8,6 +8,7 @@ import 'package:submersion/core/database/database.dart'
     show DiveDataSourcesCompanion, DiveSitesCompanion, DivesCompanion;
 import 'package:submersion/core/services/export/export_service.dart';
 import 'package:submersion/core/services/shared_library/library_edit_stamper.dart';
+import 'package:submersion/features/dive_log/domain/services/annotation_links.dart';
 import 'package:submersion/features/transmitters/data/services/transmitter_auto_registrar.dart';
 import 'package:submersion/features/cylinder_passports/data/repositories/cylinder_fill_repository.dart';
 import 'package:submersion/features/cylinder_passports/data/repositories/cylinder_passport_repository.dart';
@@ -22,7 +23,9 @@ import 'package:submersion/features/dive_import/data/services/import_service_clo
 import 'package:submersion/features/dive_import/data/services/import_weight_mapper.dart';
 import 'package:submersion/features/dive_import/data/services/imported_profile_readers.dart';
 import 'package:submersion/features/dive_import/data/services/parsed_profile_event_mapper.dart';
+import 'package:submersion/features/dive_import/data/services/imported_gas_switches.dart';
 import 'package:submersion/features/dive_import/data/services/restored_source_attribution.dart';
+import 'package:submersion/features/dive_log/domain/codecs/profile_sample_point.dart';
 import 'package:submersion/features/dive_import/domain/import_source_file.dart';
 import 'package:submersion/features/dive_import/domain/resyncable_import_formats.dart';
 import 'package:submersion/features/dive_log/domain/services/dive_altitude_enricher.dart';
@@ -57,7 +60,6 @@ import 'package:submersion/features/dive_log/domain/entities/computer_tissue_sna
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_custom_field.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_weight.dart';
-import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_types/data/repositories/dive_type_repository.dart';
@@ -1952,10 +1954,10 @@ class UddfEntityImporter {
     // coordinate fallback its dives import with no site and no location at
     // all, silently.
     final existingSites = await repository.getAllSites(diverId: diverId);
-    final existingByName = <String, DiveSite>{};
+    final existingByName = <String, List<DiveSite>>{};
     final existingById = <String, DiveSite>{};
     for (final site in existingSites) {
-      existingByName[site.name.toLowerCase()] = site;
+      (existingByName[site.name.toLowerCase()] ??= []).add(site);
       existingById[site.id] = site;
     }
     for (var i = 0; i < items.length; i++) {
@@ -1964,9 +1966,12 @@ class UddfEntityImporter {
       final uddfId = items[i]['uddfId'] as String?;
       if (uddfId == null) continue;
       final name = items[i]['name'] as String?;
-      final existing =
-          (name == null ? null : existingByName[name.toLowerCase()]) ??
-          _nearestExistingSite(existingSites, items[i]);
+      final namesakes = name == null
+          ? null
+          : existingByName[name.toLowerCase()];
+      final existing = namesakes != null
+          ? ImportSiteLocation.namesakeOf(items[i], namesakes)
+          : _nearestExistingSite(existingSites, items[i]);
       if (existing != null) {
         idMapping[uddfId] = existing;
       }
@@ -2890,8 +2895,6 @@ class UddfEntityImporter {
                 ),
       ];
 
-      final notes = diveData['notes'] as String? ?? '';
-
       // Parse sightings
       final sightings = _buildSightings(diveData);
 
@@ -2950,21 +2953,30 @@ class UddfEntityImporter {
       // to it for runtime so the total dive time is populated.
       final durationValue = diveData['duration'] as Duration?;
       final runtime = diveData['runtime'] as Duration? ?? durationValue;
-      // `duration` is ambiguous across import formats: some parsers (FIT) put a
-      // genuine bottom time here, while others (Subsurface) put total runtime,
-      // which would make bottom time equal runtime. Only trust `duration` as a
-      // real bottom time when it differs from runtime; otherwise leave it null
-      // so the profile-based auto-calculation below can derive it.
-      final bottomTimeSeed = durationValue != null && durationValue != runtime
-          ? durationValue
-          : null;
+      // Null leaves the profile-based auto-calculation below to derive it.
+      final bottomTimeSeed = statedBottomTime(diveData);
       final parsedEntryTime = diveData['entryTime'] as DateTime?;
       final entryTime = parsedEntryTime ?? dateTime;
       final exitTime = runtime != null ? dateTime.add(runtime) : null;
       // Parser-emitted profile events; persisted as ProfileEvents after the
-      // dive row is created.
-      final eventMaps = (diveData['events'] as List?)
-          ?.cast<Map<String, dynamic>>();
+      // dive row is created. SSRF and DL7 fill `events`, the UDDF path fills
+      // `profileEvents` (the app's own <profileevents> extension), the same
+      // two keys the resync writer reads. A restore that read only the first
+      // dropped every event a backup carried, annotations included (#4109).
+      final eventMaps =
+          ((diveData['events'] ?? diveData['profileEvents']) as List?)
+              ?.cast<Map<String, dynamic>>();
+      // A backup carries each event's own id (#4109). This dive is new, so an
+      // id the log already holds is another dive's (the backup restored
+      // twice): this copy takes a fresh one, and its Notes links follow.
+      final freshEventIds = await _freshIdsForTakenEvents(
+        eventMaps,
+        repos.diveRepository,
+      );
+      final notes = renameAnnotationLinks(
+        diveData['notes'] as String? ?? '',
+        freshEventIds,
+      );
       final diveTypeIds = _resolveDiveTypeIds(
         (diveData['diveTypeIds'] as List?)?.cast<String>() ??
             [diveData['diveType'] as String? ?? 'recreational'],
@@ -2989,6 +3001,7 @@ class UddfEntityImporter {
       final excludedFromStats = diveData['excludedFromStats'] as bool? ?? false;
       final excludedFromGasStats =
           diveData['excludedFromGasStats'] as bool? ?? false;
+      final gasSwitchesEdited = diveData['gasSwitchesEdited'] as bool? ?? false;
 
       // Build diluent gas mix (if present)
       final diluentO2 = diveData['diluentO2'] as double?;
@@ -3100,6 +3113,7 @@ class UddfEntityImporter {
         isFavorite: isFavorite,
         excludedFromStats: excludedFromStats,
         excludedFromGasStats: excludedFromGasStats,
+        gasSwitchesEdited: gasSwitchesEdited,
         courseIds: linkedCourseIds,
         setpointLow: asDoubleOrNull(diveData['setpointLow']),
         setpointHigh: asDoubleOrNull(diveData['setpointHigh']),
@@ -3131,7 +3145,18 @@ class UddfEntityImporter {
         dive = dive.copyWith(bottomTime: durationValue);
       }
 
-      await repos.diveRepository.createDive(dive);
+      // A backup of a dive several sources recorded carries each recording
+      // apart (issue #3965). The merged samples still derive the bottom time
+      // above, but stored too they would hand the primary source everyone's
+      // readings, so the series are written below once their sources exist.
+      final sourceEntries = _entriesForDive(diveData, dataSourcesByDiveRef);
+      final perSourceProfiles = sourceEntries.isEmpty
+          ? const <RestoredProfileSeries>[]
+          : restoredProfileSeries(diveData);
+
+      await repos.diveRepository.createDive(
+        perSourceProfiles.isEmpty ? dive : dive.copyWith(profile: const []),
+      );
 
       // Sightings are a child row, not a column: createDive writes the dive
       // and its tanks, weights, custom fields and gear, and nothing else
@@ -3233,14 +3258,14 @@ class UddfEntityImporter {
         );
       }
 
-      // A backup of a dive several sources recorded says which of them
-      // recorded each pressure series (issue #2492). Those series are
-      // written once the source rows exist, below, in place of the
-      // waypoint pressures, which hold only the series the app drew.
-      final perSourceSeries =
-          _entriesForDive(diveData, dataSourcesByDiveRef).isEmpty
-          ? const <RestoredTankSeries>[]
-          : restoredTankPressureSeries(diveData, tanks);
+      // A backup says which source recorded each pressure series of a dive
+      // several sources recorded (issue #2492), and keeps any series its
+      // waypoints cannot hold (issue #3917). Those series are written once
+      // the source rows exist, below, in place of the waypoint pressures,
+      // which hold only the series the app drew, on the depth clock.
+      final perSourceSeries = restoredTankPressureSeries(diveData, [
+        for (final tank in tanks) tank.id,
+      ]);
 
       // Store per-tank pressure data
       if (profileData != null && tanks.isNotEmpty && perSourceSeries.isEmpty) {
@@ -3252,100 +3277,32 @@ class UddfEntityImporter {
         );
       }
 
-      // Insert gas switches
-      final gasSwitchesData =
-          diveData['gasSwitches'] as List<Map<String, dynamic>>?;
-      if (gasSwitchesData != null && gasSwitchesData.isNotEmpty) {
-        // Build lookups from both UDDF tank ID and UDDF gas mix UUID to the
-        // persisted tank row id. MacDive-style switches reference a gas mix
-        // UUID (via <switchmix ref>), while top-level <gasswitches>
-        // entries reference a tank UUID (via <tankref>); we accept either.
-        // FIT imports carry no refs at all and address tanks positionally
-        // via `tankIndex`.
-        final tankIdByRef = <String, String>{};
-        final tankIdByGasMixRef = <String, String>{};
-        final tanksData = diveData['tanks'] as List<Map<String, dynamic>>?;
-        if (tanksData != null) {
-          for (var i = 0; i < tanks.length && i < tanksData.length; i++) {
-            final tank = tanks[i];
-            final tankData = tanksData[i];
-            final ref = (tankData['uddfTankId'] as String?)?.trim();
-            if (ref != null && ref.isNotEmpty) {
-              tankIdByRef[ref] = tank.id;
-            }
-            final gasMixRef = (tankData['uddfGasMixRef'] as String?)?.trim();
-            // First tank linked to a given gas wins; later tanks sharing the
-            // same gas don't overwrite. This is a pragmatic resolution for
-            // dives where multiple tanks carry the same mix.
-            if (gasMixRef != null &&
-                gasMixRef.isNotEmpty &&
-                !tankIdByGasMixRef.containsKey(gasMixRef)) {
-              tankIdByGasMixRef[gasMixRef] = tank.id;
-            }
-          }
-        }
-
-        final switches = gasSwitchesData
-            .map((gs) {
-              final timestamp = gs['timestamp'] as int?;
-              if (timestamp == null) return null;
-              final tankRef = (gs['tankRef'] as String?)?.trim();
-              final gasMixRef = (gs['gasMixRef'] as String?)?.trim();
-              String? tankId;
-              if (tankRef != null && tankRef.isNotEmpty) {
-                tankId = tankIdByRef[tankRef];
-              }
-              if ((tankId == null || tankId.isEmpty) &&
-                  gasMixRef != null &&
-                  gasMixRef.isNotEmpty) {
-                tankId = tankIdByGasMixRef[gasMixRef];
-              }
-              if (tankId == null || tankId.isEmpty) {
-                final tankIndex = gs['tankIndex'] as int?;
-                if (tankIndex != null &&
-                    tankIndex >= 0 &&
-                    tankIndex < tanks.length) {
-                  tankId = tanks[tankIndex].id;
-                }
-              }
-              if (tankId == null || tankId.isEmpty) return null;
-              return GasSwitch(
-                id: _uuid.v4(),
-                diveId: diveId,
-                timestamp: timestamp,
-                tankId: tankId,
-                depth: gs['depth'] as double?,
-                createdAt: now,
-              );
-            })
-            .whereType<GasSwitch>()
-            .toList();
-        if (switches.isNotEmpty) {
-          await repos.diveRepository.insertGasSwitches(switches);
-        }
-      }
-
-      // Persist profile events emitted by the parser. Currently supported (Slice C + C.2):
-      // setpointChange, bookmark, safetyStopStart, decoStopStart, decoViolation,
-      // ascentRateWarning, ppO2High, ppO2Low. Future slices may add more types as
-      // real SSRF exports surface additional event names.
-      //
-      // NOTE ON UDDF DIVERGENCE: SSRF's subsurface_xml_parser emits events under
-      // `diveData['events']` (read here). The UDDF path in
-      // `uddf_full_import_service.dart` emits events under
-      // `diveData['profileEvents']` — a pre-existing key mismatch. UDDF-side
-      // event persistence is intentionally out of scope for Slice C; when a
-      // future slice adds UDDF event import, unify the keys or add a second
-      // consumer block here.
+      // Persist profile events emitted by the parser, converted by the same
+      // mapper the resync writer uses; the types it does not know are skipped
+      // with a log line.
       if (eventMaps != null && eventMaps.isNotEmpty) {
         final events = profileEventsFromParsed(
           diveId: diveId,
-          eventMaps: eventMaps,
+          eventMaps: [
+            for (final map in eventMaps)
+              {...map, 'id': ?freshEventIds[map['id']]},
+          ],
           now: now,
           onSkipped: _log.warning,
         );
-        if (events.isNotEmpty) {
-          await repos.diveRepository.insertProfileEvents(events);
+        // A failure here must not leave the dive half imported: the events
+        // are a detail of it, not the dive.
+        try {
+          if (events.isNotEmpty) {
+            await repos.diveRepository.insertProfileEvents(events);
+          }
+        } catch (e, stackTrace) {
+          _log.error(
+            'Failed to import the profile events of dive $diveId; the dive '
+            'itself is kept',
+            error: e,
+            stackTrace: stackTrace,
+          );
         }
       }
 
@@ -3373,7 +3330,6 @@ class UddfEntityImporter {
       // writing both would leave the dive with one more source than it was
       // exported with. A dive with no entries keeps today's behaviour
       // exactly, which is every foreign UDDF file and every older export.
-      final sourceEntries = _entriesForDive(diveData, dataSourcesByDiveRef);
 
       // Which file this dive came from. A merged batch payload stamps every
       // item with `_sourceFileId`; the display name it also carries is not a
@@ -3396,6 +3352,7 @@ class UddfEntityImporter {
           ? SourceDiver.unqualifyForFile(diverKey, sourceFileId)
           : diverKey;
 
+      var computerIdByOrdinal = const <int, String?>{};
       if (sourceEntries.isEmpty) {
         final dataSourceId = _uuid.v4();
 
@@ -3436,6 +3393,19 @@ class UddfEntityImporter {
             createdAt: Value(now),
           ),
         );
+        // With no <source> entries nothing in the file names a source, so
+        // a backup's exact series are the row's above.
+        if (perSourceSeries.isNotEmpty) {
+          await repos.tankPressureRepository.insertTankSeries(diveId, [
+            for (final s in perSourceSeries)
+              (
+                tankId: s.tankId,
+                sourceId: dataSourceId,
+                computerId: null,
+                samples: s.samples,
+              ),
+          ]);
+        }
         // The pressure series were written before their source row existed
         // (issue #2440): attribute them now, so a later consolidation keeps
         // them apart from another source's series of the same cylinder.
@@ -3454,7 +3424,14 @@ class UddfEntityImporter {
           sourceFileName: diveSourceFileName,
           now: now,
         );
-        await repos.diveRepository.saveComputerReadings(restored);
+        try {
+          await repos.diveRepository.saveComputerReadings(restored);
+        } catch (_) {
+          if (perSourceProfiles.isNotEmpty) {
+            await _keepMergedSamples(repos.diveRepository, diveId, profile);
+          }
+          rethrow;
+        }
         restoredDataSources += sourceEntries.length;
         // Each series under the restored row of the <source> that recorded
         // it, and the computer of the one its computer recorded; a series
@@ -3465,7 +3442,7 @@ class UddfEntityImporter {
             if (sourceEntries[i]['ordinal'] case final int ordinal)
               ordinal: restored[i].id.value,
         };
-        final computerIdByOrdinal = <int, String?>{
+        computerIdByOrdinal = {
           for (var i = 0; i < sourceEntries.length; i++)
             if (sourceEntries[i]['ordinal'] case final int ordinal)
               ordinal: restored[i].computerId.value,
@@ -3480,6 +3457,28 @@ class UddfEntityImporter {
                 samples: s.samples,
               ),
           ]);
+        }
+        // Each depth series under its source, as the tank series above.
+        if (perSourceProfiles.isNotEmpty) {
+          try {
+            await repos.diveRepository.restoreSourceProfiles(diveId, [
+              for (final s in perSourceProfiles)
+                (
+                  sourceId: sourceIdByOrdinal[s.sourceOrdinal],
+                  computerId: computerIdByOrdinal[s.computerOrdinal],
+                  isPrimary: s.isPrimary,
+                  samples: s.samples,
+                ),
+            ]);
+          } catch (e, stackTrace) {
+            _log.error(
+              'Failed to restore the source profiles of dive $diveId; '
+              'it keeps its merged samples',
+              error: e,
+              stackTrace: stackTrace,
+            );
+            await _keepMergedSamples(repos.diveRepository, diveId, profile);
+          }
         }
         // Each tank row under its own source and computer (#2716).
         final tankLinks = restoredTankAttribution(
@@ -3499,6 +3498,19 @@ class UddfEntityImporter {
             restored.single.id.value,
           );
         }
+      }
+
+      // After the source rows, never before: a switch names its computer by
+      // the ordinal of a <source>, which only they resolve (issue #3966).
+      final switches = importedGasSwitches(
+        diveData,
+        diveId: diveId,
+        tanks: tanks,
+        computerIdByOrdinal: computerIdByOrdinal,
+        now: now,
+      );
+      if (switches.isNotEmpty) {
+        await repos.diveRepository.insertGasSwitches(switches);
       }
 
       // Every further computer the dive was worn with (issue #2672). After
@@ -3552,6 +3564,36 @@ class UddfEntityImporter {
   }
 
   // -- Dive helper methods --
+
+  /// Stores a dive's merged samples after its per-source series could not be
+  /// (issue #3965). createDive left them out for those series, so without
+  /// this the dive has no profile at all.
+  ///
+  /// Best-effort: a throw here would abort the rest of the import over a dive
+  /// that is already stored, so a failure is logged and the import carries on.
+  Future<void> _keepMergedSamples(
+    DiveRepository dives,
+    String diveId,
+    List<DiveProfilePoint> profile,
+  ) async {
+    if (profile.isEmpty) return;
+    try {
+      await dives.restoreSourceProfiles(diveId, [
+        (
+          sourceId: null,
+          computerId: null,
+          isPrimary: true,
+          samples: [for (final point in profile) profileSampleFromPoint(point)],
+        ),
+      ]);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to store the merged samples of dive $diveId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+  }
 
   GeoPoint? _geoPoint(dynamic lat, dynamic lng) {
     final latVal = asDoubleOrNull(lat);
@@ -3792,6 +3834,20 @@ class UddfEntityImporter {
       }
     }
     return result;
+  }
+
+  /// A fresh id for each event in [eventMaps] whose id the log already holds.
+  Future<Map<String, String>> _freshIdsForTakenEvents(
+    List<Map<String, dynamic>>? eventMaps,
+    DiveRepository diveRepository,
+  ) async {
+    final ids = <String>[
+      for (final map in eventMaps ?? const <Map<String, dynamic>>[])
+        if (map['id'] case final String id when id.isNotEmpty) id,
+    ];
+    if (ids.isEmpty) return const {};
+    final taken = await diveRepository.existingProfileEventIds(ids);
+    return {for (final id in taken) id: _uuid.v4()};
   }
 
   Future<void> _storeTankPressures(

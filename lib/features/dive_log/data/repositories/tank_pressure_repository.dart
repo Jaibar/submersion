@@ -76,6 +76,19 @@ class TankPressureRepository {
     };
   }
 
+  /// [getTankPressuresForDive] for many dives at once, keyed by dive id, then
+  /// tank id; a dive with no pressure data is absent. Unlike
+  /// [getTankPressuresForDives] this keeps only the series the app reads, so
+  /// a statistic over many dives matches what one dive shows.
+  Future<Map<String, Map<String, List<TankPressurePoint>>>>
+  getDisplayedTankPressuresForDives(List<String> diveIds) async {
+    final exports = await getTankPressuresForDives(diveIds);
+    return {
+      for (final entry in exports.entries)
+        entry.key: _groupByTank(entry.value.displayedSeries),
+    };
+  }
+
   /// [getTankPressuresForDive] as one source saw the dive: on a tank that
   /// [computerId] logged, only its series; on any other tank, every series.
   /// See [selectTankSeriesForComputer] for why a consolidated dive needs
@@ -239,25 +252,32 @@ class TankPressureRepository {
     });
   }
 
-  /// Replace the pressure data of exactly [tankIds], leaving the series of
-  /// every tank not named intact.
+  /// Replace the pressure data of exactly the tanks [series] names with
+  /// [series], leaving the series of every other tank intact. Each entry
+  /// stays a series of its own, as in [insertTankSeries].
   ///
   /// A resync keeps a `dive_tanks` row the fresh parse no longer reports
   /// (#276: the cascade makes a wrong delete unrecoverable), so the pressure
   /// series recorded against that tank has to be kept with it. The dive-wide
   /// [replaceTankPressures] deletes it and tombstones it to every peer.
-  Future<void> replaceTankPressuresForTanks(
+  Future<void> replaceTankSeriesForTanks(
     String diveId,
-    Iterable<String> tankIds,
-    Map<String, List<({int timestamp, double pressure})>> pressuresByTank, {
-    String? sourceId,
-  }) async {
+    List<
+      ({
+        String tankId,
+        String? sourceId,
+        String? computerId,
+        List<({int timestamp, double pressure})> samples,
+      })
+    >
+    series,
+  ) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     await _db.transaction(() async {
-      for (final tankId in tankIds) {
+      for (final tankId in {for (final s in series) s.tankId}) {
         await _tankSeries.deleteForTank(diveId, tankId);
       }
-      await insertTankPressures(diveId, pressuresByTank, sourceId: sourceId);
+      await insertTankSeries(diveId, series);
       await _touchDive(diveId, now);
     });
     SyncEventBus.notifyLocalChange();

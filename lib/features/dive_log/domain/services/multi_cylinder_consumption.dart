@@ -1,5 +1,5 @@
-import 'package:submersion/core/constants/enums.dart';
-import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/core/constants/app_enums.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive_tank.dart';
 
 /// Gas consumption arithmetic over every cylinder a diver breathed from
 /// (issue #3109): a sidemount pair, doubles logged as independents, stages.
@@ -12,6 +12,10 @@ const Set<TankRole> sidemountRoles = {
   TankRole.sidemountLeft,
   TankRole.sidemountRight,
 };
+
+/// The roles that mean the primary gas worn on the back: a single cylinder
+/// or a manifolded twin set logged as one (issue #3374).
+const Set<TankRole> backmountRoles = {TankRole.backGas, TankRole.twinSet};
 
 /// The volume of [tank] for consumption math, in liters: its own, else the
 /// volume of the first other cylinder of the dive that forms a matched pair
@@ -29,13 +33,14 @@ double? consumptionVolume(DiveTank tank, List<DiveTank> tanks) {
 }
 
 /// The cylinder a SAC in bar is expressed in: on a multi-tank dive the
-/// back gas, else the first cylinder; the only cylinder on a single-tank
-/// dive whatever its role. Null when there are no cylinders.
+/// backmount gas (back gas or twin set), else the first cylinder; the only
+/// cylinder on a single-tank dive whatever its role. Null when there are no
+/// cylinders.
 DiveTank? sacReferenceTankOf(List<DiveTank> tanks) {
   if (tanks.isEmpty) return null;
   if (tanks.length == 1) return tanks.first;
   return tanks.firstWhere(
-    (t) => t.role == TankRole.backGas,
+    (t) => backmountRoles.contains(t.role),
     orElse: () => tanks.first,
   );
 }
@@ -47,11 +52,15 @@ DiveTank? sacReferenceTankOf(List<DiveTank> tanks) {
 /// A cylinder whose size cannot be related to the reference, or that was
 /// carried but not breathed, adds nothing.
 ///
-/// Null when [reference] has no positive drop. A rebreather dive has no
-/// SAC at all (issue #3673), so its callers never reach here.
+/// [reference] is the unit of account, so one that was measured and did not
+/// fall adds zero and the others still count (#3974). Null when [reference]
+/// has no known pressures, since nothing says how much it gave, and when
+/// nothing adds up to a drop. A rebreather dive has no SAC at all (issue
+/// #3673), so its callers never reach here.
 ///
-/// [dropOf] reads a cylinder's drop, its start minus end pressure by
-/// default; a part of the dive passes the drop over that part (#2928).
+/// [dropOf] reads a cylinder's drop, zero when it did not fall and null when
+/// it was not measured: its start minus end pressure by default; a part of
+/// the dive passes the drop over that part (#2928).
 double? referencePressureDrop({
   required DiveTank reference,
   required List<DiveTank> tanks,
@@ -60,20 +69,33 @@ double? referencePressureDrop({
   final referenceDrop = dropOf(reference);
   if (referenceDrop == null) return null;
 
-  final referenceVolume = consumptionVolume(reference, tanks);
   var total = referenceDrop;
   for (final tank in tanks) {
     if (identical(tank, reference)) continue;
     final drop = dropOf(tank);
     if (drop == null) continue;
-    final volume = consumptionVolume(tank, tanks);
-    if (volume != null && referenceVolume != null) {
-      total += drop * volume / referenceVolume;
-    } else if (isMatchedPair(tank, reference)) {
-      total += drop;
-    }
+    final ratio = referenceBarsPerBar(tank, reference, tanks);
+    if (ratio != null) total += drop * ratio;
   }
-  return total;
+  return total > 0 ? total : null;
+}
+
+/// What one bar of [tank] is worth in bar of [reference]: `V / Vref`, or one
+/// to one for a matched pair (see [isMatchedPair]) when either size is
+/// unknown. Null when the two cannot be related, so [tank] adds nothing to a
+/// [referencePressureDrop].
+double? referenceBarsPerBar(
+  DiveTank tank,
+  DiveTank reference,
+  List<DiveTank> tanks,
+) {
+  if (identical(tank, reference)) return 1;
+  final volume = consumptionVolume(tank, tanks);
+  final referenceVolume = consumptionVolume(reference, tanks);
+  if (volume != null && referenceVolume != null) {
+    return volume / referenceVolume;
+  }
+  return isMatchedPair(tank, reference) ? 1 : null;
 }
 
 /// Two logged mixes within this many percentage points of O2 and of He
@@ -82,12 +104,14 @@ double? referencePressureDrop({
 const double sameGasTolerancePct = 0.5;
 
 /// Whether [a] and [b] are a matched pair, assumed the same size when a
-/// size is missing: both sidemount cylinders, or both back gas on the same
-/// gas (doubles logged as independents). The gas matters for back gas
-/// because downloads default an untagged cylinder, a deco stage included,
-/// to that role.
+/// size is missing: both sidemount cylinders, both twin set rows (a diver
+/// chose that role, so no gas check), or both back gas on the same gas
+/// (doubles logged as independents). The gas matters for back gas because
+/// downloads default an untagged cylinder, a deco stage included, to that
+/// role.
 bool isMatchedPair(DiveTank a, DiveTank b) =>
     (sidemountRoles.contains(a.role) && sidemountRoles.contains(b.role)) ||
+    (a.role == TankRole.twinSet && b.role == TankRole.twinSet) ||
     (a.role == TankRole.backGas &&
         b.role == TankRole.backGas &&
         (a.gasMix.o2 - b.gasMix.o2).abs() <= sameGasTolerancePct &&
@@ -98,5 +122,5 @@ double? _drop(DiveTank tank) {
   final end = tank.endPressure;
   if (start == null || end == null) return null;
   final drop = start - end;
-  return drop > 0 ? drop : null;
+  return drop > 0 ? drop : 0;
 }

@@ -67,6 +67,7 @@ jobs:
       - name: Tests for the what-if features
         run: >
           flutter test
+          test/features/dive_lab
           test/features/dive_log/domain/services/gas_gf_what_if_test.dart
           test/features/dive_log/presentation/widgets/what_if_sheet_test.dart
           test/features/planner/domain/services/dive_to_plan_converter_test.dart

@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
+import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/sort_options.dart';
 import 'package:submersion/core/data/visibility/shared_item_policy.dart';
@@ -261,7 +263,9 @@ final sitesWithCountsProvider = FutureProvider<List<SiteWithDiveCount>>((
     validatedCurrentDiverIdProvider.future,
   );
   ref.invalidateSelfWhen(repository.watchSitesChanges());
-  ref.invalidateSelfWhen(ref.read(diveRepositoryProvider).watchDivesChanges());
+  ref.invalidateSelfWhen(
+    ref.read(diveRepositoryProvider).watchMeasuredRuntimeChanges(),
+  );
   // Feature chips on the list card come from site_features, so a feature
   // placed on the site map must refresh the list too.
   ref.invalidateSelfWhen(
@@ -510,7 +514,7 @@ final siteEntryExitSuggestionProvider =
 final siteDiveStatisticsProvider =
     FutureProvider.family<SiteDiveStatistics, String>((ref, siteId) async {
       final diveRepository = ref.watch(diveRepositoryProvider);
-      ref.invalidateSelfWhen(diveRepository.watchDivesChanges());
+      ref.invalidateSelfWhen(diveRepository.watchMeasuredRuntimeChanges());
 
       final diverId = await ref.watch(validatedCurrentDiverIdProvider.future);
       if (diverId == null) return SiteDiveStatistics.empty;
@@ -707,10 +711,16 @@ class SiteListNotifier
     List<domain.DiveSite> sites, {
     SiteLinks links = const SiteLinks(),
   }) async {
-    for (final site in sites) {
-      await _repository.createSite(site);
-    }
-    await _repository.restoreSiteLinks(links);
+    await ChangeLogScope.bulk(
+      DatabaseService.instance.databaseOrNull,
+      label: ChangeLogLabels.bulkEdit,
+      body: () async {
+        for (final site in sites) {
+          await _repository.createSite(site);
+        }
+        await _repository.restoreSiteLinks(links);
+      },
+    );
     // The delete cancelled the restored documents' reminders (#2613).
     await _ref.read(documentMutationsProvider).rearmReminders([
       for (final entry in links.documents) entry.document,

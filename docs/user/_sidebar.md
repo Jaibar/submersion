@@ -24,6 +24,7 @@
 - [The Dashboard](dashboard.md)
 - [Logging Dives](dive-logging.md)
 - [Dive Profiles & Deco](dive-profiles.md)
+- [Compare](compare.md)
 - [Dive Computers](dive-computer.md)
 - [Import & Export](import-export.md)
 - [Data Quality Assistant](data-quality-assistant.md)
@@ -50,8 +51,10 @@
 **Setup & Data**
 - [Settings](settings.md)
 - [Set Up This Device](set-up-this-device.md)
+- [Submersion in a Browser](web-app.md)
 - [Update Channels](update-channels.md)
 - [Backups](backup-and-restore.md)
+- [Change Log](change-log.md)
 - [Multi-Device Sync](multi-device-sync.md)
 - [Media Sync](media-sync.md)
 - [Encrypted Sync](encrypted-sync.md)

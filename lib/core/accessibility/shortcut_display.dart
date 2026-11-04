@@ -34,11 +34,15 @@ final Map<String, String Function(AppLocalizations)> _shortcutEntryLabels = {
   'Go to Settings': (l10n) => l10n.accessibility_shortcut_goToSettings,
   'Go back': (l10n) => l10n.accessibility_shortcut_goBack,
   'Search dives': (l10n) => l10n.accessibility_shortcut_searchDives,
+  'Search everything': (l10n) => l10n.accessibility_shortcut_searchEverything,
   'Ask about your dives': (l10n) => l10n.accessibility_shortcut_askQuestion,
   'Close / Cancel': (l10n) => l10n.accessibility_shortcut_closeCancel,
   'Open settings': (l10n) => l10n.accessibility_shortcut_openSettings,
   'Switch diver': (l10n) => l10n.accessibility_shortcut_switchDiver,
   'Keyboard shortcuts': (l10n) => l10n.accessibility_shortcut_keyboardShortcuts,
+  'Previous planned dive': (l10n) =>
+      l10n.accessibility_shortcut_previousPlannedDive,
+  'Next planned dive': (l10n) => l10n.accessibility_shortcut_nextPlannedDive,
 };
 
 /// Localized name for a built-in shortcut category; the raw string otherwise.
@@ -49,6 +53,7 @@ String shortcutCategoryLabel(AppLocalizations l10n, String category) =>
       'Editing' => l10n.accessibility_shortcutCategory_editing,
       'General' => l10n.accessibility_shortcutCategory_general,
       'Help' => l10n.accessibility_shortcutCategory_help,
+      'Planner' => l10n.accessibility_shortcutCategory_planner,
       _ => category,
     };
 

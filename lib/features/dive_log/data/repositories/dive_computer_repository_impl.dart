@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/features/dive_log/data/services/user_event_preservation.dart';
 import 'package:submersion/core/database/database.dart' as db;
 import 'package:submersion/core/database/database.dart'
     show
@@ -378,6 +379,7 @@ class DiveComputerRepository {
                 ),
                 diveCount: Value(computer.diveCount),
                 isFavorite: Value(computer.isFavorite),
+                autoDownloadDisabled: Value(computer.autoDownloadDisabled),
                 notes: Value(computer.notes),
                 createdAt: Value(now),
                 updatedAt: Value(now),
@@ -462,6 +464,7 @@ class DiveComputerRepository {
           ),
           diveCount: Value(computer.diveCount),
           isFavorite: Value(computer.isFavorite),
+          autoDownloadDisabled: Value(computer.autoDownloadDisabled),
           notes: Value(computer.notes),
           updatedAt: Value(now),
         ),
@@ -752,6 +755,35 @@ class DiveComputerRepository {
         error: e,
         stackTrace: stackTrace,
       );
+    }
+  }
+
+  /// Set or clear one computer's opt-out from auto-download (issue #3361),
+  /// leaving every other column as it is.
+  Future<void> setAutoDownloadDisabled(String id, bool disabled) async {
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await (_db.update(
+        _db.diveComputers,
+      )..where((t) => t.id.equals(id))).write(
+        DiveComputersCompanion(
+          autoDownloadDisabled: Value(disabled),
+          updatedAt: Value(now),
+        ),
+      );
+      await _syncRepository.markRecordPending(
+        entityType: 'diveComputers',
+        recordId: id,
+        localUpdatedAt: now,
+      );
+      SyncEventBus.notifyLocalChange();
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to set the auto-download opt-out of dive computer: $id',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
     }
   }
 
@@ -1132,35 +1164,14 @@ class DiveComputerRepository {
           ? null
           : diverId;
 
-      // Build diver filter conditionally
-      final diverClause = normalizedDiverId != null ? 'AND diver_id = ?' : '';
-      final diverVars = normalizedDiverId != null
-          ? [Variable(normalizedDiverId)]
-          : <Variable>[];
-
-      // Search for dives within the tolerance window.
-      //
-      // [durationSeconds] is the computer's runtime, so total_seconds is the
-      // whole Dive.effectiveRuntime chain rather than the bottom time.
       final result = await _db
           .customSelect(
-            '''
-        SELECT id, dive_date_time, entry_time, max_depth,
-          ${effectiveRuntimeSecondsSql('dives')} as total_seconds,
-          COALESCE(entry_time, dive_date_time) as effective_time,
-          ABS(COALESCE(entry_time, dive_date_time) - ?) as time_diff
-        FROM dives
-        WHERE ABS(COALESCE(entry_time, dive_date_time) - ?) <= ?
-          AND is_planned = 0
-          $diverClause
-        ORDER BY time_diff ASC
-        LIMIT 10
-      ''',
+            diveMatchCandidatesSql(scopedToDiver: normalizedDiverId != null),
             variables: [
               Variable(startMs),
-              Variable(startMs),
-              Variable(toleranceMs),
-              ...diverVars,
+              Variable(startMs - toleranceMs),
+              Variable(startMs + toleranceMs),
+              if (normalizedDiverId != null) Variable(normalizedDiverId),
             ],
           )
           .get();
@@ -1418,10 +1429,12 @@ class DiveComputerRepository {
     // beside the re-imported ones. importProfile stamps the fresh events
     // after this, so their clocks are newer and peers keep them.
     await _db.transaction(() async {
+      // The diver's own events are not the download's to replace (#4109).
       final deletedEvents =
           await (_db.delete(_db.diveProfileEvents)..where(
                 (t) =>
                     t.diveId.equals(diveId) &
+                    nonUserEvent(t) &
                     (sharedDive
                         ? t.computerId.equals(computerId)
                         : const Constant(true)),
@@ -1433,6 +1446,12 @@ class DiveComputerRepository {
             diveId: diveId,
             computerId: sharedDive ? computerId : null,
           ),
+        );
+        await restampUserEvents(
+          db: _db,
+          sync: _syncRepository,
+          diveId: diveId,
+          now: DateTime.now().millisecondsSinceEpoch,
         );
       }
     });
@@ -2740,6 +2759,7 @@ class DiveComputerRepository {
           : null,
       diveCount: row.diveCount,
       isFavorite: row.isFavorite,
+      autoDownloadDisabled: row.autoDownloadDisabled,
       notes: row.notes,
       equipmentId: row.equipmentId,
       createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),

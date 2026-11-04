@@ -10,10 +10,13 @@ import 'package:submersion/core/services/export/uddf/uddf_certification_currency
 import 'package:submersion/core/services/export/uddf/uddf_computer_tissue.dart';
 import 'package:submersion/core/services/export/uddf/uddf_visibility_range.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dive_custom_fields.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dive_durations.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dive_logistics.dart';
 import 'package:submersion/core/services/export/uddf/uddf_fill_writers.dart';
+import 'package:submersion/core/services/export/uddf/uddf_gas_mix_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_gear_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_participant_writers.dart';
+import 'package:submersion/core/services/export/uddf/uddf_rebreather_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_service_clock_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_site_classification_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_site_feature_writers.dart';
@@ -161,6 +164,7 @@ class UddfExportBuilders {
     List<Trip>? trips,
     List<GasSwitchWithTank> gasSwitches, {
     Map<String, List<TankPressurePoint>>? tankPressures,
+    List<DiveSourceExport> sources = const [],
   }) {
     // Find the trip this dive belongs to
     Trip? diveTrip;
@@ -348,10 +352,11 @@ class UddfExportBuilders {
                     }
                     if (tankPressures != null) {
                       for (final entry in tankPressures.entries) {
-                        final pressure = findPressureAtTimestamp(
-                          entry.value,
-                          point.timestamp,
-                        );
+                        final pressure =
+                            UddfSourceAttribution.findPressureAtTimestamp(
+                              entry.value,
+                              point.timestamp,
+                            );
                         if (pressure != null) {
                           builder.element(
                             'tankpressure',
@@ -367,16 +372,8 @@ class UddfExportBuilders {
                         nest: point.heartRate.toString(),
                       );
                     }
-                    // CCR/SCR sensor readings
-                    if (point.setpoint != null) {
-                      builder.element(
-                        'setpoint',
-                        nest: point.setpoint.toString(),
-                      );
-                    }
-                    if (point.ppO2 != null) {
-                      builder.element('ppo2', nest: point.ppO2.toString());
-                    }
+                    // CCR/SCR setpoint, loop ppO2 and cell readings
+                    UddfRebreatherWriters.writeSample(builder, point);
                     // Computer-reported GF99 (UDDF 3.2 waypoint child).
                     if (point.gf99 != null) {
                       builder.element(
@@ -395,95 +392,7 @@ class UddfExportBuilders {
         writeTankData(builder, dive);
 
         // Rebreather configuration (CCR/SCR data)
-        if (dive.diveMode != DiveMode.oc) {
-          builder.element(
-            'rebreather',
-            nest: () {
-              builder.element('divemode', nest: dive.diveMode.name);
-              // CCR Setpoints
-              if (dive.setpointLow != null) {
-                builder.element(
-                  'setpointlow',
-                  nest: dive.setpointLow.toString(),
-                );
-              }
-              if (dive.setpointHigh != null) {
-                builder.element(
-                  'setpointhigh',
-                  nest: dive.setpointHigh.toString(),
-                );
-              }
-              if (dive.setpointDeco != null) {
-                builder.element(
-                  'setpointdeco',
-                  nest: dive.setpointDeco.toString(),
-                );
-              }
-              // SCR Configuration
-              if (dive.scrType != null) {
-                builder.element('scrtype', nest: dive.scrType!.name);
-              }
-              if (dive.scrInjectionRate != null) {
-                builder.element(
-                  'scrinjectionrate',
-                  nest: dive.scrInjectionRate.toString(),
-                );
-              }
-              if (dive.scrAdditionRatio != null) {
-                builder.element(
-                  'scradditionratio',
-                  nest: dive.scrAdditionRatio.toString(),
-                );
-              }
-              if (dive.scrOrificeSize != null) {
-                builder.element('scrorificesize', nest: dive.scrOrificeSize);
-              }
-              if (dive.assumedVo2 != null) {
-                builder.element('assumedvo2', nest: dive.assumedVo2.toString());
-              }
-              // Diluent gas
-              if (dive.diluentGas != null) {
-                builder.element(
-                  'diluento2',
-                  nest: dive.diluentGas!.o2.toString(),
-                );
-                builder.element(
-                  'diluenthe',
-                  nest: dive.diluentGas!.he.toString(),
-                );
-              }
-              // Loop FO2 measurements
-              if (dive.loopO2Min != null) {
-                builder.element('loopo2min', nest: dive.loopO2Min.toString());
-              }
-              if (dive.loopO2Max != null) {
-                builder.element('loopo2max', nest: dive.loopO2Max.toString());
-              }
-              if (dive.loopO2Avg != null) {
-                builder.element('loopo2avg', nest: dive.loopO2Avg.toString());
-              }
-              // Scrubber and loop info
-              if (dive.loopVolume != null) {
-                builder.element('loopvolume', nest: dive.loopVolume.toString());
-              }
-              if (dive.scrubber != null) {
-                builder.element('scrubbertype', nest: dive.scrubber!.type);
-                if (dive.scrubber!.ratedMinutes != null) {
-                  builder.element(
-                    'scrubberdurationminutes',
-                    nest: dive.scrubber!.ratedMinutes.toString(),
-                  );
-                }
-                if (dive.scrubber!.remainingMinutes != null) {
-                  builder.element(
-                    'scrubberremainingminutes',
-                    nest: dive.scrubber!.remainingMinutes.toString(),
-                  );
-                }
-              }
-            },
-          );
-        }
+        UddfRebreatherWriters.writeConfiguration(builder, dive);
 
         // Information after dive
         builder.element(
@@ -501,18 +410,7 @@ class UddfExportBuilders {
             if (dive.avgDepth != null) {
               builder.element('averagedepth', nest: dive.avgDepth.toString());
             }
-            if (dive.bottomTime != null) {
-              builder.element(
-                'diveduration',
-                nest: dive.bottomTime!.inSeconds.toString(),
-              );
-            }
-            if (dive.runtime != null) {
-              builder.element(
-                'runtime',
-                nest: dive.runtime!.inSeconds.toString(),
-              );
-            }
+            UddfDiveDurations.write(builder, dive);
             if (dive.waterTemp != null) {
               builder.element(
                 'lowesttemperature',
@@ -609,6 +507,11 @@ class UddfExportBuilders {
             if (dive.excludedFromGasStats) {
               builder.element('excludedfromgasstats', nest: 'true');
             }
+            // The diver-owned switch list (issue #32): without it a
+            // restored dive's next re-parse would delete their switches.
+            if (dive.gasSwitchesEdited) {
+              builder.element('gasswitchesedited', nest: 'true');
+            }
             if (dive.photoIds.isNotEmpty) {
               builder.element(
                 'photos',
@@ -681,6 +584,11 @@ class UddfExportBuilders {
                           'eventtype',
                           nest: event.eventType.name,
                         );
+                        // The row id and who authored it, so a restore
+                        // brings an annotation back under the id its Notes
+                        // link names (#4109).
+                        builder.element('id', nest: event.id);
+                        builder.element('source', nest: event.source.name);
                         builder.element('severity', nest: event.severity.name);
                         if (event.depth != null) {
                           builder.element(
@@ -709,39 +617,47 @@ class UddfExportBuilders {
                 },
               );
             }
-            // Export gas switches (source data from dive computers)
-            if (gasSwitches.isNotEmpty) {
-              builder.element(
-                'gasswitches',
-                nest: () {
-                  for (final gs in gasSwitches) {
-                    builder.element(
-                      'gasswitch',
-                      nest: () {
-                        builder.element('time', nest: gs.timestamp.toString());
-                        if (gs.depth != null) {
-                          builder.element('depth', nest: gs.depth.toString());
-                        }
-                        builder.element('tankref', nest: gs.tankId);
-                        builder.element('gasmix', nest: gs.gasMix);
-                        builder.element(
-                          'o2fraction',
-                          nest: gs.o2Fraction.toString(),
-                        );
-                        if (gs.heFraction > 0) {
-                          builder.element(
-                            'hefraction',
-                            nest: gs.heFraction.toString(),
-                          );
-                        }
-                      },
-                    );
-                  }
-                },
-              );
-            }
+            buildGasSwitches(builder, gasSwitches, sources);
           },
         );
+      },
+    );
+  }
+
+  /// Writes [gasSwitches], the source data from dive computers, for a dive
+  /// with [sources]. Shared by the full backup and the dives-only export;
+  /// writes nothing for a dive with none.
+  static void buildGasSwitches(
+    XmlBuilder builder,
+    List<GasSwitchWithTank> gasSwitches,
+    List<DiveSourceExport> sources,
+  ) {
+    if (gasSwitches.isEmpty) return;
+    builder.element(
+      'gasswitches',
+      nest: () {
+        for (final gs in gasSwitches) {
+          builder.element(
+            'gasswitch',
+            nest: () {
+              builder.element('time', nest: gs.timestamp.toString());
+              if (gs.depth != null) {
+                builder.element('depth', nest: gs.depth.toString());
+              }
+              builder.element('tankref', nest: gs.tankId);
+              builder.element('gasmix', nest: gs.gasMix);
+              builder.element('o2fraction', nest: gs.o2Fraction.toString());
+              if (gs.heFraction > 0) {
+                builder.element('hefraction', nest: gs.heFraction.toString());
+              }
+              UddfSourceAttribution.writeSwitchComputer(
+                builder,
+                gs.gasSwitch.computerId,
+                sources,
+              );
+            },
+          );
+        }
       },
     );
   }
@@ -794,10 +710,14 @@ class UddfExportBuilders {
     List<Course>? courses,
     List<DiveSourceExport>? dataSources,
     Map<String, String?> dataSourceDumps = const {},
-    // The dives whose tank rows and tank pressure series the per-source
-    // blocks beside <datasources> attribute (issue #2492), and those series.
-    // Only a dive with two or more [dataSources] entries writes any, so
-    // neither needs its own check in hasData below.
+    // Whether each <source> names its computer and file; see
+    // [buildDataSources].
+    bool includeSourceIdentity = true,
+    // The dives whose tank rows, tank pressure series and depth series the
+    // per-source blocks beside <datasources> attribute (issues #2492, #3965),
+    // and the pressure series; the depth series ride on [dataSources].
+    // A dive with fewer than two [dataSources] entries writes no depth series,
+    // and a pressure series only when its waypoints cannot hold it (#3917).
     List<Dive> attributedDives = const [],
     Map<String, DiveTankPressureExport> diveTankPressures = const {},
     List<EquipmentComponent>? components,
@@ -870,7 +790,12 @@ class UddfExportBuilders {
         // Without this a logbook whose only extra payload is its data source
         // records would write no <applicationdata> at all, and the dumps in
         // <divecomputercontrol> would lose their descriptors.
-        (dataSources?.isNotEmpty ?? false);
+        (dataSources?.isNotEmpty ?? false) ||
+        UddfSourceAttribution.hasSeries(
+          dives: attributedDives,
+          pressures: diveTankPressures,
+          sources: dataSources ?? const [],
+        );
 
     if (!hasData) return;
 
@@ -1777,7 +1702,12 @@ class UddfExportBuilders {
             }
 
             // Per-source provenance for the dumps in <divecomputercontrol>.
-            buildDataSources(builder, dataSources ?? const [], dataSourceDumps);
+            buildDataSources(
+              builder,
+              dataSources ?? const [],
+              dataSourceDumps,
+              includeIdentity: includeSourceIdentity,
+            );
             // Which of those sources recorded each tank and its pressures.
             UddfSourceAttribution.write(
               builder,
@@ -1822,11 +1752,20 @@ class UddfExportBuilders {
   /// claiming one, so a row that claims a dump it did not get would shift
   /// every later dump onto the wrong row, descriptor triple included. A row
   /// can hold bytes and still get no dump when its encode failed.
+  ///
+  /// With [includeIdentity] false each entry leaves out the computer's model
+  /// and serial and the source's file name and id, which name the diver's
+  /// gear, and its descriptor unless the entry has a dump to re-parse: a
+  /// dives export shared without gear writes the rest of the row and no more.
+  /// Each recording still restores as its own source, with no computer. A
+  /// dump itself still holds the computer's identity, serial included, so a
+  /// share with raw data ticked carries it there.
   static void buildDataSources(
     XmlBuilder builder,
     List<DiveSourceExport> sources,
-    Map<String, String?> encodedById,
-  ) {
+    Map<String, String?> encodedById, {
+    bool includeIdentity = true,
+  }) {
     if (sources.isEmpty) return;
 
     builder.element(
@@ -1841,9 +1780,12 @@ class UddfExportBuilders {
               'hasdump': '${encodedById[source.id] != null}',
             },
             nest: () {
-              if (source.descriptorVendor != null ||
-                  source.descriptorProduct != null ||
-                  source.descriptorModel != null) {
+              // The descriptor is what a re-parse of the dump needs; on an
+              // entry with none it would only name the computer.
+              if ((includeIdentity || encodedById[source.id] != null) &&
+                  (source.descriptorVendor != null ||
+                      source.descriptorProduct != null ||
+                      source.descriptorModel != null)) {
                 builder.element(
                   'descriptor',
                   attributes: {
@@ -1861,7 +1803,11 @@ class UddfExportBuilders {
                 'libdivecomputerversion',
                 source.libdivecomputerVersion,
               );
-              _dsText(builder, 'sourceuuid', source.sourceUuid);
+              // A source's own id can embed the device serial (a FIT
+              // import's is garmin-<serial>-<start>), so it is identity too.
+              if (includeIdentity) {
+                _dsText(builder, 'sourceuuid', source.sourceUuid);
+              }
               if (source.rawFingerprint != null &&
                   source.rawFingerprint!.isNotEmpty) {
                 builder.element(
@@ -1872,10 +1818,14 @@ class UddfExportBuilders {
               builder.element('primary', nest: '${source.isPrimary}');
               _dsNumber(builder, 'mergesourceslot', source.mergeSourceSlot);
               _dsNumber(builder, 'timeoffsetseconds', source.timeOffsetSeconds);
-              _dsText(builder, 'computermodel', source.computerModel);
-              _dsText(builder, 'computerserial', source.computerSerial);
+              if (includeIdentity) {
+                _dsText(builder, 'computermodel', source.computerModel);
+                _dsText(builder, 'computerserial', source.computerSerial);
+              }
               _dsText(builder, 'sourceformat', source.sourceFormat);
-              _dsText(builder, 'sourcefilename', source.sourceFileName);
+              if (includeIdentity) {
+                _dsText(builder, 'sourcefilename', source.sourceFileName);
+              }
               _dsText(builder, 'sourcefileformat', source.sourceFileFormat);
               _dsDate(builder, 'importedat', source.importedAt);
               _dsDate(builder, 'createdat', source.createdAt);
@@ -2005,9 +1955,10 @@ class UddfExportBuilders {
         attributes: {'id': 'tank_${tank.id}'},
         nest: () {
           // Link to gas mix
-          final mixId =
-              'mix_${tank.gasMix.o2.toInt()}_${tank.gasMix.he.toInt()}';
-          builder.element('link', attributes: {'ref': mixId});
+          builder.element(
+            'link',
+            attributes: {'ref': UddfGasMixWriters.mixId(tank.gasMix)},
+          );
           // Tank name
           if (includeIdentity && tank.name != null && tank.name!.isNotEmpty) {
             builder.element('tankname', nest: tank.name);
@@ -2082,52 +2033,7 @@ class UddfExportBuilders {
   /// logged (issue #1878).
   static String? startMixId(Dive dive) {
     final tank = dive.tanks.firstOrNull;
-    return tank == null
-        ? null
-        : 'mix_${tank.gasMix.o2.toInt()}_${tank.gasMix.he.toInt()}';
-  }
-
-  /// Find pressure at a given timestamp using binary search.
-  /// Points must be sorted by timestamp (ascending).
-  /// Returns null if no point exists within 2 seconds of [timestamp].
-  static double? findPressureAtTimestamp(
-    List<TankPressurePoint> points,
-    int timestamp,
-  ) {
-    if (points.isEmpty) return null;
-
-    // Binary search for the insertion point
-    int low = 0;
-    int high = points.length;
-    while (low < high) {
-      final mid = low + ((high - low) >> 1);
-      if (points[mid].timestamp < timestamp) {
-        low = mid + 1;
-      } else {
-        high = mid;
-      }
-    }
-
-    // Check the two candidates (before and at insertion point)
-    const maxDiff = 3; // exclusive — accepts diffs of 0, 1, 2
-    TankPressurePoint? closest;
-    int minDiff = maxDiff;
-
-    if (low > 0) {
-      final diff = (points[low - 1].timestamp - timestamp).abs();
-      if (diff < minDiff) {
-        minDiff = diff;
-        closest = points[low - 1];
-      }
-    }
-    if (low < points.length) {
-      final diff = (points[low].timestamp - timestamp).abs();
-      if (diff < minDiff) {
-        closest = points[low];
-      }
-    }
-
-    return closest?.pressure;
+    return tank == null ? null : UddfGasMixWriters.mixId(tank.gasMix);
   }
 
   /// UDDF carries visibility as a distance in meters.

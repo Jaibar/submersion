@@ -10,6 +10,7 @@ import 'package:submersion/core/router/nav_shortcut_pages.dart';
 
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/notification_service.dart';
+import 'package:submersion/features/agent_access/presentation/pages/agent_access_page.dart';
 import 'package:submersion/features/buddies/domain/services/buddy_card_codec.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_card_preview_page.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_swap_page.dart';
@@ -111,6 +112,9 @@ import 'package:submersion/features/insights/presentation/pages/insights_observa
 import 'package:submersion/features/insights/presentation/pages/insights_focus_page.dart';
 import 'package:submersion/features/insights/presentation/pages/insights_profile_page.dart';
 import 'package:submersion/features/backup/presentation/pages/backup_settings_page.dart';
+import 'package:submersion/features/change_log/presentation/pages/change_log_entry_page.dart';
+import 'package:submersion/features/change_log/presentation/pages/change_log_page.dart';
+import 'package:submersion/features/change_log/presentation/pages/change_log_settings_page.dart';
 import 'package:submersion/features/settings/presentation/pages/manage_currency_rules_page.dart';
 import 'package:submersion/features/settings/presentation/pages/hidden_items_page.dart';
 import 'package:submersion/features/settings/presentation/pages/cloud_sync_page.dart';
@@ -157,6 +161,7 @@ import 'package:submersion/features/settings/presentation/pages/language_setting
 import 'package:submersion/features/settings/presentation/pages/nav_customization_page.dart';
 import 'package:submersion/features/settings/presentation/pages/theme_gallery_page.dart';
 import 'package:submersion/features/settings/presentation/pages/data_tools_page.dart';
+import 'package:submersion/features/table_editor/presentation/pages/table_editor_page.dart';
 import 'package:submersion/features/settings/presentation/pages/import_options_page.dart';
 import 'package:submersion/features/settings/presentation/pages/storage_settings_page.dart';
 import 'package:submersion/features/backup/presentation/pages/unrecognized_backups_page.dart';
@@ -201,7 +206,9 @@ import 'package:submersion/features/planning/presentation/widgets/planning_discl
 import 'package:submersion/features/nav_track/presentation/pages/nav_track_align_page.dart';
 import 'package:submersion/features/nav_track/presentation/pages/nav_track_detail_page.dart';
 import 'package:submersion/features/nav_track/presentation/pages/nav_track_seascape_page.dart';
+import 'package:submersion/features/global_search/presentation/pages/global_search_page.dart';
 import 'package:submersion/features/gps_log/presentation/pages/gps_track_detail_page.dart';
+import 'package:submersion/core/router/global_search_location.dart';
 import 'package:submersion/core/router/track_locations.dart';
 import 'package:submersion/core/router/media_documents_locations.dart';
 import 'package:submersion/core/router/training_locations.dart';
@@ -250,14 +257,30 @@ import 'package:submersion/features/certification_agencies/presentation/pages/ce
 import 'package:submersion/features/certification_agencies/presentation/pages/certification_agency_edit_page.dart';
 import 'package:submersion/features/demo_mode/presentation/demo_sealed_routes.dart';
 import 'package:submersion/features/demo_mode/presentation/pages/demo_unavailable_page.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
+import 'package:submersion/core/router/web_unavailable_routes.dart';
+import 'package:submersion/shared/widgets/web_unavailable_page.dart';
 
 /// Root navigator key, so app-wide modals (e.g. the replaced-library adopt
 /// dialog surfaced from the app root) can be shown above the shell.
 final rootNavigatorKey = GlobalKey<NavigatorState>(debugLabel: 'root');
 
+/// Reports when a route is pushed on top of, or popped back to, the Dive
+/// Computers section of the Transfer tab (issue #3361), so
+/// `AutoConnectController` can pause its passive scan while the discovery
+/// wizard, a computer detail page or the download page covers it, and
+/// resume when the diver backs out to it again.
+///
+/// go_router merges `GoRouter.observers` into every `ShellRoute`'s own
+/// nested `Navigator` by default (`notifyRootObserver: true`, unchanged
+/// here), so this one `RouteObserver` sees pushes/pops for every shell
+/// branch, not only the root `Navigator`.
+final computersRouteObserver = RouteObserver<ModalRoute<void>>();
+
 final appRouterProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     navigatorKey: rootNavigatorKey,
+    observers: [computersRouteObserver],
     initialLocation: '/dashboard',
     redirect: (context, state) async {
       // Skip redirect logic during database migration to prevent deadlock
@@ -268,6 +291,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // Demo mode (issue #3708): a sealed screen explains itself instead.
       final sealed = demoRedirect(state.uri.toString());
       if (sealed != null) return sealed;
+
+      // A browser cannot serve the hardware and file-bound screens; a
+      // bookmark or deep link to one lands on a page that says so.
+      final unavailable = webUnavailableRedirect(
+        ref.read(deviceCapabilitiesProvider),
+        state.uri.toString(),
+      );
+      if (unavailable != null) return unavailable;
 
       final hasDivers = await ref.read(hasAnyDiversProvider.future);
       final isOnWelcome = state.matchedLocation == '/welcome';
@@ -311,6 +342,15 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             name: 'demoUnavailable',
             builder: (context, state) => DemoUnavailablePage(
               feature: DemoUnavailablePage.featureFromQuery(
+                state.uri.queryParameters['feature'],
+              ),
+            ),
+          ),
+          GoRoute(
+            path: webUnavailableLocation,
+            name: 'webUnavailable',
+            builder: (context, state) => WebUnavailablePage(
+              feature: WebUnavailablePage.featureFromQuery(
                 state.uri.queryParameters['feature'],
               ),
             ),
@@ -1395,6 +1435,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 name: 'incidentNew',
                 builder: (context, state) => IncidentEditPage(
                   diveId: state.uri.queryParameters['diveId'],
+                  observationId: state.uri.queryParameters['observationId'],
                 ),
               ),
               GoRoute(
@@ -1442,6 +1483,28 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 ),
               ),
               GoRoute(
+                path: 'change-log',
+                name: 'changeLog',
+                builder: (context, state) => ChangeLogPage(
+                  rootTable: state.uri.queryParameters['rootTable'],
+                  rootId: state.uri.queryParameters['rootId'],
+                ),
+                routes: [
+                  GoRoute(
+                    path: 'settings',
+                    name: 'changeLogSettings',
+                    builder: (context, state) => const ChangeLogSettingsPage(),
+                  ),
+                  GoRoute(
+                    path: ':id',
+                    name: 'changeLogEntry',
+                    builder: (context, state) => ChangeLogEntryPage(
+                      operationId: state.pathParameters['id']!,
+                    ),
+                  ),
+                ],
+              ),
+              GoRoute(
                 path: 'storage',
                 name: 'storageSettings',
                 builder: (context, state) => const StorageSettingsPage(),
@@ -1462,6 +1525,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 builder: (context, state) => const DataToolsPage(),
               ),
               GoRoute(
+                path: 'agent-access',
+                name: 'agentAccess',
+                builder: (context, state) => const AgentAccessPage(),
+              ),
+              GoRoute(
                 path: 'storage-usage',
                 name: 'storageUsage',
                 builder: (context, state) => const StorageUsagePage(),
@@ -1478,6 +1546,12 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 path: 'data-quality',
                 name: 'dataQualitySettings',
                 builder: (context, state) => const DataQualitySettingsPage(),
+              ),
+              GoRoute(
+                path: 'table-editor',
+                name: 'tableEditor',
+                onExit: confirmLeaveTableEditor,
+                builder: (context, state) => const TableEditorPage(),
               ),
               GoRoute(
                 path: 'appearance',
@@ -2102,6 +2176,17 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 ),
               ),
             ],
+          ),
+
+          // Global search (#3882): a nav destination, inside the shell, so
+          // the rail and bottom bar stay up beside it.
+          GoRoute(
+            path: kGlobalSearchLocation,
+            name: 'globalSearch',
+            pageBuilder: (context, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const GlobalSearchPage(),
+            ),
           ),
 
           // Species: the seen-species page, with the catalog manager, the

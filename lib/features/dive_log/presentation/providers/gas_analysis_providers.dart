@@ -1,3 +1,4 @@
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/features/dive_log/data/services/gas_analysis_service.dart';
@@ -6,6 +7,7 @@ import 'package:submersion/features/dive_log/domain/entities/cylinder_sac.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/gas_switch.dart';
 import 'package:submersion/features/dive_log/domain/entities/source_profile.dart';
+import 'package:submersion/features/dive_log/domain/services/deco_stop_windows.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/gas_switch_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
@@ -21,10 +23,13 @@ final gasAnalysisServiceProvider = Provider<GasAnalysisService>((ref) {
 
 /// What a segment breakdown reads, for the data source in view.
 typedef _SegmentInputs = ({
+  SourceProfile? source,
   List<DiveProfilePoint> profile,
   List<DiveTank> tanks,
   List<GasSwitchWithTank> gasSwitches,
   Map<String, List<TankPressurePoint>> tankPressures,
+  DiveEnvironment environment,
+  bool onLoop,
 });
 
 /// The source whose samples [key] names, or null when the dive has no
@@ -59,10 +64,13 @@ Future<_SegmentInputs?> _segmentInputs(Ref ref, DiveSourceKey key) async {
   final computerId = source?.computerId;
   if (computerId == null) {
     return (
+      source: source,
       profile: source?.points ?? dive.profile,
       tanks: dive.tanks,
       gasSwitches: gasSwitches,
       tankPressures: tankPressures,
+      environment: dive.environment,
+      onLoop: dive.isRebreather,
     );
   }
 
@@ -76,6 +84,7 @@ Future<_SegmentInputs?> _segmentInputs(Ref ref, DiveSourceKey key) async {
         sourceId: source!.sourceId,
       );
   return (
+    source: source,
     profile: source.points,
     tanks: tanks,
     gasSwitches: [
@@ -88,6 +97,8 @@ Future<_SegmentInputs?> _segmentInputs(Ref ref, DiveSourceKey key) async {
       for (final entry in ownPressures.entries)
         if (tankIds.contains(entry.key)) entry.key: entry.value,
     },
+    environment: dive.environment,
+    onLoop: dive.isRebreather,
   );
 }
 
@@ -111,18 +122,26 @@ final gasSwitchSegmentsProvider =
         tankPressures: inputs.tankPressures.isEmpty
             ? null
             : inputs.tankPressures,
+        environment: inputs.environment,
+        onLoop: inputs.onLoop,
       );
     });
 
 /// Provider for depth-phase based SAC segments
 ///
 /// Automatically detects dive phases: descent, bottom, ascent, safety stop.
+/// The profile analysis says which holds were deco stops, so this breakdown
+/// and the chart's events agree on them.
 final phaseSegmentsProvider =
     FutureProvider.family<List<SacSegment>?, DiveSourceKey>((ref, key) async {
       final inputs = await _segmentInputs(ref, key);
       if (inputs == null || inputs.profile.isEmpty) return null;
 
+      final analysis = await ref.watch(
+        sourceProfileAnalysisProvider(key).future,
+      );
       final service = ref.watch(gasAnalysisServiceProvider);
+      final source = inputs.source;
       return service.calculatePhaseSegments(
         profile: inputs.profile,
         tanks: inputs.tanks,
@@ -130,6 +149,17 @@ final phaseSegmentsProvider =
             ? null
             : inputs.tankPressures,
         gasSwitches: inputs.gasSwitches.isEmpty ? null : inputs.gasSwitches,
+        environment: inputs.environment,
+        onLoop: inputs.onLoop,
+        decoStops: analysis?.decoStopWindows ?? const [],
+        safetyStops: safetyStopWindows(
+          analysis?.events ?? const [],
+          profile: inputs.profile,
+          analyzedSource: source == null
+              ? null
+              : (computerId: source.computerId),
+        ),
+        ndlCurve: analysis?.ndlCurve ?? const [],
       );
     });
 

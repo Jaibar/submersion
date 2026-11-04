@@ -1,18 +1,20 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
-
-import 'package:crypto/crypto.dart';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:drift/drift.dart' show TableUpdate, Variable;
 
+import 'package:submersion/core/platform/host_platform.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_files.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/computer_tissue_scalar_move.dart';
+import 'package:submersion/core/database/weather_fetched_at_repair.dart';
+import 'package:submersion/core/database/combined_dive_summary_repair.dart';
 import 'package:submersion/core/database/device_gear_heal.dart';
 import 'package:submersion/core/database/database.dart'
     show AppDatabase, SyncRecord, DeletionLogData;
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/cloud_storage/cloud_storage_provider.dart';
 import 'package:submersion/core/services/cloud_storage/deferred_write_provider.dart';
 import 'package:submersion/core/services/database_service.dart';
@@ -58,6 +60,7 @@ import 'package:submersion/core/services/nearby/nearby_peer_store.dart';
 import 'package:submersion/core/services/shared_library/library_site_notes.dart';
 import 'package:submersion/core/services/shared_library/shared_library_store.dart';
 import 'package:submersion/core/services/sync/sync_data_serializer.dart';
+import 'package:submersion/core/services/sync/legacy_wire_keys.dart';
 import 'package:submersion/core/services/sync/sync_record_overlay.dart';
 import 'package:submersion/core/services/sync/tag_fill_copy_merge.dart';
 import 'package:submersion/core/services/sync/sync_initializer.dart';
@@ -294,8 +297,9 @@ class SyncService {
   /// immediately, regardless of this.
   static const _unreadableEpochGraceMs = 60 * 60 * 1000; // 1 hour
 
+  static const ChangesetCodec _changesetCodec = ChangesetCodec();
+
   // Changeset-log transport (Phases 1-6), lazily bound to the active database.
-  late final ChangesetCodec _changesetCodec = ChangesetCodec(_serializer);
 
   /// Assembles a peer's base parts into a temp file (per-part + whole-file
   /// checksum verified) for the bounded-memory replace-adopt (#358).
@@ -389,11 +393,13 @@ class SyncService {
   debugApplyBaseFile(
     String filePath, {
     DateTime? lastSync,
+    String? peerDeviceId,
     void Function(double fraction)? onProgress,
   }) async {
     final r = await _applyRemoteBaseFile(
       filePath,
       lastSync,
+      peerDeviceId: peerDeviceId,
       onProgress: onProgress,
     );
     return (
@@ -427,6 +433,7 @@ class SyncService {
   Future<NearbyApplyResult> applyNearbyBaseFile(
     String filePath, {
     required DateTime? lastSync,
+    String? peerDeviceId,
     void Function(double fraction)? onProgress,
   }) {
     DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.sync);
@@ -434,6 +441,7 @@ class SyncService {
       final r = await _applyRemoteBaseFile(
         filePath,
         lastSync,
+        peerDeviceId: peerDeviceId,
         onProgress: onProgress,
       );
       return (
@@ -761,6 +769,7 @@ class SyncService {
           final r = await _applyRemoteBaseFile(
             path,
             lastSyncTime,
+            peerDeviceId: manifest.deviceId,
             onProgress: (fraction) => _reportProgress(
               SyncPhase.downloading,
               0.55 + 0.25 * fraction,
@@ -1429,31 +1438,56 @@ class SyncService {
     // courseId points at a course in the same payload) fail immediately and
     // the affected rows never reach the receiving DB. See
     // docs/design/findings/2026-06-02-icloud-sync-diagnosis.md.
-    return _serializer.applyInDeferredFkTransaction(() async {
-      final result = await _applyRemotePayloadInner(
-        remotePayload,
-        localLastSync,
-      );
-      await _moveLegacyComputerTissueScalars();
-      return result;
-    });
+    return ChangeLogScope.run(
+      DatabaseService.instance.databaseOrNull,
+      source: ChangeLogSource.sync,
+      deviceId: remotePayload.deviceId,
+      lease: kChangeLogLongLease,
+      body: () => _serializer.applyInDeferredFkTransaction(() async {
+        final result = await _applyRemotePayloadInner(
+          remotePayload,
+          localLastSync,
+        );
+        await _repairLegacyPeerRows(
+          combinedDiveIds: {
+            for (final dive in remotePayload.data.dives) ?dive['id'] as String?,
+            for (final source in remotePayload.data.diveDataSources)
+              ?source['diveId'] as String?,
+          },
+        );
+        return result;
+      }),
+    );
   }
 
+  /// Runs the data rungs over what was just applied, because this database
+  /// ran them before those rows arrived, or never ran them if it is new. Each
+  /// reads only rows still in the old shape, so it is a cheap no-op once every
+  /// peer is current, and each leaves the sync stamp alone, as its rung does:
+  /// the sending peer makes the same change when it upgrades. A combined dive
+  /// keeps its shape once repaired, so that repair reads only
+  /// [combinedDiveIds], the dives a payload touched; null, for a base file,
+  /// sweeps them all.
+  ///
   /// A peer below v318 still publishes the CNS, OTU and deco model inside a
   /// dive's computer tissue snapshot, with the dive's own columns empty
-  /// (issue #2555). This database ran the v318 rung before that row
-  /// arrived, so run the same move over what was just applied: it reads
-  /// only snapshots that still name one of those keys, so it is a cheap
-  /// no-op once every peer is on v318. Leaves the sync stamp alone, as the
-  /// rung does: the sending peer makes the same move when it upgrades.
-  Future<void> _moveLegacyComputerTissueScalars() async {
+  /// (issue #2555). One below v337 publishes `weather_fetched_at` in
+  /// milliseconds, as does a sync store written before it (issue #4119). One
+  /// below v340 publishes a combined dive with its first segment's water
+  /// temperature, CNS and OTU (issue #4136).
+  Future<void> _repairLegacyPeerRows({
+    Iterable<String>? combinedDiveIds,
+  }) async {
     try {
-      await moveComputerTissueScalars(DatabaseService.instance.database);
+      final db = DatabaseService.instance.database;
+      await repairWeatherFetchedAtSeconds(db);
+      await repairCombinedDiveSummaries(db, diveIds: combinedDiveIds);
+      await moveComputerTissueScalars(db);
     } catch (e, st) {
-      // The applied rows are already in place; losing this move costs only
+      // The applied rows are already in place; losing this repair costs only
       // the old values, never the sync.
       _log.warning(
-        'Moving legacy computer tissue values failed (non-fatal)',
+        'Repairing rows from an older peer failed (non-fatal)',
         error: e,
         stackTrace: st,
       );
@@ -1583,6 +1617,11 @@ class SyncService {
             hasUpdatedAt: true,
           ),
           (
+            type: 'tripChecklists',
+            records: data.tripChecklists,
+            hasUpdatedAt: true,
+          ),
+          (
             type: 'tripChecklistSections',
             records: data.tripChecklistSections,
             hasUpdatedAt: true,
@@ -1624,6 +1663,12 @@ class SyncService {
           ),
           (type: 'gpsTracks', records: data.gpsTracks, hasUpdatedAt: true),
           (type: 'navTracks', records: data.navTracks, hasUpdatedAt: true),
+          // Before divePlans, whose series_id references it.
+          (
+            type: 'divePlanSeries',
+            records: data.divePlanSeries,
+            hasUpdatedAt: true,
+          ),
           (type: 'divePlans', records: data.divePlans, hasUpdatedAt: true),
           (
             type: 'divePlanTanks',
@@ -1715,6 +1760,12 @@ class SyncService {
             type: 'divePlanEquipment',
             records: data.divePlanEquipment,
             hasUpdatedAt: false,
+          ),
+          // After dives (the scenario's parent).
+          (
+            type: 'diveScenarios',
+            records: data.diveScenarios,
+            hasUpdatedAt: true,
           ),
           (
             type: 'diverWeightEntries',
@@ -2223,12 +2274,61 @@ class SyncService {
   ///
   /// [onProgress] receives a 0.0 to 1.0 fraction spanning the three passes
   /// (each pass is one third), with a final 1.0 once the transaction commits.
+  ///
+  /// A device with no library of its own taking its first base would log the
+  /// whole library, so that records one summary. An established device can
+  /// also meet a base when a peer's compaction has lapped it: those are real
+  /// changes, update triggers skip the rows that did not change, and they log
+  /// as a normal sync.
   Future<_MergeResult> _applyRemoteBaseFile(
+    String filePath,
+    DateTime? localLastSync, {
+    String? peerDeviceId,
+    void Function(double fraction)? onProgress,
+  }) async {
+    Future<_MergeResult> apply() => _applyRemoteBaseFileInner(
+      filePath,
+      localLastSync,
+      onProgress: onProgress,
+    );
+
+    final db = DatabaseService.instance.databaseOrNull;
+    if (localLastSync == null && !await _hasOwnLibrary(db)) {
+      return ChangeLogScope.suppressed(
+        db,
+        label: ChangeLogLabels.libraryAdopted,
+        source: ChangeLogSource.sync,
+        summaryCount: (result) => result.recordsApplied,
+        lease: kChangeLogLongLease,
+        body: apply,
+      );
+    }
+    return ChangeLogScope.run(
+      db,
+      source: ChangeLogSource.sync,
+      deviceId: peerDeviceId,
+      lease: kChangeLogLongLease,
+      body: apply,
+    );
+  }
+
+  /// Whether this device holds any dives yet. A new device's profile row is
+  /// not a library, and connecting a new backend to an old device is not a
+  /// first adoption, though both start with no last sync time.
+  Future<bool> _hasOwnLibrary(AppDatabase? db) async {
+    if (db == null) return false;
+    final row = await db
+        .customSelect('SELECT EXISTS (SELECT 1 FROM dives) AS has_dives')
+        .getSingle();
+    return row.read<int>('has_dives') == 1;
+  }
+
+  Future<_MergeResult> _applyRemoteBaseFileInner(
     String filePath,
     DateTime? localLastSync, {
     void Function(double fraction)? onProgress,
   }) async {
-    final totalBytes = await File(filePath).length();
+    final totalBytes = await SyncTempFiles.length(filePath);
     final stopwatch = Stopwatch()..start();
     _log.info('Applying peer base: $totalBytes bytes');
     final progress = BaseApplyProgress(totalBytes, onProgress);
@@ -2243,6 +2343,12 @@ class SyncService {
         progress,
       );
     } catch (e, st) {
+      // No inline parse in a browser: a base the worker cannot handle is
+      // too large for the page, so the failure is reported as it is.
+      if (HostPlatform.isWeb) {
+        await client?.dispose();
+        rethrow;
+      }
       _log.warning(
         'Base-apply worker failed; falling back to inline',
         error: e,
@@ -2261,7 +2367,7 @@ class SyncService {
     } finally {
       await client?.dispose();
     }
-    await _moveLegacyComputerTissueScalars();
+    await _repairLegacyPeerRows();
     progress.done();
     _log.info(
       'Peer base applied in ${stopwatch.elapsed.inSeconds}s: '
@@ -2435,12 +2541,13 @@ class SyncService {
     DateTime? localLastSync,
     BaseApplyProgress progress,
   ) async {
-    final file = File(filePath);
     final lastSyncMs = localLastSync?.millisecondsSinceEpoch;
     // The inline parse blocks the UI isolate, so its heartbeats are what
     // keep the bar moving; the fallback runs the whole file three times.
-    Stream<List<int>> openWithProgress() =>
-        withByteProgress(file.openRead(), onProgress: progress.consumed);
+    Stream<List<int>> openWithProgress() => withByteProgress(
+      SyncTempFiles.openRead(filePath),
+      onProgress: progress.consumed,
+    );
 
     // ---- Pass 1: exportedAt + deletions ----
     var baseExportedAt = 0;
@@ -2879,6 +2986,7 @@ class SyncService {
     'checklistTemplates': true,
     'checklistTemplateSections': true,
     'checklistTemplateItems': true,
+    'tripChecklists': true,
     'tripChecklistSections': true,
     'tripChecklistItems': true,
     'preDiveChecklistTemplates': true,
@@ -2889,7 +2997,9 @@ class SyncService {
     'preDiveSessionItems': true,
     'gpsTracks': true,
     'navTracks': true,
+    'divePlanSeries': true,
     'divePlans': true,
+    'diveScenarios': true,
     'divePlanTanks': true,
     'divePlanSegments': true,
     'divePlanMissions': true,
@@ -3325,6 +3435,9 @@ class SyncService {
       (field: 'diveId', parent: 'dives', nullable: true),
       // v202: the item an equipment incident attributes to; nullable.
       (field: 'equipmentId', parent: 'equipment', nullable: true),
+      // v338: the check-in behind a near-miss; nullable, so a deleted
+      // check-in only clears the link.
+      (field: 'observationId', parent: 'equipmentObservations', nullable: true),
     ],
     // v202: a gear check-in; the item is required, the dive optional.
     'equipmentObservations': [
@@ -3436,9 +3549,11 @@ class SyncService {
       (field: 'equipmentId', parent: 'equipment', nullable: false),
     ],
     // v331: the saved center behind a Dive center place (issue #3623).
-    // Cleared, not skipped: the place outlives its center.
+    // Cleared, not skipped: the place outlives its center. So too its buddy
+    // (v334, issue #3790).
     'equipmentLocations': [
       (field: 'diveCenterId', parent: 'diveCenters', nullable: true),
+      (field: 'buddyId', parent: 'buddies', nullable: true),
     ],
     // v268: an item's location log. The place reference is cleared, not
     // skipped, when the place is gone: the move then reads "No location".
@@ -3486,11 +3601,12 @@ class SyncService {
       (field: 'templateId', parent: 'checklistTemplates', nullable: false),
       (field: 'sectionId', parent: 'checklistTemplateSections', nullable: true),
     ],
+    'tripChecklists': [(field: 'tripId', parent: 'trips', nullable: false)],
     'tripChecklistSections': [
-      (field: 'tripId', parent: 'trips', nullable: false),
+      (field: 'checklistId', parent: 'tripChecklists', nullable: false),
     ],
     'tripChecklistItems': [
-      (field: 'tripId', parent: 'trips', nullable: false),
+      (field: 'checklistId', parent: 'tripChecklists', nullable: false),
       (field: 'sectionId', parent: 'tripChecklistSections', nullable: true),
     ],
     'preDiveChecklistTemplateSections': [
@@ -3529,10 +3645,15 @@ class SyncService {
       (field: 'sessionId', parent: 'preDiveSessions', nullable: false),
       (field: 'equipmentId', parent: 'equipment', nullable: true),
     ],
+    'divePlanSeries': [
+      (field: 'diverId', parent: 'divers', nullable: true),
+      (field: 'followedDiveId', parent: 'dives', nullable: true),
+    ],
     'divePlans': [
       (field: 'siteId', parent: 'diveSites', nullable: true),
       (field: 'sourceDiveId', parent: 'dives', nullable: true),
       (field: 'linkedDiveId', parent: 'dives', nullable: true),
+      (field: 'seriesId', parent: 'divePlanSeries', nullable: true),
     ],
     'divePlanTanks': [(field: 'planId', parent: 'divePlans', nullable: false)],
     'divePlanSegments': [
@@ -3608,6 +3729,7 @@ class SyncService {
       (field: 'viaEquipmentId', parent: 'equipment', nullable: true),
       (field: 'viaSetId', parent: 'equipmentSets', nullable: true),
     ],
+    'diveScenarios': [(field: 'diveId', parent: 'dives', nullable: false)],
     'serviceRecords': [
       (field: 'equipmentId', parent: 'equipment', nullable: false),
     ],
@@ -3791,8 +3913,11 @@ class SyncService {
         // (e.g. a photo whose dive was deleted keeps the photo, sans dive link).
         var recordToApply = withoutDeviceLocalColumns(entityType, record);
         var droppedByParent = false;
+        // Under the current names: a checklist row from below v336 names its
+        // default checklist only once the legacy key is mapped.
+        final currentKeys = withCurrentWireKeys(entityType, record);
         for (final ref in entityParentRefs) {
-          final parentId = record[ref.field];
+          final parentId = currentKeys[ref.field];
           if (parentId is String &&
               (allTombstones[ref.parent]?.containsKey(parentId) ?? false) &&
               // A parent being revived in this same payload is NOT gone; keep
@@ -4493,11 +4618,7 @@ class SyncService {
                   await _serializer.fetchRecord(entityType, recordId),
                 )
               : remoteData;
-          await _serializer.upsertRecord(entityType, toApply);
-          // The batch paths re-derive this in repairDanglingForeignKeys;
-          // this single-record write skips it.
-          await _serializer.alignLinkedRouteOwners();
-          await _serializer.seedRepresentativeCourseLinks();
+          await _applyConflictRow(entityType, toApply);
         }
         await _syncRepository.clearConflict(
           entityType: entityType,
@@ -4508,9 +4629,7 @@ class SyncService {
       case ConflictResolution.keepBoth:
         if (keepBothMakesCopy(entityType, remoteData)) {
           remoteData['id'] = _uuid.v4();
-          await _serializer.upsertRecord(entityType, remoteData);
-          await _serializer.alignLinkedRouteOwners();
-          await _serializer.seedRepresentativeCourseLinks();
+          await _applyConflictRow(entityType, remoteData);
         }
         await _syncRepository.clearConflict(
           entityType: entityType,
@@ -4520,6 +4639,18 @@ class SyncService {
         break;
     }
   }
+
+  /// Writes a peer's row the user chose to keep, as the batch paths would.
+  /// That row can name a parent this device has since deleted, or a check-in
+  /// it turns OK, so the write defers the FK checks and repairs before COMMIT
+  /// rather than failing with SqliteException(787) and leaving the conflict
+  /// unresolvable. The repaired rows are not marked pending: every device
+  /// derives the same result from the same rows.
+  Future<void> _applyConflictRow(String entityType, Map<String, dynamic> row) =>
+      _serializer.applyInDeferredFkTransaction(() async {
+        await _serializer.upsertRecord(entityType, row);
+        await _serializer.repairAfterRowWrite(entityType);
+      });
 
   Future<void> _markPendingForConflict(
     String entityType,
@@ -5149,9 +5280,7 @@ class SyncService {
       version: pending.version,
       exportedAt: pending.exportedAt,
       deviceId: pending.deviceId,
-      checksum: sha256
-          .convert(utf8.encode(jsonEncode(data.toJson())))
-          .toString(),
+      checksum: await SyncDataSerializer.checksumOfOffIsolate(data),
       data: data,
       deletions: pending.deletions,
     );
@@ -5269,11 +5398,17 @@ class SyncService {
       }
 
       try {
-        await _serializer.applyInDeferredFkTransaction(
-          () => _adoptApplyStreaming(
-            baseFilePaths: sources.baseFilePaths,
-            baseExportedAt: sources.baseExportedAt,
-            changesets: sources.changesets,
+        await ChangeLogScope.suppressed<void>(
+          DatabaseService.instance.databaseOrNull,
+          label: ChangeLogLabels.libraryReplaced,
+          source: ChangeLogSource.sync,
+          lease: kChangeLogLongLease,
+          body: () => _serializer.applyInDeferredFkTransaction(
+            () => _adoptApplyStreaming(
+              baseFilePaths: sources.baseFilePaths,
+              baseExportedAt: sources.baseExportedAt,
+              changesets: sources.changesets,
+            ),
           ),
         );
       } finally {
@@ -5602,7 +5737,7 @@ class SyncService {
       }
 
       await BaseJsonStreamReader().parse(
-        File(unit.file!).openRead(),
+        SyncTempFiles.openRead(unit.file!),
         wantRows: (section, table) =>
             section == 'data' && _baseApplyEntityFlags.containsKey(table),
         onRow: (section, table, rowBytes) async {
@@ -5797,15 +5932,27 @@ class SyncService {
         baseFilePaths.add(path);
         baseExportedAt.add(await _readBaseExportedAt(path));
         // Track the last CONTIGUOUS seq we apply (base, then changesets up to the
-        // first gap) so adopt can record it as this peer's cursor -- otherwise the
-        // next sync cold-starts and re-downloads the whole base we just applied.
+        // first gap or damaged one) so adopt can record it as this peer's
+        // cursor. Otherwise the next sync cold-starts and re-downloads the whole
+        // base we just applied.
         var appliedThrough = baseSeq;
         for (var seq = baseSeq + 1; seq <= manifest.headSeq; seq++) {
           final cf = byName[ChangesetLogLayout.changesetName(deviceId, seq)];
           if (cf == null) break;
-          changesets.add(
-            _changesetCodec.decodeChangeset(await provider.downloadFile(cf.id)),
-          );
+          // Damage has the standing of a gap, as in ChangesetReader.pull: the
+          // cursor stops short of it, which a replace reads as a library it
+          // must wait for. An encrypted library shows it as a corrupt envelope
+          // and a plain one as a failed checksum. A read that failed says
+          // nothing about the file, so that still aborts the collection.
+          final Uint8List bytes;
+          try {
+            bytes = await provider.downloadFile(cf.id);
+          } on EnvelopeCorruptException {
+            break;
+          }
+          final decoded = await _changesetCodec.decodeVerifiedChangeset(bytes);
+          if (!decoded.checksumValid) break;
+          changesets.add(decoded.payload);
           appliedThrough = seq;
         }
         cursors.add((
@@ -5854,7 +6001,7 @@ class SyncService {
   /// absent (an unstamped/legacy base sorts first, which is the safe default).
   Future<int> _readBaseExportedAt(String path) async {
     final bytes = <int>[];
-    await for (final chunk in File(path).openRead(0, 65536)) {
+    await for (final chunk in SyncTempFiles.openRead(path, 0, 65536)) {
       bytes.addAll(chunk);
     }
     final head = utf8.decode(bytes, allowMalformed: true);

@@ -3,7 +3,9 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:submersion/features/insights/data/repositories/insights_repository.dart';
+import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
 import 'package:submersion/features/insights/presentation/widgets/ranking_list.dart';
 import 'package:submersion/features/insights/presentation/widgets/stat_charts.dart';
 import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
@@ -34,8 +36,8 @@ class InsightsSocialPage extends ConsumerWidget {
       return content;
     }
 
-    return Scaffold(
-      appBar: AppBar(title: Text(context.l10n.insights_social_appBar_title)),
+    return InsightsFilteredScaffold(
+      title: context.l10n.insights_social_appBar_title,
       body: content,
     );
   }
@@ -78,6 +80,23 @@ class InsightsSocialPage extends ConsumerWidget {
                 ),
             ],
             colors: [Colors.green, Colors.orange, Colors.grey.shade500],
+            onOpenSegment: (index) => openChartDives(
+              context,
+              ref,
+              chart: context.l10n.insights_social_soloVsBuddy_title,
+              row: [
+                context.l10n.insights_social_soloVsBuddy_withBuddy,
+                context.l10n.insights_social_soloVsBuddy_solo,
+                context.l10n.insights_chart_notRecorded,
+              ][index],
+              load: (repository, diverId, scope) async {
+                final ids = await repository.getSoloVsBuddyDiveIds(
+                  diverId: diverId,
+                  filter: scope,
+                );
+                return [ids.buddy, ids.solo, ids.notRecorded][index];
+              },
+            ),
           );
         },
         loading: () => const SizedBox(

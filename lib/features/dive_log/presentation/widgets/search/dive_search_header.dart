@@ -32,9 +32,11 @@ import 'package:submersion/features/explore/presentation/providers/explore_name_
 import 'package:submersion/features/insights/presentation/providers/insights_filter_provider.dart';
 import 'package:submersion/features/query/app_query_registry.dart';
 import 'package:submersion/features/query/presentation/app_query_labels.dart';
+import 'package:submersion/features/query/presentation/providers/query_language_provider.dart';
 import 'package:submersion/features/query/presentation/providers/query_name_index_provider.dart';
 import 'package:submersion/features/query/presentation/providers/query_unit_prefs_provider.dart';
 import 'package:submersion/features/query/presentation/query_error_text.dart';
+import 'package:submersion/features/query/presentation/widgets/search_everywhere_row.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/search/dive_search_suggestions.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
@@ -256,6 +258,9 @@ class _DiveSearchHeaderState extends ConsumerState<DiveSearchHeader> {
         NameIndex.empty,
     labels: AppQueryLabels(context),
     now: DateTime.now,
+    language: watch
+        ? ref.watch(queryLanguageProvider)
+        : ref.read(queryLanguageProvider),
   );
 
   /// Remembers the query the diver typed (Enter, or leaving the field
@@ -320,7 +325,7 @@ class _DiveSearchHeaderState extends ConsumerState<DiveSearchHeader> {
 
   /// A dive found by its number: the search clears, as Close would, so the
   /// list shows every dive and can land on this one in its place, instead
-  /// of leaving the list filtered by the number as text (#3744).
+  /// of leaving the list filtered by the number (#3744).
   void _jumpTo(DiveSummary dive) {
     _focus.unfocus();
     closeDiveSearch(context, ref);
@@ -528,6 +533,8 @@ class _DiveSearchHeaderState extends ConsumerState<DiveSearchHeader> {
           ),
         ),
         if (showAskRow) DiveAskRow(text: _text, onAsk: _ask),
+        if (_text.trim().isNotEmpty && _focus.hasFocus)
+          SearchEverywhereRow(text: _text),
         DiveAskNotice(
           onUndo: _undoAsk,
           onOpenList: (route) => context.go(route),

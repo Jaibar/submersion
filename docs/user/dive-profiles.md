@@ -154,6 +154,9 @@ The event types Submersion recognises are:
 
 - **Ascent Start**: the start of the final ascent.
 - **Safety Stop Start** / **Safety Stop End**: entry into and exit from the safety-stop zone.
+  Submersion does not detect one on a hold you reached with decompression still
+  owed, since that hold is a deco stop. A safety stop your computer recorded
+  always shows.
 - **Deco Stop Start** / **Deco Stop End**: entry into and exit from a decompression stop.
 - **Decompression Dive**: the dive went into decompression obligation.
 - **Low No-Deco Time**: the no-decompression time ran low.
@@ -314,10 +317,13 @@ Open the editor with the **Edit Profile** button while editing a dive. It opens
 as a full-screen page with a simplified chart and no overlays, and offers five
 tools:
 
-- **Select**: pick a time range, then shift its depth or time, delete it, or
-  smooth just that segment.
+- **Select**: drag across the chart to pick a time range, then shift its depth
+  or time, delete it, or smooth just that segment. Tap the chart to clear the
+  selection. A time shift cannot carry the selection onto the next sample or
+  past the start of the dive, so on a closely sampled dive it works only where
+  the samples have a gap to move into, or at the end of the dive.
 - **Smooth**: apply **Light**, **Medium** or **Heavy** smoothing to flatten
-  sensor jitter, to the whole profile or a selection.
+  sensor jitter, to the whole profile or to a selection dragged on the chart.
 - **Outlier**: **Detect** spurious spikes and remove them. Outliers can also be
   surfaced as a suggestion on the dive detail page for you to apply on demand.
 - **Draw**: tap the chart to place waypoints, then **Generate Profile** to draw

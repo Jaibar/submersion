@@ -4,8 +4,10 @@ import 'package:submersion/core/database/raw_dive_data_codec.dart';
 import 'package:submersion/core/database/tables/app_tables.dart';
 import 'package:submersion/core/database/tables/buddy_tables.dart';
 import 'package:submersion/core/database/tables/certification_currency_tables.dart';
+import 'package:submersion/core/database/tables/change_log_tables.dart';
 import 'package:submersion/core/database/tables/cylinder_tables.dart';
 import 'package:submersion/core/database/tables/dive_computer_connection_tables.dart';
+import 'package:submersion/core/database/tables/dive_lab_tables.dart';
 import 'package:submersion/core/database/tables/dive_plan_tables.dart';
 import 'package:submersion/core/database/tables/dive_derived_metrics_tables.dart';
 import 'package:submersion/core/database/tables/dive_plan_mission_tables.dart';
@@ -41,6 +43,7 @@ export 'package:submersion/core/database/tables/app_tables.dart';
 export 'package:submersion/core/database/tables/buddy_tables.dart';
 export 'package:submersion/core/database/tables/certification_currency_tables.dart';
 export 'package:submersion/core/database/tables/cylinder_tables.dart';
+export 'package:submersion/core/database/tables/dive_lab_tables.dart';
 export 'package:submersion/core/database/tables/dive_plan_tables.dart';
 export 'package:submersion/core/database/tables/dive_derived_metrics_tables.dart';
 export 'package:submersion/core/database/tables/dive_plan_mission_tables.dart';
@@ -182,6 +185,8 @@ String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
     EquipmentServiceStatus,
     // Saved queries (v238, issue #2365)
     SavedQueries,
+    // Dive Lab saved scenarios (v236)
+    DiveScenarios,
     // Logbook rules and their run history (v301, issue #3513)
     Rules,
     RuleRuns,
@@ -211,6 +216,8 @@ String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
     TripItineraryDays,
     TripDayWeather,
     ChecklistTemplates,
+    // Multiple checklists per trip (v336, issue #3356)
+    TripChecklists,
     // Checklist sections (v297-298, issue #3360)
     TripChecklistSections,
     TripChecklistItems,
@@ -234,6 +241,8 @@ String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
     DivePlans,
     DivePlanTanks,
     DivePlanSegments,
+    // Saved repetitive dive series (v341, issue #3565)
+    DivePlanSeries,
     // DPV mission planner (v244, issue #2086)
     DivePlanMissions,
     DivePlanMissionLegs,
@@ -290,6 +299,11 @@ String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
     SharedSiteSuggestions,
     SharedLibraryBackups,
     LibrarySiteNotes,
+    // Per-device change log (v332, issue #3922)
+    ChangeLogContext,
+    ChangeLogOperations,
+    ChangeLogEvents,
+    ChangeLogFields,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -299,7 +313,7 @@ class AppDatabase extends _$AppDatabase {
 
   /// The current schema version as a static constant so that pre-open checks
   /// (e.g. version-mismatch guard) can reference it without an instance.
-  static const int currentSchemaVersion = 331;
+  static const int currentSchemaVersion = 342;
 
   /// The oldest schema whose reader can apply this build's sync payloads
   /// without loss or misinterpretation (the compatibility floor).
@@ -442,7 +456,18 @@ class AppDatabase extends _$AppDatabase {
   /// breaking. Peers below 308 are held until they update. Their own
   /// payloads still arrive here and decode cleanly: a concrete value is a
   /// valid override in the nullable columns.
-  static const int minimumCompatibleSchemaVersion = 308;
+  ///
+  /// Raised 308 -> 336 by multiple checklists per trip (#3356): v336
+  /// renames the synced columns trip_checklist_sections.trip_id and
+  /// trip_checklist_items.trip_id to checklist_id (now a reference to the
+  /// new trip_checklists row rather than the trip directly), which the
+  /// first rule above classifies as breaking the same way the v160 and
+  /// v170 column renames did. Peers below 336 are held until they update.
+  /// Their own payloads still arrive here, along with every base published
+  /// before the update: withCurrentWireKeys points a tripId-shaped row at
+  /// its trip's default checklist, and the serializer creates that
+  /// checklist when this device does not hold it yet.
+  static const int minimumCompatibleSchemaVersion = 336;
 
   /// Every schema version that has a migration block in onUpgrade.
   /// Used to calculate progress step counts. When adding a new migration,
@@ -1080,6 +1105,13 @@ class AppDatabase extends _$AppDatabase {
     // Renumbered from 232 and 234: trip cylinders (#2331) shipped 232, the
     // MacDive source diver key (#1921) 233 and equipment sharing (#2046) 234.
     235,
+    // v236 (Dive Lab): dive_scenarios, saved what-if scenarios on a logged
+    // dive (branch point, mode, interventions), synced with an hlc column.
+    // Renumbered from 161, 228, 229, 231 and 232 as main shipped rungs while
+    // this branch was open; 236 was held for it when main took 237 to 240,
+    // so a database already past it gets the table from the beforeOpen
+    // backstop.
+    236,
     // v237: diver_settings.show_dive_figure, the diver-wide switch for the
     // figure in the dive detail equipment card (issue #2326). Additive, no
     // backfill, so the floor it needs stays at 224. Taken
@@ -1495,6 +1527,49 @@ class AppDatabase extends _$AppDatabase {
     // v331: equipment_locations.dive_center_id, the saved center a Dive
     // center place stands for (issue #3623).
     331,
+    // v332: the per-device change log tables (issue #3922). Local only and
+    // never synced, so the floor does not move.
+    332,
+    // v333: dives.gas_switches_edited (issue #32). A defaulted column an
+    // older peer omits, so the compatibility floor does not move.
+    333,
+    // v334: equipment_locations.buddy_id, the buddy a Person place stands
+    // for (issue #3790).
+    334,
+    // v335: nav_tracks.scale_factor, a track's size against the map
+    // (issue #3823). A new defaulted column, so the floor does not move.
+    335,
+    // v336: trip_checklists, splitting one trip's single flat checklist
+    // into several named ones (issue #3356).
+    336,
+    // v337: dives.weather_fetched_at back to seconds where the bulk conditions
+    // fill wrote milliseconds (issue #4119). Data only, so the floor does not
+    // move.
+    337,
+    // v338: incidents.observation_id, the gear check-in behind a near-miss
+    // (issue #3062).
+    338,
+    // v339: dive_computers.auto_download_disabled, the per-device opt-out
+    // for passive auto-connect/auto-download (issue #3361). Renumbered from
+    // 333, which upstream claimed first for issue #32, then from 338, which
+    // upstream claimed first for issue #3062.
+    339,
+    // v340: a combined dive's water temperature, CNS at the end and OTU
+    // recomputed from its segments (issue #4136). Data only, so the floor does
+    // not move.
+    340,
+    // v341: dive_plan_series, a saved repetitive dive series, and the
+    // dive_plans / dive_plan_tanks columns that place a plan in one (issue
+    // #3565). A new synced table plus nullable or defaulted columns an older
+    // peer omits, with no backfill, so the floor does not move. Renumbered
+    // from 339 and then 340, which upstream claimed first for issues #3361
+    // and #4136.
+    341,
+    // v342: dive_plans.fixed_start, whether a planned dive's start was set
+    // by the diver, and dive_plans.setting_overrides, the setting groups a
+    // dive keeps its own (issue #3565, phase 2). Defaulted columns an older
+    // peer omits, so the floor does not move.
+    342,
   ];
 
   /// Returns the number of migration steps that will execute when upgrading

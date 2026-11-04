@@ -1,5 +1,7 @@
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/core/utils/minutes_seconds.dart';
+
 /// Represents a gas switch event during a dive.
 ///
 /// Tracks when the diver switched to a different tank/gas mix.
@@ -23,7 +25,8 @@ class GasSwitch extends Equatable {
   final DateTime createdAt;
 
   /// The computer that logged this switch, or null when it applies to every
-  /// computer on the dive (manual entries, file imports, older rows).
+  /// computer on the dive (manual entries, file imports other than a backup
+  /// that names one, older rows).
   final String? computerId;
 
   const GasSwitch({
@@ -40,12 +43,22 @@ class GasSwitch extends Equatable {
   bool appliesTo(String computer) =>
       computerId == null || computerId == computer;
 
-  /// Timestamp formatted as MM:SS
-  String get timestampFormatted {
-    final minutes = timestamp ~/ 60;
-    final seconds = timestamp % 60;
-    return '$minutes:${seconds.toString().padLeft(2, '0')}';
-  }
+  /// Whether the dive editor shows this switch on a dive whose primary
+  /// computer is [primaryComputer]: that computer's and untagged ones, and
+  /// on a dive with no primary computer the untagged ones only. Another
+  /// computer's are left alone.
+  bool shownInEditor(String? primaryComputer) =>
+      shownFor(computerId, primaryComputer);
+
+  /// [shownInEditor] for a switch of [computerId], read without the rest
+  /// of the switch.
+  static bool shownFor(String? computerId, String? primaryComputer) =>
+      primaryComputer == null
+      ? computerId == null
+      : computerId == null || computerId == primaryComputer;
+
+  /// Timestamp formatted as m:ss, the shape the switch editor reads back.
+  String get timestampFormatted => formatMinutesSeconds(timestamp);
 
   /// Depth formatted with unit
   String depthFormatted({bool metric = true}) {
@@ -67,13 +80,14 @@ class GasSwitch extends Equatable {
     DateTime? createdAt,
     String? computerId,
     bool clearComputerId = false,
+    bool clearDepth = false,
   }) {
     return GasSwitch(
       id: id ?? this.id,
       diveId: diveId ?? this.diveId,
       timestamp: timestamp ?? this.timestamp,
       tankId: tankId ?? this.tankId,
-      depth: depth ?? this.depth,
+      depth: clearDepth ? null : (depth ?? this.depth),
       createdAt: createdAt ?? this.createdAt,
       computerId: clearComputerId ? null : (computerId ?? this.computerId),
     );

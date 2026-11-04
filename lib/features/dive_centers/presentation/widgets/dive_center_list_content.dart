@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:submersion/features/query/presentation/widgets/query_chips_frame.dart';
 import 'package:submersion/core/constants/sort_options_display.dart';
 import 'package:submersion/core/providers/provider.dart';
 
@@ -34,12 +35,12 @@ import 'package:submersion/features/dive_centers/presentation/widgets/compact_di
 import 'package:submersion/features/dive_centers/presentation/widgets/dense_dive_center_list_tile.dart';
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_delete_usage.dart';
 import 'package:submersion/shared/widgets/feature_accent.dart';
-import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_search_delegate.dart';
 import 'package:submersion/core/query/domain/query_node.dart';
 import 'package:submersion/core/query/domain/query_subject.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_query_providers.dart';
 import 'package:submersion/features/dive_centers/query/dive_center_query_entity.dart';
-import 'package:submersion/features/query/presentation/widgets/query_chips_frame.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_action.dart';
+import 'package:submersion/features/query/presentation/widgets/entity_search_frame.dart';
 import 'package:submersion/features/query/presentation/providers/query_id_set_providers.dart';
 import 'package:submersion/features/query/presentation/widgets/query_filter_sheet.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_list_count_provider.dart';
@@ -128,7 +129,7 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
   @override
   void initState() {
     super.initState();
-    _positionRestorer.start(ref, filteredDiveCentersProvider);
+    _positionRestorer.start(ref, sortedDiveCentersProvider);
   }
 
   @override
@@ -162,7 +163,7 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
     if (!mounted) return true;
     return restoreListPosition(
       context,
-      items: ref.read(filteredDiveCentersProvider),
+      items: ref.read(sortedDiveCentersProvider),
       selectedId: widget.selectedId,
       rememberedId: ref.read(highlightedDiveCenterIdProvider),
       idOf: (item) => item.id,
@@ -177,7 +178,7 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
   void _scrollToSelectedItem({String? targetId, bool jump = false}) {
     final target = targetId ?? widget.selectedId;
     if (target == null || !_scrollController.hasClients) return;
-    final items = ref.read(filteredDiveCentersProvider).value;
+    final items = ref.read(sortedDiveCentersProvider).value;
     if (items == null) return;
     final index = items.indexWhere((item) => item.id == target);
     if (index < 0) return;
@@ -217,7 +218,8 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
       ref.read(diveCenterQueryProvider.notifier).state = query;
 
   /// The list body with the query's chips above it (#2365).
-  Widget _withQueryChips(Widget child) => QueryChipsFrame(
+  Widget _withQueryChips(Widget child) => EntitySearchFrame(
+    subject: QuerySubject.centers,
     root: diveCenterQueryEntity,
     query: ref.watch(diveCenterQueryProvider),
     onChanged: _setQuery,
@@ -227,18 +229,17 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
   @override
   Widget build(BuildContext context) {
     final viewMode = ref.watch(diveCenterListViewModeProvider);
-    final centersAsync = ref.watch(filteredDiveCentersProvider);
 
     // Table mode uses a dedicated scaffold with column configuration support.
     if (viewMode == ListViewMode.table) {
-      return _buildTableModeScaffold(context, centersAsync);
+      return _buildTableModeScaffold(
+        context,
+        ref.watch(filteredDiveCentersProvider),
+      );
     }
 
-    final sort = ref.watch(diveCenterSortProvider);
-    final visibleCenters = applyDiveCenterSorting(
-      centersAsync.value ?? const [],
-      sort,
-    );
+    final centersAsync = ref.watch(sortedDiveCentersProvider);
+    final visibleCenters = centersAsync.value ?? const <DiveCenter>[];
     final visibleIds = visibleCenters.map((c) => c.id).toList();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -255,12 +256,9 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
     Widget buildContent() {
       return _withQueryChips(
         centersAsync.when(
-          data: (centers) {
-            final sorted = applyDiveCenterSorting(centers, sort);
-            return sorted.isEmpty
-                ? _buildEmptyState(context)
-                : _buildCenterList(context, ref, sorted);
-          },
+          data: (centers) => centers.isEmpty
+              ? _buildEmptyState(context)
+              : _buildCenterList(context, ref, centers),
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (error, stack) => _buildErrorState(context, error),
         ),
@@ -305,15 +303,10 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
                       tooltip: context.l10n.diveCenters_tooltip_mapView,
                       onPressed: () => context.push('/dive-centers/map'),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.search),
+                    EntitySearchAction(
+                      subject: QuerySubject.centers,
+                      active: ref.watch(diveCenterQueryProvider) != null,
                       tooltip: context.l10n.diveCenters_tooltip_search,
-                      onPressed: () {
-                        showSearch(
-                          context: context,
-                          delegate: DiveCenterSearchDelegate(ref),
-                        );
-                      },
                     ),
                     IconButton(
                       icon: const Icon(Icons.sort),
@@ -521,8 +514,10 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
 
   /// Build the [EntityTableView] for dive center table mode.
   ///
-  /// Each center's dive count is looked up via [diveCenterDiveCountProvider]
-  /// so the table data matches what the list tiles show.
+  /// Every row's dive count comes from the one [diveCenterDiveCountsProvider]
+  /// read, the same source the list tiles use. The spinner stays until that
+  /// read first settles, so a table sorted by count never paints zeros and
+  /// then reorders; after that a refresh keeps the last counts on screen.
   Widget _buildTableView(
     BuildContext context,
     AsyncValue<List<DiveCenter>> centersAsync,
@@ -534,18 +529,19 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
         if (centers.isEmpty) {
           return _buildEmptyState(context);
         }
+        final countsAsync = ref.watch(diveCenterDiveCountsProvider);
+        if (!countsAsync.hasSettled) {
+          return const Center(child: CircularProgressIndicator());
+        }
         final config = ref.watch(diveCenterTableConfigProvider);
         final notifier = ref.read(diveCenterTableConfigProvider.notifier);
         final units = ref.watch(unitFormatterProvider);
 
-        // Build DiveCenterRow records, resolving dive counts from per-center
-        // providers (same source the list tiles use).
-        final rows = centers.map((center) {
-          final diveCount =
-              ref.watch(diveCenterDiveCountProvider(center.id)).valueOrNull ??
-              0;
-          return (center: center, diveCount: diveCount);
-        }).toList();
+        final diveCounts = countsAsync.value ?? const <String, int>{};
+        final rows = [
+          for (final center in centers)
+            (center: center, diveCount: diveCounts[center.id] ?? 0),
+        ];
 
         return EntityTableView<DiveCenterRow, DiveCenterField>(
           entities: rows,
@@ -628,15 +624,11 @@ class _DiveCenterListContentState extends ConsumerState<DiveCenterListContent> {
               tooltip: context.l10n.diveCenters_tooltip_mapView,
               onPressed: () => context.push('/dive-centers/map'),
             ),
-          IconButton(
-            icon: const Icon(Icons.search, size: 20),
+          EntitySearchAction(
+            subject: QuerySubject.centers,
+            active: ref.watch(diveCenterQueryProvider) != null,
             tooltip: context.l10n.diveCenters_tooltip_search,
-            onPressed: () {
-              showSearch(
-                context: context,
-                delegate: DiveCenterSearchDelegate(ref),
-              );
-            },
+            compact: true,
           ),
           IconButton(
             icon: const Icon(Icons.sort, size: 20),

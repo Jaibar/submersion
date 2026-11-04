@@ -91,6 +91,7 @@ class ConflictReferenceResolver {
     'relatedDiveId': 'dives',
     'linkedDiveId': 'dives',
     'sourceDiveId': 'dives',
+    'followedDiveId': 'dives',
     'siteId': 'diveSites',
     'tagId': 'tags',
     'diveTypeId': 'diveTypes',
@@ -102,6 +103,7 @@ class ConflictReferenceResolver {
     'instructorId': 'buddies',
     'signerId': 'buddies',
     'equipmentId': 'equipment',
+    'observationId': 'equipmentObservations',
     'scooterEquipmentId': 'equipment',
     'setId': 'equipmentSets',
     'equipmentSetId': 'equipmentSets',
@@ -112,6 +114,7 @@ class ConflictReferenceResolver {
     'tankId': 'diveTanks',
     'switchToTankId': 'divePlanTanks',
     'planId': 'divePlans',
+    'seriesId': 'divePlanSeries',
     'tripId': 'trips',
     'parentTripId': 'trips',
     'tripCylinderId': 'tripCylinders',
@@ -142,6 +145,7 @@ class ConflictReferenceResolver {
     'linkedDiverId': 'divers',
     'sessionId': 'preDiveSessions',
     'templateId': 'checklistTemplates',
+    'checklistId': 'tripChecklists',
   };
 
   /// Columns holding a JSON list of row ids rather than one id (#3375),
@@ -205,6 +209,7 @@ class ConflictReferenceResolver {
     'diveDateTime',
     'startDateTime',
     'startDate',
+    'observedAt',
   ];
 
   /// Every entity type a foreign key can point at. Exposed so the dialog's
@@ -244,6 +249,10 @@ class ConflictReferenceResolver {
     }
     return List.unmodifiable(references);
   }
+
+  /// One record by id, for a caller with no foreign key to resolve.
+  Future<ConflictReference> describe(String targetType, String recordId) =>
+      _resolveOne('', targetType, recordId);
 
   Future<ConflictReference> _resolveOne(
     String field,

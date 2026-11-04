@@ -1,8 +1,11 @@
+import 'package:submersion/features/planner/presentation/providers/plan_series_providers.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/services/multi_cylinder_consumption.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_planner/domain/entities/plan_segment.dart';
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
+import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/planner/domain/entities/dive_plan.dart'
     as domain;
 import 'package:submersion/features/planner/domain/entities/plan_outcome.dart';
@@ -138,16 +141,26 @@ final planIsValidProvider = Provider<bool>((ref) {
   return hasSegments && ref.watch(planOutcomeProvider).isDiveable;
 });
 
-/// The diver's logged average back-gas SAC in L/min ("from your log");
-/// null when no logged dive carries enough tank data to compute one.
+/// The key [loggedAverageSacProvider] averages backmount cylinders under.
+const String _backmountSacKey = 'backmount';
+
+/// The current diver's logged average backmount SAC in L/min ("from your
+/// log"): back gas and twin set cylinders as one group (issue #3374), so
+/// marking a logbook's twin sets does not move its history out of the
+/// planner's default. Null when no logged backmount cylinder carries enough
+/// tank data to compute one; a stage or deco rate is not a bottom-gas rate.
 final loggedAverageSacProvider = FutureProvider<double?>((ref) async {
   final repository = ref.watch(insightsRepositoryProvider);
+  final diverId = ref.watch(currentDiverIdProvider);
   // Not autoDispose, so without this the logged SAC was computed once and
   // cached for the whole process lifetime (issue #974).
   ref.invalidateSelfWhen(repository.watchInsightsChanges());
-  final sacByRole = await repository.getSacVolumeByTankRole();
-  return sacByRole['backGas'] ??
-      (sacByRole.isEmpty ? null : sacByRole.values.first);
+  final sacByRole = await repository.getSacVolumeByTankRole(
+    diverId: diverId,
+    roleKey: (role) =>
+        backmountRoles.any((r) => r.name == role) ? _backmountSacKey : role,
+  );
+  return sacByRole[_backmountSacKey];
 });
 
 /// Scrub cursor position along the plan, in seconds (null = not scrubbing).
@@ -351,6 +364,34 @@ PlanCanvasSeries buildBailoutCanvasSeries(BailoutOutcome bailout) {
   );
 }
 
+/// Where the ascent into [stop] reaches the gas held there: the stop itself,
+/// unless that gas's switch depth, a MOD or one the diver set, sits partway up
+/// a leg folded into the stop.
+({int time, double depth}) _gasSwitchPoint(
+  List<PlanScheduleRow> schedule,
+  PlanStop stop,
+) {
+  var time = stop.arrivalRuntimeSeconds;
+  var depth = stop.depthMeters;
+  final legs =
+      schedule
+          .where(
+            (row) =>
+                row.kind == PlanScheduleRowKind.stop &&
+                row.startRuntimeSeconds == time,
+          )
+          .firstOrNull
+          ?.foldedTravel ??
+      const <PlanFoldedTravel>[];
+  for (final leg in legs.reversed) {
+    if (leg.seconds == 0) continue;
+    if (leg.tankId != stop.tankId) break;
+    time -= leg.seconds;
+    depth = leg.fromDepthMeters;
+  }
+  return (time: time, depth: depth);
+}
+
 /// Builds the chart series for any (plan, outcome) pair — the live plan or a
 /// contingency variant (ghost overlay). [outcome] is [plan]'s own computed
 /// schedule -- the same instance a caller like [PlanEngine.compute] already
@@ -433,10 +474,11 @@ PlanCanvasSeries buildCanvasSeries({
             (stop.gasFO2 - previousFO2).abs() > 0.005 ||
             (stop.gasFHe - (previousFHe ?? 0)).abs() > 0.005);
     if (switched && previousFO2 != null) {
+      final at = _gasSwitchPoint(outcome.schedule, stop);
       gasSwitches.add(
         CanvasMarker(
-          stop.arrivalRuntimeSeconds.toDouble(),
-          stop.depthMeters,
+          at.time.toDouble(),
+          at.depth,
           GasMix(o2: stop.gasFO2 * 100.0, he: stop.gasFHe * 100.0).name,
         ),
       );
@@ -552,8 +594,12 @@ final contingencyGhostSeriesProvider = Provider<PlanCanvasSeries?>((ref) {
 /// deco time, CNS, issues) are shown: the selected contingency's outcome when
 /// one is being previewed, else the live plan's outcome.
 final activePlanOutcomeProvider = Provider<PlanOutcome>((ref) {
-  return ref.watch(selectedContingencyProvider)?.outcome ??
-      ref.watch(planOutcomeProvider);
+  // What the series raises about the dive (its interval, the tissues it
+  // starts with) holds for a previewed contingency of it too.
+  final seriesIssues = ref.watch(selectedSeriesIssuesProvider);
+  final preview = ref.watch(selectedContingencyProvider)?.outcome;
+  final outcome = preview ?? ref.watch<PlanOutcome>(planOutcomeProvider);
+  return outcome.withIssues(seriesIssues);
 });
 
 /// The logged dive a "What if..." plan was converted from, plus its profile:

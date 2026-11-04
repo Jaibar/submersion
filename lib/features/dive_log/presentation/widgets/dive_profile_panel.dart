@@ -1,17 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
 import 'package:submersion/features/dive_log/presentation/providers/active_source_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/chart_tank_pressures_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_annotations_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/gas_switch_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/highlight_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_tracking_provider.dart';
-import 'package:submersion/features/dive_log/data/services/gas_usage_segments_service.dart';
 import 'package:submersion/features/dive_log/data/services/profile_markers_service.dart';
 import 'package:submersion/features/dive_log/presentation/utils/sac_normalization.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_chart.dart';
@@ -273,6 +275,13 @@ class _DiveProfilePanelContentState
           )),
         )
         .value;
+    // As the detail and fullscreen charts (#4109): only the annotations the
+    // Notes still link.
+    final chartEvents = mergeChartEvents(
+      analysis?.events,
+      ref.watch(diveAnnotationsProvider(widget.diveId)).value ??
+          const <ProfileEvent>[],
+    );
     final gasSwitches = ref.watch(gasSwitchesProvider(widget.diveId)).value;
     final tankPressures = ref
         .watch(activeSourceTankPressuresProvider(widget.diveId))
@@ -403,9 +412,11 @@ class _DiveProfilePanelContentState
                   labelCeilingAsCalculated:
                       analysis?.computerStopsWithCalculatedCeiling ?? false,
                   ascentRates: analysis?.ascentRates,
-                  events: analysis?.events,
+                  events: chartEvents,
                   ndlCurve: analysis?.ndlCurve,
                   sacCurve: analysis?.smoothedSacCurve,
+                  environment:
+                      analysis?.environment ?? DiveEnvironment.standard,
                   ppO2Curve: analysis?.ppO2Curve,
                   o2SensorCurves: analysis?.o2SensorCurves,
                   o2CellMvCurves: analysis?.o2CellMvCurves,
@@ -441,11 +452,11 @@ class _DiveProfilePanelContentState
                   gasSwitches: gasSwitches,
                   gasSegments: (dive.tanks.isEmpty || chartProfile.isEmpty)
                       ? null
-                      : buildGasUsageSegments(
-                          tanks: dive.tanks,
-                          gasSwitches: gasSwitches ?? const [],
-                          diveDurationSeconds: chartProfile.last.timestamp,
-                          firstSampleSeconds: chartProfile.first.timestamp,
+                      : activeGasUsageSegments(
+                          dive,
+                          gasSwitches: gasSwitches,
+                          profile: chartProfile,
+                          computerId: activeSourceProfile?.computerId,
                         ),
                   diveDurationSeconds: chartProfile.isEmpty
                       ? null

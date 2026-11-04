@@ -1,18 +1,25 @@
-/// SQL spellings of `Dive.effectiveRuntime`, for queries that must total dive
-/// durations without hydrating `Dive` object graphs.
+/// SQL spellings of `Dive.measuredRuntime` and `Dive.effectiveRuntime`, for
+/// queries that must read dive durations without hydrating `Dive` object
+/// graphs.
 ///
-/// The chain has four steps, in order: the explicit `runtime`, then
-/// `exit_time - entry_time`, then the span of the dive's profile samples,
-/// then `bottom_time`. Every aggregate that reports "total dive time" has to
-/// resolve all four, because a dive downloaded from a computer often carries
-/// no explicit `runtime` at all and is only measurable through its profile.
-/// A query that stops at `COALESCE(runtime, bottom_time)` silently reports
-/// those dives as zero.
+/// The measured chain has three steps, in order: the explicit `runtime`, then
+/// `exit_time - entry_time`, then the span of the dive's profile samples. A
+/// dive downloaded from a computer often carries no explicit `runtime` at all
+/// and is only measurable through its profile, so a query that reads the
+/// column alone misses it.
 ///
-/// The fragments live here, in one file, so the depth-distribution and
-/// dive-type aggregates cannot drift into two different answers for the same
-/// dive. Callers pass the table alias their statement uses for `dives`.
+/// Anything reported as a duration (totals, records, charts, SAC) reads
+/// [measuredRuntimeSecondsSql]: bottom time is derived from a depth threshold,
+/// so it never counts as runtime (issue #3304). [effectiveRuntimeSecondsSql]
+/// adds it as a fourth step, as an estimate of when a dive ended for a time
+/// window.
+///
+/// The fragments live here, in one file, so the aggregates cannot drift into
+/// two different answers for the same dive. Callers pass the table alias
+/// their statement uses for `dives`.
 library;
+
+import 'package:submersion/core/database/dive_source_stamp.dart';
 
 /// `entry_time` and `exit_time` are epoch milliseconds; `runtime` and
 /// `bottom_time` are already stored in seconds.
@@ -21,7 +28,7 @@ const _millisecondsPerSecond = 1000;
 /// `exit_time - entry_time` in seconds, or NULL when either endpoint is
 /// missing or the pair is not strictly increasing.
 ///
-/// Mirrors the guard `Dive.effectiveRuntime` applies before trusting the
+/// Mirrors the guard `Dive.measuredRuntime` applies before trusting the
 /// computed value: a zero or negative span means the timestamps are unusable,
 /// not that the dive lasted no time. The CAST truncates toward zero to match
 /// Dart's `Duration.inSeconds`; both operands are `IntColumn`s, so SQLite's
@@ -87,10 +94,10 @@ String _supersededOriginalSql(String s) {
       'LIMIT 1)))';
 }
 
-/// The first three steps of the chain: a duration the dive actually
-/// measured, in seconds, or NULL. Bottom time is left out because it is
-/// derived from a depth threshold, so Insights' runtime (issue #3059) never
-/// reports one as a runtime.
+/// A duration the dive actually measured, in seconds, or NULL: the form of
+/// `Dive.measuredRuntime` that every report of a dive's length reads. Bottom
+/// time is left out because it is derived from a depth threshold, so it is
+/// never reported as a runtime (issues #3059, #3304).
 ///
 /// `COALESCE` short-circuits in SQLite, so the correlated profile subquery is
 /// only executed for the dives that actually reach that step. A dive with an
@@ -102,9 +109,19 @@ String measuredRuntimeSecondsSql(String alias) =>
     '${timestampRuntimeSecondsSql(alias)}, '
     '${profileSpanSecondsSql(alias)})';
 
+/// What [measuredRuntimeSecondsSql] reads beyond the dive row, by SQL name:
+/// the tables a query or a tick over a measured runtime has to follow. The
+/// series history is left out because it is not a drift table, and it is
+/// only written alongside a `dive_profile_series` row.
+const Set<String> measuredRuntimeTables = {
+  'dive_profile_series',
+  'dive_data_sources',
+};
+
 /// The whole `Dive.effectiveRuntime` chain as one scalar expression, in
 /// seconds, NULL only for a dive that carries no duration in any form: the
-/// [measuredRuntimeSecondsSql] steps, then `bottom_time`.
+/// [measuredRuntimeSecondsSql] steps, then `bottom_time`. An estimate for a
+/// time window, never a value to report as a runtime.
 String effectiveRuntimeSecondsSql(String alias) =>
     'COALESCE(${measuredRuntimeSecondsSql(alias)}, $alias.bottom_time)';
 
@@ -125,6 +142,83 @@ String diveExitMillisSql(String alias) {
       '* $_millisecondsPerSecond END';
 }
 
+/// Whether the dive at [alias] is a plan nobody has dived, as an SQL boolean.
+///
+/// `is_planned` alone is not the answer. A dive mirrored to a linked buddy
+/// (#2002) stays planned until that diver's own download, even though the dive
+/// it was mirrored from happened, so a logged dive on the same outing makes it
+/// real. Everything that reads exposure uses this, so a saved plan restricts
+/// nothing and a mirrored dive restricts its diver (issue #3924).
+///
+/// Only a planned dive with an outing id reaches the sibling lookup, which
+/// `idx_dives_outing` serves.
+String diveUndivedSql(String alias) {
+  const s = 'undived_sibling';
+  return '($alias.is_planned = 1 AND NOT ($alias.outing_id IS NOT NULL AND '
+      'EXISTS (SELECT 1 FROM dives $s WHERE $s.outing_id = $alias.outing_id '
+      'AND $s.is_planned = 0)))';
+}
+
+/// How far back a dive's residual load reads: the tissue lookback's window.
+const kResidualLookback = Duration(hours: 48);
+
+/// A version token for the dives whose load can reach the dive at [alias]:
+/// the sum of [diveSourceStampSql] over the dives that start up to
+/// [kResidualLookback] plus a day before it, or 0 when there are none.
+///
+/// A stored result computed from a dive's residual load goes stale when one of
+/// those dives changes, which nothing on the dive itself can see. A token and
+/// not a time, for the reasons on [diveSourceStampSql]: it moves on a profile
+/// or tank that never re-stamps its dive, on a write stamped older than the
+/// last, and on adding or removing a dive. Compare it only for equality.
+///
+/// The lookback counts surface time from an earlier dive's exit and this reads
+/// starts, so the extra day keeps a long dive that ended inside the lookback.
+/// Reading too far costs one recompute and never a wrong answer. This is the
+/// direct lookback only: a change further back reaches this dive through the
+/// dives between.
+///
+/// Two subqueries for the same reason as [diveSurfaceIntervalSecondsSql]: each
+/// is a range seek on `idx_dives_entry_date`.
+String earlierDivesRevisionSql(String alias) {
+  const h = 'history_dive';
+  final start = 'COALESCE($alias.entry_time, $alias.dive_date_time)';
+  final window = kResidualLookback + const Duration(days: 1);
+  final from = '$start - ${window.inMilliseconds}';
+  String stamps(String where) =>
+      'COALESCE((SELECT SUM(${diveSourceStampSql(h)}) FROM dives $h '
+      'WHERE $where), 0)';
+  return '(${stamps('$h.entry_time >= $from AND $h.entry_time < $start')} + '
+      '${stamps('$h.entry_time IS NULL '
+      'AND $h.dive_date_time >= $from AND $h.dive_date_time < $start')})';
+}
+
+/// The logged dives a downloaded dive could be, nearest in time first.
+///
+/// Binds the download's start, then the window's first and last millisecond,
+/// then the diver when [scopedToDiver]. total_seconds is the whole
+/// `Dive.effectiveRuntime` chain, because a download's duration is the
+/// computer's runtime rather than the bottom time.
+///
+/// This runs once per downloaded dive, so the filter is a range that seeks
+/// idx_dives_start or idx_dives_diver_start, not `ABS(start - ?) <= ?`, which
+/// reads every dive (issue #3863).
+String diveMatchCandidatesSql({required bool scopedToDiver}) {
+  final start = diveStartMillisSql('dives');
+  return '''
+SELECT id, dive_date_time, entry_time, max_depth,
+  ${effectiveRuntimeSecondsSql('dives')} AS total_seconds,
+  $start AS effective_time,
+  ABS($start - ?1) AS time_diff
+FROM dives
+WHERE $start BETWEEN ?2 AND ?3
+  AND is_planned = 0
+  ${scopedToDiver ? 'AND diver_id = ?4' : ''}
+ORDER BY time_diff ASC
+LIMIT 10
+''';
+}
+
 /// The alias the previous dive takes inside [diveSurfaceIntervalSecondsSql],
 /// exposed so a caller's `previousScope` can name it.
 const kSurfaceIntervalPreviousAlias = 'si_prev';
@@ -139,7 +233,9 @@ const kSurfaceIntervalPreviousAlias = 'si_prev';
 /// (ties by `dive_date_time`), and only when no such dive exists, the
 /// latest dive with no `entry_time` whose `dive_date_time` is before it.
 /// That ranking is spelled as two subqueries so each is an index range seek
-/// on `idx_dives_entry_date` rather than a scan of `dives` per row.
+/// on `idx_dives_entry_date` rather than a scan of `dives` per row. A plan
+/// nobody has dived ([diveUndivedSql]) is skipped unless this dive is one too
+/// (issue #3924).
 ///
 /// The previous dive's exit is its `exit_time`, else its start plus
 /// [effectiveRuntimeSecondsSql]. A negative gap (overlapping dives) is
@@ -162,7 +258,9 @@ String diveSurfaceIntervalSecondsSql(
   String gap(String where, String order) =>
       '(SELECT MAX(0, CAST(($start - $previousExit) '
       '/ $_millisecondsPerSecond AS INTEGER)) '
-      'FROM dives $p WHERE $p.id != $alias.id AND $where$previousScope '
+      'FROM dives $p WHERE $p.id != $alias.id AND $where '
+      'AND (NOT ${diveUndivedSql(p)} OR ${diveUndivedSql(alias)})'
+      '$previousScope '
       'ORDER BY $order LIMIT 1)';
   final withEntry = gap(
     '$p.entry_time < $start',

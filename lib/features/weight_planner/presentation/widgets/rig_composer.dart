@@ -81,6 +81,7 @@ class RigComposer extends ConsumerWidget {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -90,6 +91,7 @@ class RigComposer extends ConsumerWidget {
           scrollController: scrollController,
           selectedEquipmentIds: gear.map((e) => e.id).toSet(),
           hideSpare: true,
+          hideAssemblyParts: true,
           onEquipmentSelected: (equipment) {
             onGearAdded(equipment);
             Navigator.of(context).pop();
@@ -103,6 +105,7 @@ class RigComposer extends ConsumerWidget {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,

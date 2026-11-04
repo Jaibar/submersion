@@ -6,18 +6,19 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/accessibility/semantic_helpers.dart';
 import 'package:submersion/core/constants/gas_consumption_display.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
 import 'package:submersion/features/insights/domain/focus/focus_metric.dart';
 import 'package:submersion/features/insights/domain/focus/focus_selection.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_focus_providers.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_gas_lane_provider.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
 import 'package:submersion/features/insights/presentation/providers/trend_chart_settings_provider.dart';
+import 'package:submersion/features/insights/presentation/widgets/ccr_gas_use_section.dart';
 import 'package:submersion/features/insights/presentation/widgets/ranking_list.dart';
 import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
 import 'package:submersion/features/insights/presentation/widgets/tank_configuration_card.dart';
-import 'package:submersion/features/insights/presentation/widgets/insights_filter_bar.dart';
+import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
 import 'package:submersion/features/insights/presentation/widgets/horizontal_category_bar_chart.dart';
-import 'package:submersion/features/insights/presentation/widgets/insights_filter_action.dart';
 import 'package:submersion/features/insights/presentation/widgets/trend_chart_section.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
@@ -48,6 +49,7 @@ class InsightsGasPage extends ConsumerWidget {
           const SizedBox(height: 16),
           _buildSacByRoleSection(context, ref, units),
           const SizedBox(height: 16),
+          const CcrGasUseSection(),
           _buildSacRecordsSection(context, ref, units),
         ],
       ),
@@ -57,19 +59,9 @@ class InsightsGasPage extends ConsumerWidget {
       return content;
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(context.l10n.insights_gas_appBar_title),
-        actions: const [InsightsFilterAction()],
-      ),
-      // Expanded is required: content is a SingleChildScrollView, and a
-      // Column would otherwise hand it unbounded height.
-      body: Column(
-        children: [
-          const InsightsFilterBar(),
-          Expanded(child: content),
-        ],
-      ),
+    return InsightsFilteredScaffold(
+      title: context.l10n.insights_gas_appBar_title,
+      body: content,
     );
   }
 
@@ -143,6 +135,17 @@ class InsightsGasPage extends ConsumerWidget {
         data: (data) => HorizontalCategoryBarChart(
           data: [for (final s in data) (label: s.label, count: s.count)],
           barColor: Colors.blue.shade400,
+          onRowTap: (index) => openChartDives(
+            context,
+            ref,
+            chart: context.l10n.insights_gas_gasMix_title,
+            row: data[index].label,
+            load: (repository, diverId, scope) => repository.getGasMixDiveIds(
+              gasType: data[index].label,
+              diverId: diverId,
+              filter: scope,
+            ),
+          ),
         ),
         loading: () => const SizedBox(
           height: 120,
@@ -170,6 +173,7 @@ class InsightsGasPage extends ConsumerWidget {
     String getRoleDisplayName(String role) {
       return switch (role) {
         'backGas' => context.l10n.insights_gas_tankRole_backGas,
+        'twinSet' => context.l10n.insights_gas_tankRole_twinSet,
         'stage' => context.l10n.insights_gas_tankRole_stage,
         'deco' => context.l10n.insights_gas_tankRole_deco,
         'bailout' => context.l10n.insights_gas_tankRole_bailout,

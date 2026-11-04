@@ -13,6 +13,7 @@ import 'package:submersion/features/documents/presentation/providers/equipment_f
 import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/core/app/app_exit.dart';
+import 'package:submersion/core/app/app_exit_guard.dart';
 import 'package:submersion/core/presentation/providers/app_lock_provider.dart';
 import 'package:submersion/core/presentation/widgets/lock_barrier.dart';
 import 'package:submersion/core/providers/provider.dart';
@@ -32,6 +33,8 @@ import 'package:submersion/features/buddies/domain/services/buddy_card_codec.dar
 import 'package:submersion/features/buddies/presentation/services/buddy_card_link_dispatcher.dart';
 import 'package:submersion/features/buddies/presentation/services/recent_buddy_card_links.dart';
 import 'package:submersion/features/buddies/presentation/utils/open_buddy_card.dart';
+import 'package:submersion/features/change_log/data/services/change_log_settle_scheduler.dart';
+import 'package:submersion/features/change_log/presentation/providers/change_log_providers.dart';
 import 'package:submersion/features/cylinder_passports/presentation/providers/cylinder_passport_providers.dart';
 import 'package:submersion/features/cylinder_passports/presentation/services/passport_link_dispatcher.dart';
 import 'package:submersion/features/cylinder_passports/presentation/services/recent_passport_tags.dart';
@@ -44,6 +47,7 @@ import 'package:submersion/core/services/suunto_cloud/suunto_json_file_reader.da
 import 'package:submersion/features/import_wizard/presentation/suunto_file_import_navigation.dart';
 import 'package:submersion/features/media_store/presentation/providers/media_store_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/agent_access/presentation/providers/agent_access_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/nearby_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
 import 'package:submersion/features/settings/presentation/widgets/adopt_replaced_library_dialog.dart';
@@ -54,6 +58,7 @@ import 'package:submersion/shared/services/incoming_share.dart';
 import 'package:submersion/shared/services/navigation_ready_gate.dart';
 import 'package:submersion/shared/widgets/app_scaffold_messenger.dart';
 import 'package:submersion/core/services/database_service.dart';
+import 'package:submersion/core/services/window_fullscreen.dart';
 import 'package:submersion/core/services/local_cache_database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/library_epoch.dart';
@@ -132,7 +137,10 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _lifecycleListener = AppLifecycleListener(onExitRequested: _closeDatabases);
+    final exitGuard = ref.read(appExitGuardProvider);
+    _lifecycleListener = AppLifecycleListener(
+      onExitRequested: () => exitGuard.answer(_closeDatabases),
+    );
     registerUpdateMenuChannel(ref);
     registerDisplayZoomMenuChannel(ref);
     // Each share waits until the app can open the page it leads to (see
@@ -184,6 +192,11 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
       syncBehaviorProvider.select((s) => s.nearbyAutoEnabled),
       (_, _) => unawaited(ref.read(nearbyLinkManagerProvider).refresh()),
     );
+    // Agent access (MCP): the controller keeps the loopback listener in step
+    // with its settings for as long as this scope lives. Desktop only.
+    if (hasDesktopWindow()) {
+      ref.listenManual(agentAccessControllerProvider, (_, _) {});
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _runStorageCleanupAfter(_maybeSyncOnLaunch(), StorageGcTrigger.launch);
       _setNearbyForeground(true);
@@ -198,11 +211,14 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
       // changed since. Single-flight, oldest first, no-op when current.
       SensorSummaryScheduler.instance.scheduleStaleSweep();
       DerivedMetricsScheduler.instance.scheduleStaleSweep();
+      ChangeLogSettleScheduler.instance.start();
+      _pruneChangeLog();
     });
   }
 
   @override
   void dispose() {
+    ChangeLogSettleScheduler.instance.stop();
     _linkRouter.routeInformationProvider.removeListener(_updateNavigationReady);
     _shares.release();
     unawaited(_passportLinks.dispose());
@@ -224,7 +240,9 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
   /// The guarantees that make this safe to be the platform's only reply path
   /// (always answers, never throws, never exceeds its budget) live in
   /// [closeDatabasesForExit]; see its doc for why totality matters here and
-  /// what happens natively when the reply never arrives.
+  /// what happens natively when the reply never arrives. [AppExitGuard]
+  /// answers first, and holds the same guarantees: a page with unsaved work
+  /// cancels the exit and asks, and nothing closes until the diver lets it go.
   Future<AppExitResponse> _closeDatabases() => closeDatabasesForExit(
     closeMain: () => DatabaseService.instance.close(),
     closeCache: () => LocalCacheDatabaseService.instance.close(),
@@ -312,6 +330,13 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
   /// provider contains its own failures, so it is safe to leave unawaited.
   void _republishOwnedMedia() {
     unawaited(ref.read(mediaOriginRepublishProvider)());
+  }
+
+  /// Removes change log entries past their retention, at most daily. Same
+  /// database timing argument as [_resumeMediaTransfers], and it contains its
+  /// own failures, so it is safe to leave unawaited.
+  void _pruneChangeLog() {
+    unawaited(ref.read(changeLogMaintenanceProvider).pruneIfDue());
   }
 
   /// Moves files linked to gear by the older attachment card into Documents

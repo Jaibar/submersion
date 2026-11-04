@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/export/uddf/uddf_source_attribution.dart';
 import 'package:submersion/core/services/sync/event_scope_tombstone.dart';
 import 'package:submersion/core/services/sync/hlc.dart';
 import 'package:submersion/features/dive_import/data/services/dive_reimport_service.dart';
@@ -297,6 +298,48 @@ void main() {
     )..where((t) => t.diveId.equals(diveId))).get();
     expect(switches, hasLength(2));
     expect(switches.every((s) => s.tankId == 'tank-a'), isTrue);
+  });
+
+  test('an edited switch list survives the resync (#32)', () async {
+    final diveId = await seedDive(notes: '', buddy: '');
+    await (db.update(db.dives)..where((t) => t.id.equals(diveId))).write(
+      const DivesCompanion(gasSwitchesEdited: Value(true)),
+    );
+    await seedTank(diveId, id: 'tank-a', tankOrder: 0);
+    await db
+        .into(db.gasSwitches)
+        .insert(
+          GasSwitchesCompanion.insert(
+            id: 'gs-old',
+            diveId: diveId,
+            tankId: 'tank-a',
+            timestamp: 0,
+            createdAt: 0,
+          ),
+        );
+
+    await service.applyReimport(
+      diveId: diveId,
+      diveData: {
+        'tanks': [
+          {'order': 0, 'startPressure': 200.0},
+        ],
+        'gasSwitches': [
+          {'timestamp': 0, 'tankIndex': 0},
+          {'timestamp': 600, 'tankIndex': 0},
+        ],
+      },
+      now: DateTime(2026, 9, 3),
+    );
+
+    final switches = await (db.select(
+      db.gasSwitches,
+    )..where((t) => t.diveId.equals(diveId))).get();
+    expect(switches.map((s) => s.id), ['gs-old']);
+    final tombstones = await (db.select(
+      db.deletionLog,
+    )..where((t) => t.entityType.equals('gasSwitches'))).get();
+    expect(tombstones, isEmpty);
   });
 
   test(
@@ -896,6 +939,30 @@ void main() {
     expect(dive.bottomTime, 1200);
   });
 
+  test('keeps a bottom time the parse states over the profile', () async {
+    // Submersion's own UDDF states the bottom time (issue #4181), as the
+    // first import keeps it: even equal to the runtime, it is no echo.
+    final diveId = await seedDive(notes: '', buddy: '');
+    await seedSource(diveId, id: 'src-file');
+
+    await service.applyReimport(
+      diveId: diveId,
+      diveData: {
+        'maxDepth': 20.0,
+        'profile': profileWithPressure,
+        'runtime': const Duration(minutes: 41),
+        'bottomTime': const Duration(minutes: 41),
+      },
+      now: DateTime(2026, 9, 3),
+    );
+
+    final dive = await (db.select(
+      db.dives,
+    )..where((t) => t.id.equals(diveId))).getSingle();
+    expect(dive.bottomTime, 41 * 60);
+    expect(dive.runtime, 41 * 60);
+  });
+
   group('fresh-parse tank identity (the keys real parsers emit)', () {
     test('resolves gas switches by tankRef, the key subsurface and DAN DL7 '
         'emit', () async {
@@ -1012,6 +1079,103 @@ void main() {
       );
       expect(deco.map((p) => p.pressure), [207.0, 207.0]);
     });
+
+    test(
+      'takes a backup\'s exact pressure series over its waypoints',
+      () async {
+        // The waypoints are a projection onto the depth clock: resyncing the
+        // file a restore kept must not trade the series it restored for them
+        // (issue #3917).
+        final diveId = await seedDive(notes: '', buddy: '');
+        await seedTank(diveId, id: 'tank-a', tankOrder: 0);
+        await seedTank(diveId, id: 'tank-b', tankOrder: 1);
+        await TankPressureRepository().insertTankPressures(diveId, {
+          'tank-a': [(timestamp: 9, pressure: 195.0)],
+          'tank-b': [(timestamp: 0, pressure: 207.0)],
+        });
+
+        await service.applyReimport(
+          diveId: diveId,
+          diveData: {
+            'tanks': [
+              {'order': 0, 'uddfTankId': 'tank_a'},
+              {'order': 1, 'uddfTankId': 'tank_b'},
+            ],
+            'profile': const [
+              {
+                'timestamp': 10,
+                'depth': 12.0,
+                'allTankPressures': [
+                  {'tankIndex': 0, 'pressure': 195.0},
+                ],
+              },
+            ],
+            UddfSourceAttribution.seriesKey: <Map<String, dynamic>>[
+              {
+                'tankRef': 'tank_a',
+                'sourceOrdinal': null,
+                'computerOrdinal': null,
+                'samples': const <({int timestamp, double pressure})>[
+                  (timestamp: 9, pressure: 195.0),
+                  (timestamp: 21, pressure: 185.0),
+                ],
+              },
+            ],
+          },
+          now: DateTime(2026, 9, 3),
+        );
+
+        final back = await TankPressureRepository().getPressuresForTank(
+          diveId,
+          'tank-a',
+        );
+        expect(back.map((p) => (p.timestamp, p.pressure)), [
+          (9, 195.0),
+          (21, 185.0),
+        ]);
+        // A tank the block does not name keeps its history.
+        final deco = await TankPressureRepository().getPressuresForTank(
+          diveId,
+          'tank-b',
+        );
+        expect(deco.map((p) => p.pressure), [207.0]);
+      },
+    );
+
+    test(
+      'keeps each stretch of a backup\'s series a series of its own',
+      () async {
+        // Joined, the two would span the gap between them and hide a recording
+        // another source made there (issue #2492).
+        final diveId = await seedDive(notes: '', buddy: '');
+        await seedTank(diveId, id: 'tank-a', tankOrder: 0);
+
+        await service.applyReimport(
+          diveId: diveId,
+          diveData: {
+            'tanks': [
+              {'order': 0, 'uddfTankId': 'tank_a'},
+            ],
+            UddfSourceAttribution.seriesKey: <Map<String, dynamic>>[
+              for (final start in const [0, 100])
+                {
+                  'tankRef': 'tank_a',
+                  'sourceOrdinal': null,
+                  'computerOrdinal': null,
+                  'samples': <({int timestamp, double pressure})>[
+                    (timestamp: start, pressure: 200.0),
+                    (timestamp: start + 10, pressure: 190.0),
+                  ],
+                },
+            ],
+          },
+          now: DateTime(2026, 9, 3),
+        );
+
+        final rows = await db.select(db.tankPressureSeries).get();
+        expect(rows.where((row) => row.diveId == diveId), hasLength(2));
+      },
+    );
 
     test('carries over one existing row per parsed tank when the parser '
         'omits order', () async {
@@ -1409,6 +1573,196 @@ void main() {
         'ppO2High',
         'bookmark',
       });
+    });
+
+    test('keeps a user-authored annotation and re-stamps it newer than the '
+        'scope tombstone', () async {
+      final diveId = await seedDive(notes: '', buddy: '');
+      await seedSource(diveId, id: 'src-file');
+      await seedEvent(diveId, id: 'ev-old');
+      await db
+          .into(db.diveProfileEvents)
+          .insert(
+            DiveProfileEventsCompanion.insert(
+              id: 'ann-1',
+              diveId: diveId,
+              timestamp: 600,
+              eventType: 'annotation',
+              source: const Value('user'),
+              description: const Value('felt sick'),
+              createdAt: 0,
+            ),
+          );
+
+      await service.applyReimport(
+        diveId: diveId,
+        diveData: {'dateTime': DateTime(2026, 9, 1, 9), 'events': freshEvents},
+        now: DateTime(2026, 9, 3),
+      );
+
+      final events = await (db.select(
+        db.diveProfileEvents,
+      )..where((t) => t.diveId.equals(diveId))).get();
+      expect(events.map((e) => e.id), isNot(contains('ev-old')));
+      final kept = events.singleWhere((e) => e.id == 'ann-1');
+      expect(kept.description, 'felt sick');
+      final scope = (await db.select(db.deletionLog).get()).singleWhere(
+        (d) => d.entityType == EventScopeTombstone.entityType,
+      );
+      expect(
+        Hlc.parse(kept.hlc!).compareTo(Hlc.parse(scope.originHlc!)),
+        greaterThan(0),
+        reason: 'a peer applying the scope must keep the annotation',
+      );
+    });
+
+    test('a file that carries the kept annotation\'s own id does not '
+        'duplicate it', () async {
+      final diveId = await seedDive(notes: '', buddy: '');
+      await seedSource(diveId, id: 'src-file');
+      await db
+          .into(db.diveProfileEvents)
+          .insert(
+            DiveProfileEventsCompanion.insert(
+              id: 'ann-1',
+              diveId: diveId,
+              timestamp: 600,
+              eventType: 'annotation',
+              source: const Value('user'),
+              description: const Value('felt sick'),
+              createdAt: 0,
+            ),
+          );
+
+      await service.applyReimport(
+        diveId: diveId,
+        diveData: {
+          'dateTime': DateTime(2026, 9, 1, 9),
+          'profileEvents': [
+            {
+              'eventType': 'annotation',
+              'id': 'ann-1',
+              'source': 'user',
+              'timestamp': 600,
+              'description': 'felt sick',
+            },
+            {'eventType': 'bookmark', 'timestamp': 30},
+          ],
+        },
+        now: DateTime(2026, 9, 3),
+      );
+
+      final events = await (db.select(
+        db.diveProfileEvents,
+      )..where((t) => t.diveId.equals(diveId))).get();
+      expect(events.where((e) => e.id == 'ann-1'), hasLength(1));
+      expect(
+        events.map((e) => e.eventType),
+        unorderedEquals(['annotation', 'bookmark']),
+      );
+    });
+
+    test(
+      'a parsed event id already held by another dive gets a fresh id',
+      () async {
+        final diveId = await seedDive(notes: '', buddy: '');
+        await seedSource(diveId, id: 'src-file');
+        // The same backup restored once before, as another dive.
+        await db
+            .into(db.dives)
+            .insert(
+              DivesCompanion(
+                id: const Value('other-dive'),
+                diveDateTime: Value(
+                  DateTime(2026, 8, 1).millisecondsSinceEpoch,
+                ),
+                createdAt: const Value(1),
+                updatedAt: const Value(1),
+              ),
+            );
+        await db
+            .into(db.diveProfileEvents)
+            .insert(
+              DiveProfileEventsCompanion.insert(
+                id: 'ev-taken',
+                diveId: 'other-dive',
+                timestamp: 30,
+                eventType: 'bookmark',
+                createdAt: 0,
+              ),
+            );
+
+        await service.applyReimport(
+          diveId: diveId,
+          diveData: {
+            'dateTime': DateTime(2026, 9, 1, 9),
+            'events': [
+              {'eventType': 'bookmark', 'id': 'ev-taken', 'timestamp': 30},
+            ],
+          },
+          now: DateTime(2026, 9, 3),
+        );
+
+        final mine = await (db.select(
+          db.diveProfileEvents,
+        )..where((t) => t.diveId.equals(diveId))).get();
+        expect(mine, hasLength(1));
+        expect(mine.single.id, isNot('ev-taken'));
+        final theirs = await (db.select(
+          db.diveProfileEvents,
+        )..where((t) => t.id.equals('ev-taken'))).getSingle();
+        expect(theirs.diveId, 'other-dive');
+      },
+    );
+
+    test('an annotation another dive holds is not copied over on a resync, '
+        'where nothing would link it', () async {
+      final diveId = await seedDive(notes: '', buddy: '');
+      await seedSource(diveId, id: 'src-file');
+      await db
+          .into(db.dives)
+          .insert(
+            DivesCompanion(
+              id: const Value('other-dive'),
+              diveDateTime: Value(DateTime(2026, 8, 1).millisecondsSinceEpoch),
+              createdAt: const Value(1),
+              updatedAt: const Value(1),
+            ),
+          );
+      await db
+          .into(db.diveProfileEvents)
+          .insert(
+            DiveProfileEventsCompanion.insert(
+              id: 'ann-taken',
+              diveId: 'other-dive',
+              timestamp: 30,
+              eventType: 'annotation',
+              source: const Value('user'),
+              createdAt: 0,
+            ),
+          );
+
+      await service.applyReimport(
+        diveId: diveId,
+        diveData: {
+          'dateTime': DateTime(2026, 9, 1, 9),
+          'events': [
+            {
+              'eventType': 'annotation',
+              'id': 'ann-taken',
+              'source': 'user',
+              'timestamp': 30,
+              'description': 'felt sick',
+            },
+          ],
+        },
+        now: DateTime(2026, 9, 3),
+      );
+
+      final mine = await (db.select(
+        db.diveProfileEvents,
+      )..where((t) => t.diveId.equals(diveId))).get();
+      expect(mine, isEmpty);
     });
 
     test('leaves the events of a multi-source dive alone', () async {

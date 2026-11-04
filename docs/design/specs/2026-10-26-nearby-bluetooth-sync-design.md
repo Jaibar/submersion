@@ -153,14 +153,22 @@ Submersion GATT service and accept one connection at a time) and **scan**
 device that supports both. Linux implements scan only and reports
 `canAdvertise == false`.
 
-The GATT service has one fixed Submersion service UUID and two
-characteristics: **inbox** (the central writes to it, with response) and
+The GATT service has one fixed Submersion service UUID and three
+characteristics: **inbox** (the central writes to it, with response),
 **outbox** (the central reads it; the peripheral answers each read from a
-queue of what it has to send). A notification on the outbox is only a
-one-byte doorbell saying bytes are waiting, backed by a slow poll: a
-Flutter peripheral has no flow control over notifications (Apple rejects
-them once its queue is full, Android drops them), while reads and
-acknowledged writes pace themselves on every platform. Each direction
+queue of what it has to send) and **doorbell** (a one-byte notification
+saying bytes are waiting, backed by a slow poll). The doorbell is not the
+outbox because Apple reports read answers and notifications through one
+callback: on a characteristic both read and notified, a notification is
+taken for the outstanding read's answer and every read answer rings like a
+notification (issue #4093). Bytes never travel as notifications: a Flutter
+peripheral has no flow control over them (Apple rejects them once its
+queue is full, Android drops them), while reads and acknowledged writes
+pace themselves on every platform. Apple drops every peripheral command
+sent before its manager reports power-on, and clears the hosted service
+when Bluetooth goes off, so hosting waits for the first state and replaces
+whatever is hosted, on each carrier's first hosting and after Bluetooth
+returns. Each direction
 carries a byte stream framed by the link layer; the carrier cuts it into
 chunks that fit the negotiated MTU, never longer than the 512 bytes one
 attribute value may hold, and a peripheral's send waits while 64 KiB are
@@ -199,8 +207,24 @@ different codes, matching codes confirm the two devices share a secret
 with each other and no one else. Each diver confirms "Same code" on their
 screen; the link waits for the other side's confirmation message, then
 both re-key with a **pair secret** (HKDF of the shared secret with the pair
-label), exchange their full identities, and store the secret under the
-peer's device id in secure storage, and a row in the paired-devices table.
+label) and exchange their full identities. Each then writes the secret
+under the peer's device id in secure storage, provisionally, and sends a
+second `pairConfirm`, sealed under the pair key, saying the other's
+identity arrived. A device keeps the secret, and adds the paired-devices
+row, only once the other's `pairConfirm` arrives; if it never does, the
+write is undone (a secret it replaced, active or revoked, is put back)
+and the link closed. Writing first means a keychain that refuses the
+secret fails this side before the peer hears it. Without the
+acknowledgement a device whose identity was lost on the way kept a
+pairing the other never made (issue #4154): a Bluetooth peripheral's send
+returns once its bytes are queued, and a central's failed write was taken
+as sent. Only the last acknowledgement itself can still be lost, which
+leaves the pairing on the device that sent it alone; the other then
+refuses its syncs as `notPaired`. Pair hellos carry protocol version 2
+for this, while sync hellos stay at 1: a build without the
+acknowledgement refuses a pair hello above 1 as newer, and this one
+refuses a pair hello below 2 as older, so the two fail before either
+stores anything.
 Until both confirm, each side sees only a preview: the other's display
 name, whether it holds dives, a random per-pairing nonce, and an epoch tag
 (an HMAC of its library epoch) that matches the other's only on the same
@@ -477,7 +501,11 @@ twice, and a second tap confirms nothing twice. When the two devices
 found each other from both sides, each keeps the pairing the lower nonce
 started, even over one its diver already confirmed: the other device
 cannot know that, and both must show the same code, so that diver
-confirms the one left. Bluetooth permission is requested
+confirms the one left. Twins arise only when both dial at once: a device
+showing a code dials no one until its diver answers (issue #4154), since a
+second link to the same device could only become a twin, and on Apple
+devices closing it can drop the shared Bluetooth link the pairing runs on.
+Bluetooth permission is requested
 the first time this page opens, with the OS prompt; if refused, the page
 explains and offers the system settings.
 

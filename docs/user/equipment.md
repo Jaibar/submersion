@@ -72,6 +72,9 @@ apply to the item's type.
 
 - **Details:** status, the number of **Dives** and **Trips** the item was used
   on (tap either to see them), purchase details and how long you have owned it.
+  Neither counts planned dives, and those lists leave them out too. Trips
+  counts the trips its list shows, so a dive on a side trip counts both the
+  side trip and its parent, and trips you have hidden are left out.
 - **Location:** where the item is now. **Move** sends it somewhere else.
 - **Cylinder passport:** for a Tank. See [Cylinder Passports](cylinder-passports.md).
 - **Gear passport:** for any other item. See [Gear Tags](gear-tags.md).
@@ -97,6 +100,10 @@ window (see [Service reminders](#service-reminders)) or in the last 10% of any
 other limit (dives, hours, or an exposure such as cold dives), and as overdue
 once a limit is passed. The item's icon in
 the list turns red when any clock is overdue.
+
+Only dives that happened count. Gear linked to a planned dive picks up no dives,
+hours or exposure until you log that dive, while a dive you excluded from
+statistics still counts, because it still wore the gear.
 
 A clock counts from the last service you logged for it. Until then it counts
 from its **Baseline date**, which you can set in **Edit intervals**. From a
@@ -182,7 +189,24 @@ finding you have dealt with, and **Restore** it later from the dismissed list.
 
 **Check-ins** are your own notes on how an item behaved, on a dive or on the
 bench. Tap **Add check-in**, tag what happened, and add a note. Check-ins feed
-the recurring-issue findings.
+the recurring-issue findings. When a fault became a near-miss, choose **Log
+near-miss** on the issue to link the two (see
+[Linking a report to a gear check-in](safety.md#linking-a-report-to-a-gear-check-in)).
+
+## Reports
+
+**Insights > Equipment** shows what your gear has cost and how much you use it:
+
+- **Most used gear** ranks items by dives and hours, and follows the Insights
+  filter, so a date range or a trip gives usage for that period.
+- **Cost of ownership** adds purchase prices and service costs, with spending by
+  year and a list by cost per dive, per hour or in total. Each currency stands
+  alone, and a part's cost counts toward its assembly.
+- **Idle gear** lists gear you own and have not dived in 6 months, 1 year or 2
+  years, including gear never dived.
+
+For a document to hand to someone, use the **Equipment Inventory** and **Service
+Report** PDFs in [Import & Export](import-export.md#supported-export-formats).
 
 ## Parts and assemblies
 
@@ -200,13 +224,36 @@ shop, or with a person you lent it to. Add places in **Settings > Manage >
 Locations**, then tap **Move** on an item's **Location** card. A move can take
 the item's parts with it, and offers to update its status: **In Service** at a
 shop, **Loaned Out** with a person, and back to **Active** when it returns to
-storage or a dive center. Every move is kept, so **Show all** lists where the
-item has been.
+storage or a dive center. Loaned Out gear moved to **No location** or an Other
+place is offered **Active** too. Every move is kept, so **Show all** lists where
+the item has been.
 
 A dive center place can link to one of your saved dive centers. Choose it under
 **Saved dive center** when you add or edit the place, or leave it empty and just
 type a name. That center's page then lists your gear left there under **Your
 gear here**. Deleting a saved dive center keeps the place and its history; only
+the link goes.
+
+### Lending gear to a buddy
+
+To lend an item, tap **Move** on its **Location** card, choose **Lend to a
+buddy**, and pick the buddy or add a new one. To lend several items at once, open
+the buddy's page and choose **Lend gear** from its menu. Either way, Submersion
+uses that buddy's Person place, or creates one the first time.
+
+The item's **Location** card then reads **With** and the buddy's name, and tapping
+it opens the buddy. The buddy's page lists everything they have under **Gear
+with** their name. When gear comes back, tap **Returned** there, or **All
+returned** for a whole kit. Each item goes back to where it was before the loan,
+and Loaned Out gear is offered **Active**. To send it somewhere else, use **Move**
+instead.
+
+Gear a family member always uses works the same way: lend it to them and answer
+**Keep status** when asked about **Loaned Out**. It stays Active and still shows
+on their page.
+
+An existing Person place can be linked by hand: choose the buddy under **Buddy**
+when you edit the place. Deleting a buddy keeps the place and its history; only
 the link goes.
 
 ## Equipment sets

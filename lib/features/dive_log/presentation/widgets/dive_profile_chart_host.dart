@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/providers/provider.dart';
-import 'package:submersion/features/dive_log/data/services/gas_usage_segments_service.dart';
 import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart'
     show ProfileAnalysis;
 import 'package:submersion/features/dive_log/data/services/profile_markers_service.dart';
@@ -22,6 +22,11 @@ import 'package:submersion/features/dive_log/presentation/providers/safety_revie
 import 'package:submersion/features/dive_log/presentation/utils/profile_extent_sync.dart';
 import 'package:submersion/features/dive_log/presentation/utils/sac_normalization.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/cell_divergence_highlight.dart';
+import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
+import 'package:submersion/features/dive_log/presentation/providers/annotation_focus_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/annotation_placement_provider.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_annotations_provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/dive_detail/dive_detail_annotation_actions.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_chart.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/photo_marker_layout.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/safety_finding_highlight.dart';
@@ -108,6 +113,7 @@ class DiveProfileChartHost extends ConsumerWidget {
     this.tooltipPresentation = TooltipPresentation.inChart,
     this.onTooltipData,
     this.onSafetyFindingDetails,
+    this.annotationActions,
   });
 
   /// The hydrated dive: tanks and profile samples included. A dive loaded for
@@ -127,6 +133,11 @@ class DiveProfileChartHost extends ConsumerWidget {
 
   final void Function(List<TooltipRow>? rows)? onTooltipData;
 
+  /// Wires the chart's annotation callbacks (#4109): placement, the marker
+  /// popup and the right-click menu. Null for a host that only shows the
+  /// profile (the dashboard preview, a plan's logged dive).
+  final DiveDetailAnnotationActions? annotationActions;
+
   /// "Show me the details" on a safety finding's callout. Null hides the
   /// action, which is right wherever the safety section is not on screen to
   /// scroll to.
@@ -142,44 +153,49 @@ class DiveProfileChartHost extends ConsumerWidget {
     // these providers reload behind any detail change tick (the first-view
     // safety review write included): the chart would drop its overlays and
     // estimated pressure series for a frame, then draw them again (#1468).
+    // Each is selected, which drops the loading states a reload passes
+    // through: the host only rebuilds, and rebuilds the chart, for a value
+    // that differs. A list compares by identity, so one read again differs.
     final activeSourceId = ref.watch(activeDiveSourceProvider(diveId));
-    final analysis = ref
-        .watch(
-          sourceProfileAnalysisProvider((
-            diveId: diveId,
-            sourceId: activeSourceId,
-          )),
-        )
-        .value;
+    final analysis = ref.watch(
+      sourceProfileAnalysisProvider((
+        diveId: diveId,
+        sourceId: activeSourceId,
+      )).select((a) => a.value),
+    );
 
     final showMaxDepthMarker = ref.watch(showMaxDepthMarkerProvider);
     final showPressureThresholdMarkers = ref.watch(
       showPressureThresholdMarkersProvider,
     );
 
-    final gasSwitches = ref.watch(gasSwitchesProvider(diveId)).value;
+    final gasSwitches = ref.watch(
+      gasSwitchesProvider(diveId).select((a) => a.value),
+    );
 
     // Cell divergence bands (condition phase 2). .value keeps the previous
     // summary while the provider reloads behind a detail tick, like the
     // inputs above.
-    final sensorSummary = ref.watch(diveSensorSummaryProvider(diveId)).value;
+    final sensorSummary = ref.watch(
+      diveSensorSummaryProvider(diveId).select((a) => a.value),
+    );
 
     // Per-tank pressures, augmented for the chart only with linear estimates
     // between the samples a computer actually reported (#197).
-    final tankPressures = ref
-        .watch(activeSourceTankPressuresProvider(diveId))
-        .value;
-    final estimatedTankPressures = ref
-        .watch(estimatedTankPressuresProvider(diveId))
-        .value;
+    final tankPressures = ref.watch(
+      activeSourceTankPressuresProvider(diveId).select((a) => a.value),
+    );
+    final estimatedTankPressures = ref.watch(
+      estimatedTankPressuresProvider(diveId).select((a) => a.value),
+    );
 
     final rangeState = ref.watch(rangeSelectionProvider(diveId));
 
     final sourceProfiles =
-        ref.watch(sourceProfilesProvider(diveId)).value ??
+        ref.watch(sourceProfilesProvider(diveId).select((a) => a.value)) ??
         const <String, SourceProfile>{};
     final dataSources =
-        ref.watch(diveDataSourcesProvider(diveId)).value ??
+        ref.watch(diveDataSourcesProvider(diveId).select((a) => a.value)) ??
         const <DiveDataSource>[];
     final computerNames = computerDisplayNames(context, dataSources);
     final labels = sourceNameLabelsFor(context);
@@ -271,7 +287,8 @@ class DiveProfileChartHost extends ConsumerWidget {
     );
 
     final photoMedia =
-        ref.watch(mediaForDiveProvider(diveId)).value ?? const [];
+        ref.watch(mediaForDiveProvider(diveId).select((a) => a.value)) ??
+        const [];
     final photoMarkers = chartProfile.isEmpty
         ? const <PhotoChartMarker>[]
         : photoMarkersFromMedia(
@@ -285,9 +302,9 @@ class DiveProfileChartHost extends ConsumerWidget {
     final sourceById = {for (final s in dataSources) s.id: s};
     // Plan-vs-actual: the planned profile this dive was converted from,
     // ghosted next to the actual logged profile.
-    final plannedOverlay = ref
-        .watch(plannedProfileOverlayProvider(diveId))
-        .value;
+    final plannedOverlay = ref.watch(
+      plannedProfileOverlayProvider(diveId).select((a) => a.value),
+    );
     final overlays = <ChartSourceOverlay>[
       for (final id in overlayIds)
         if (id != activeSource?.id &&
@@ -307,18 +324,21 @@ class DiveProfileChartHost extends ConsumerWidget {
             // raw per-point device field to fall back on. Cached by the
             // (diveId, sourceId) family key, so toggling the eye icon doesn't
             // re-run Buhlmann.
-            analysis: ref
-                .watch(
-                  sourceProfileAnalysisProvider((diveId: diveId, sourceId: id)),
-                )
-                .value,
+            analysis: ref.watch(
+              sourceProfileAnalysisProvider((
+                diveId: diveId,
+                sourceId: id,
+              )).select((a) => a.value),
+            ),
           ),
       ?plannedOverlay,
     ];
 
     final trackingIndex = ref.watch(profileTrackingIndexProvider(diveId));
     final selectedFinding = ref.watch(selectedSafetyFindingProvider(diveId));
-    final safetyReview = ref.watch(safetyReviewProvider(diveId)).value;
+    final safetyReview = ref.watch(
+      safetyReviewProvider(diveId).select((a) => a.value),
+    );
     final appSettings = ref.watch(
       settingsProvider.select(
         (s) => (
@@ -342,6 +362,23 @@ class DiveProfileChartHost extends ConsumerWidget {
         ? selectedFinding
         : null;
 
+    final annotations = annotationActions?.onProfile(chartProfile);
+    final placement = annotations == null
+        ? null
+        : ref.watch(annotationPlacementProvider(diveId));
+    final focusedAnnotation = annotations == null
+        ? null
+        : ref.watch(annotationFocusProvider(diveId));
+    // The diver's annotations come from their own provider (#4109), not the
+    // analysis, so they draw whether or not the dive has an analysis.
+    // `.value`, not the app's valueOrNull: a reload after a write keeps the
+    // previous list on screen instead of blinking the markers out.
+    final chartEvents = mergeChartEvents(
+      analysis?.events,
+      ref.watch(diveAnnotationsProvider(diveId)).value ??
+          const <ProfileEvent>[],
+    );
+
     return MouseRegion(
       onExit: (_) {
         ref.read(profileTrackingIndexProvider(diveId).notifier).state = null;
@@ -361,9 +398,15 @@ class DiveProfileChartHost extends ConsumerWidget {
         labelCeilingAsCalculated:
             analysis?.computerStopsWithCalculatedCeiling ?? false,
         ascentRates: analysis?.ascentRates,
-        events: analysis?.events,
+        events: chartEvents,
+        annotationPlacement: placement != null,
+        onAnnotationPlaced: annotations?.place,
+        onAnnotationTap: annotations?.onMarkerTap,
+        onSecondaryTapAt: annotations?.onSecondaryTap,
+        focusedAnnotationId: focusedAnnotation,
         ndlCurve: analysis?.ndlCurve,
         sacCurve: analysis?.smoothedSacCurve,
+        environment: analysis?.environment ?? DiveEnvironment.standard,
         ppO2Curve: analysis?.ppO2Curve,
         o2SensorCurves: analysis?.o2SensorCurves,
         o2CellMvCurves: analysis?.o2CellMvCurves,
@@ -395,11 +438,11 @@ class DiveProfileChartHost extends ConsumerWidget {
         gasSwitches: gasSwitches,
         gasSegments: (dive.tanks.isEmpty || chartProfile.isEmpty)
             ? null
-            : buildGasUsageSegments(
-                tanks: dive.tanks,
-                gasSwitches: gasSwitches ?? const [],
-                diveDurationSeconds: chartProfile.last.timestamp,
-                firstSampleSeconds: chartProfile.first.timestamp,
+            : activeGasUsageSegments(
+                dive,
+                gasSwitches: gasSwitches,
+                profile: chartProfile,
+                computerId: resolvedActive?.computerId,
               ),
         diveDurationSeconds: chartProfile.isEmpty
             ? null

@@ -1,8 +1,10 @@
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
+import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/sync/event_scope_tombstone.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
@@ -56,7 +58,14 @@ class DiveSplitService {
   /// the new dive's id. Throws [ArgumentError] when the source does not
   /// belong to the dive or is the dive's only source. All-or-nothing: one
   /// transaction, full rollback on any failure.
-  Future<String> split({
+  Future<String> split({required String diveId, required String sourceId}) =>
+      ChangeLogScope.bulk(
+        DatabaseService.instance.databaseOrNull,
+        label: ChangeLogLabels.splitDive,
+        body: () => _splitInner(diveId: diveId, sourceId: sourceId),
+      );
+
+  Future<String> _splitInner({
     required String diveId,
     required String sourceId,
   }) async {
@@ -128,6 +137,9 @@ class DiveSplitService {
       // dive_profile_series.source_id is ON DELETE SET NULL, so reading
       // after would lose the FK ownership signal this rule needs.
       final allProfileSeries = await _profileSeries.getSeriesForDive(diveId);
+      // Also before the deletes: they take the demoted generation an edit is
+      // recognised by.
+      final liveEditIds = await _profileSeries.liveEditIds(diveId);
       final allPressureSeries = await _tankSeries.getSeriesForDive(diveId);
       final movingProfiles = [
         for (final s in allProfileSeries)
@@ -461,6 +473,23 @@ class DiveSplitService {
         );
       }
 
+      // The row above took the source's own depths. An edit that moved with
+      // it is what the new dive shows, so its depths are the dive's (issue
+      // #3931).
+      final movedEditDepths = await _profileSeries.liveEditDepthSummary(
+        newDiveId,
+      );
+      if (movedEditDepths != null) {
+        await (_db.update(
+          _db.dives,
+        )..where((t) => t.id.equals(newDiveId))).write(
+          DivesCompanion(
+            maxDepth: Value(movedEditDepths.maxDepth),
+            avgDepth: Value(movedEditDepths.avgDepth),
+          ),
+        );
+      }
+
       // 6. Tank pressure series, re-pointed at the moved or cloned tanks.
       for (final s in movingPressures) {
         await _tankSeries.insertSeries(
@@ -555,6 +584,18 @@ class DiveSplitService {
         await _sync.logScopedDeletion(
           EventScopeTombstone(diveId: diveId, computerId: source.computerId!),
         );
+        // A scope never reaches the diver's own events (#4109), and one an
+        // older consolidation stamped with this computer moved with the rest.
+        final movedUserEvents = [
+          for (final r in eventRows)
+            if (r.source == EventSource.user.name) r.id,
+        ];
+        if (movedUserEvents.isNotEmpty) {
+          await _sync.logDeletions(
+            entityType: 'diveProfileEvents',
+            recordIds: movedUserEvents,
+          );
+        }
       }
       if (movedTankIds.isNotEmpty) {
         await _sync.logDeletions(
@@ -620,6 +661,15 @@ class DiveSplitService {
         // one graded the computer that just left.
         await SafetyFindingsRepository.clearReviewForDive(_db, _sync, diveId);
 
+        // An edit that stayed behind describes the dive; the promoted source's
+        // row describes a recording the dive is not showing (issue #3931).
+        final keptEdit = liveEditIds.difference({
+          for (final s in movingProfiles) s.id,
+        }).isNotEmpty;
+        final keptDepths = keptEdit
+            ? await _profileSeries.liveDepthSummary(diveId)
+            : null;
+
         final promotedTiming = _snapshotTiming(
           sources.where((s) => s.id != source.id).toList()
             ..sort(compareDataSourcesInShownOrder),
@@ -636,8 +686,12 @@ class DiveSplitService {
           computerId: Value(promoted.computerId),
           diveComputerModel: Value(promoted.computerModel),
           diveComputerSerial: Value(promoted.computerSerial),
-          maxDepth: Value(promoted.maxDepth ?? diveRow.maxDepth),
-          avgDepth: Value(promoted.avgDepth ?? diveRow.avgDepth),
+          maxDepth: Value(
+            keptDepths?.maxDepth ?? promoted.maxDepth ?? diveRow.maxDepth,
+          ),
+          avgDepth: Value(
+            keptDepths?.avgDepth ?? promoted.avgDepth ?? diveRow.avgDepth,
+          ),
           bottomTime: Value(
             sourceBottomTimeSeconds(
                   allProfileSeries.where((s) => !movingProfiles.contains(s)),

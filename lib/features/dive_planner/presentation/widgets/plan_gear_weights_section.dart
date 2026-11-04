@@ -81,6 +81,7 @@ class PlanGearWeightsSection extends ConsumerWidget {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,
@@ -90,6 +91,7 @@ class PlanGearWeightsSection extends ConsumerWidget {
           scrollController: scrollController,
           selectedEquipmentIds: state.equipmentIds.toSet(),
           hideSpare: true,
+          hideAssemblyParts: true,
           onEquipmentSelected: (equipment) {
             Navigator.of(context).pop();
             _addGear(ref, [equipment]);
@@ -103,6 +105,7 @@ class PlanGearWeightsSection extends ConsumerWidget {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       builder: (context) => DraggableScrollableSheet(
         initialChildSize: 0.7,
         minChildSize: 0.5,

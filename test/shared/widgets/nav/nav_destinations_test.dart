@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/platform/device_capabilities.dart';
 import 'package:submersion/shared/widgets/nav/nav_destinations.dart';
 import 'package:submersion/shared/widgets/nav/nav_selection.dart';
 
@@ -12,7 +13,7 @@ void main() {
     });
 
     test('has exactly 16 entries (15 routable + more sentinel)', () {
-      expect(kNavDestinations.length, 16);
+      expect(kNavDestinations.length, 17);
     });
 
     test('exactly two entries are pinned (dashboard and more)', () {
@@ -33,7 +34,7 @@ void main() {
       }
     });
 
-    test('contains the expected 15 routable ids plus more sentinel', () {
+    test('contains the expected 16 routable ids plus more sentinel', () {
       expect(kNavDestinations.map((d) => d.id).toList(), [
         'dashboard',
         'dives',
@@ -49,6 +50,7 @@ void main() {
         'planning',
         'transfer',
         'tracks',
+        'search',
         'settings',
         'more',
       ]);
@@ -157,16 +159,50 @@ void main() {
         'planning',
         'transfer',
         'tracks',
+        'search',
         'settings',
       ]);
     });
 
     test('has exactly 14 entries', () {
-      expect(movableNavIds.length, 14);
+      expect(movableNavIds.length, 15);
     });
 
     test('Connections lives in Insights, not in the nav', () {
       expect(kNavDestinations.map((d) => d.id), isNot(contains('connections')));
+    });
+  });
+
+  group('availableNavDestinations (#4121)', () {
+    final hardware = NavDestination(
+      id: 'usb-things',
+      route: '/usb-things',
+      icon: Icons.usb,
+      selectedIcon: Icons.usb,
+      label: (_) => 'USB things',
+      availableWhen: (caps) => caps.diveComputerDownload,
+    );
+
+    test('drops a destination whose feature the device lacks', () {
+      final all = [...kNavDestinations, hardware];
+      expect(
+        availableNavDestinations(all, DeviceCapabilities.web).map((d) => d.id),
+        isNot(contains('usb-things')),
+      );
+      expect(
+        availableNavDestinations(
+          all,
+          currentDeviceCapabilities(),
+        ).map((d) => d.id),
+        contains('usb-things'),
+      );
+    });
+
+    test('nothing in the real list is hardware-only', () {
+      expect(
+        availableNavDestinations(kNavDestinations, DeviceCapabilities.web),
+        kNavDestinations,
+      );
     });
   });
 }

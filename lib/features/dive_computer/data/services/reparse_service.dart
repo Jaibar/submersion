@@ -4,9 +4,12 @@ import 'package:drift/drift.dart';
 import 'package:libdivecomputer_plugin/libdivecomputer_plugin.dart' as pigeon;
 import 'package:uuid/uuid.dart';
 
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
+import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/features/transmitters/data/services/transmitter_auto_registrar.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
+import 'package:submersion/features/dive_log/data/services/user_event_preservation.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/profile/tank_pressure_glitches.dart';
 import 'package:submersion/core/services/logger_service.dart';
@@ -172,23 +175,19 @@ class ReparseService {
       ));
 
       // ------------------------------------------------------------------
-      // 2. Check isPrimary -- only update Dives row if the source is primary
+      // 2. Read the source row: its isPrimary gates the Dives row in step 4
       // ------------------------------------------------------------------
       final sourceRow = await (db.select(
         db.diveDataSources,
       )..where((t) => t.id.equals(sourceRowId))).getSingle();
 
-      if (sourceRow.isPrimary) {
-        // ----------------------------------------------------------------
-        // 3. Update Dives row (allowlisted columns only)
-        // ----------------------------------------------------------------
-        await _updateDiveRow(
-          diveId: diveId,
-          parsed: parsed,
-          now: now,
-          vendor: descriptorVendor,
-        );
-      }
+      // A manual edit stays the live generation of its source, the fresh
+      // parse landing beneath it. A source with no computer cannot be asked:
+      // a file import's own series has the shape hasLiveEdit looks for.
+      final beneathEdit =
+          sourceRow.isPrimary &&
+          sourceRow.computerId != null &&
+          await _profileSeries.hasLiveEdit(diveId, sourceId: sourceRow.id);
 
       final sourceRows = await (db.select(
         db.diveDataSources,
@@ -196,8 +195,16 @@ class ReparseService {
       final isMultiSource = sourceRows.length > 1;
       final ownsStrand = sourceOwnsProfileStrand(sourceRow, sourceRows);
 
+      // A switch list the diver edited is theirs (issue #32): the re-parse
+      // rewrites events, cylinders and pressure as before but leaves every
+      // switch row alone, the way it keeps an edited profile.
+      final diveRow = await (db.select(
+        db.dives,
+      )..where((t) => t.id.equals(diveId))).getSingle();
+      final keepsSwitches = diveRow.gasSwitchesEdited;
+
       // ------------------------------------------------------------------
-      // 4. Replace DiveProfiles for this source's computerId -- but only
+      // 3. Replace DiveProfiles for this source's computerId -- but only
       //    when this source actually authored that strand in its own parse
       //    frame (#1164).
       // ------------------------------------------------------------------
@@ -222,7 +229,23 @@ class ReparseService {
           sourceId: sourceRow.id,
           parsed: parsed,
           isPrimary: sourceRow.isPrimary,
+          beneathEdit: beneathEdit,
           timeOffset: sourceRow.timeOffsetSeconds ?? 0,
+        );
+      }
+
+      // ------------------------------------------------------------------
+      // 4. Update Dives row (allowlisted columns only). After the profile:
+      //    a dive re-parsed before #3189 holds its recording live beside the
+      //    edit, and the depths under an edit are read from what stays live.
+      // ------------------------------------------------------------------
+      if (sourceRow.isPrimary) {
+        await _updateDiveRow(
+          diveId: diveId,
+          parsed: parsed,
+          now: now,
+          vendor: descriptorVendor,
+          beneathEdit: beneathEdit,
         );
       }
 
@@ -262,21 +285,25 @@ class ReparseService {
             )
           : const <DownloadedTank>[];
       final rewritesTanks = resolvedTanks.isNotEmpty;
+      final rewritesSwitches = rewritesTanks && !keepsSwitches;
 
       if (rewritesEvents) {
         // Tombstoned: a peer's import only upserts these, so a row removed
         // here without one would linger there beside its re-inserted copy.
+        // The diver's own events are not the parse's to replace (#4109).
         await _deleteAndTombstone(
           'diveProfileEvents',
-          await _idsOf(db.diveProfileEvents, diveId),
+          await nonUserEventIds(db, diveId),
           diveId: diveId,
         );
-        if (rewritesTanks) {
+        if (rewritesSwitches) {
           await _deleteAndTombstone(
             'gasSwitches',
             await _idsOf(db.gasSwitches, diveId),
             diveId: diveId,
           );
+        }
+        if (rewritesTanks) {
           await _tankSeries.deleteForDive(diveId);
         }
 
@@ -299,12 +326,22 @@ class ReparseService {
         // Resolved once: the bailout claim reads them, and so does the
         // switch rewrite below.
         final switches = resolveGasSwitches(parsed);
+        // The cylinders the dive's stored switches name. On a dive whose
+        // list the diver edited these are still here; otherwise the rows
+        // were just deleted above and the set is empty.
+        final switchedTankIds = {
+          for (final row in await (db.select(
+            db.gasSwitches,
+          )..where((t) => t.diveId.equals(diveId))).get())
+            row.tankId,
+        };
         final tankIdsByIndex = await _carryOverTanks(
           diveId: diveId,
           computerId: computerId,
           resolvedTanks: resolvedTanks,
           parsed: parsed,
           switches: switches,
+          switchedTankIds: switchedTankIds,
         );
         // A tank this parse gained is new, with no source yet (v251, issue
         // #2716); a single-source dive's one source is it.
@@ -321,13 +358,15 @@ class ReparseService {
           parsed: parsed,
           tankIdsByIndex: tankIdsByIndex,
         );
-        await _insertGasSwitches(
-          diveId: diveId,
-          computerId: computerId,
-          switches: switches,
-          tankIdsByIndex: tankIdsByIndex,
-          now: now,
-        );
+        if (rewritesSwitches) {
+          await _insertGasSwitches(
+            diveId: diveId,
+            computerId: computerId,
+            switches: switches,
+            tankIdsByIndex: tankIdsByIndex,
+            now: now,
+          );
+        }
       }
 
       // ------------------------------------------------------------------
@@ -358,8 +397,11 @@ class ReparseService {
       }
       if (rewritesTanks) {
         await stage('diveTanks', await _idsOf(db.diveTanks, diveId));
+      }
+      if (rewritesSwitches) {
         // gasSwitches is only touched (deleted + re-inserted) alongside
-        // tanks; see the guard above.
+        // tanks, and never on a dive whose list the diver edited; see the
+        // guards above.
         await stage('gasSwitches', await _idsOf(db.gasSwitches, diveId));
       }
       if (sourceRow.isPrimary) await stage('dives', [diveId]);
@@ -424,10 +466,18 @@ class ReparseService {
       );
     }
     if (entityType == 'diveProfileEvents') {
-      // The ids are every event on the dive (_idsOf), which is exactly what
-      // the dive scope covers on a peer. The re-inserted events are staged
-      // after this, so their clocks are newer and the scope keeps them.
+      // The ids are every event on the dive but the diver's own, which is
+      // exactly what the dive scope covers on a peer. The re-inserted events
+      // are staged after this, so their clocks are newer and the scope keeps
+      // them.
       await _sync.logScopedDeletion(EventScopeTombstone(diveId: diveId));
+      // The user events kept above must outlive that scope on peers too.
+      await restampUserEvents(
+        db: db,
+        sync: _sync,
+        diveId: diveId,
+        now: DateTime.now().millisecondsSinceEpoch,
+      );
     } else {
       await _sync.logDeletions(entityType: entityType, recordIds: ids);
     }
@@ -493,6 +543,21 @@ class ReparseService {
   ///
   /// Returns a record with the count of succeeded and failed re-parses.
   Future<({int succeeded, int failed})> reparseAllForComputer(
+    String computerId, {
+    required Future<pigeon.ParsedDive> Function(
+      String vendor,
+      String product,
+      int model,
+      Uint8List rawData,
+    )
+    parseFn,
+  }) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.reparse,
+    body: () => _reparseAllForComputerInner(computerId, parseFn: parseFn),
+  );
+
+  Future<({int succeeded, int failed})> _reparseAllForComputerInner(
     String computerId, {
     required Future<pigeon.ParsedDive> Function(
       String vendor,
@@ -689,6 +754,7 @@ class ReparseService {
     required pigeon.ParsedDive parsed,
     required DateTime now,
     required String? vendor,
+    required bool beneathEdit,
   }) async {
     // A parse with no date leaves both start columns as stored, and the exit
     // follows the dive's effective start (entry time when set, as
@@ -710,6 +776,13 @@ class ReparseService {
       totalDurationSeconds: parsed.durationSeconds,
     );
     final waterTemp = _minWaterTemp(parsed);
+    // The edit stays live, so its depths stay the dive's; the source row above
+    // holds what the recording reports. Read from the edit rather than left
+    // as stored, so a dive an earlier re-parse reset comes right again (issue
+    // #3931).
+    final liveDepths = beneathEdit
+        ? await _profileSeries.liveDepthSummary(diveId)
+        : null;
     // Diluent gas mix (issue #1879), from the same resolved tank list the
     // tank carry-over below derives roles from, so a re-parse always agrees
     // with whichever cylinder carries the Diluent role. Value.absent() keeps
@@ -727,10 +800,14 @@ class ReparseService {
       DivesCompanion(
         diluentO2: diluent != null ? Value(diluent.o2) : const Value.absent(),
         diluentHe: diluent != null ? Value(diluent.he) : const Value.absent(),
-        maxDepth: Value(parsed.maxDepthMeters),
-        avgDepth: Value(
-          parsed.avgDepthMeters != 0.0 ? parsed.avgDepthMeters : null,
-        ),
+        maxDepth: beneathEdit
+            ? Value.absentIfNull(liveDepths?.maxDepth)
+            : Value(parsed.maxDepthMeters),
+        avgDepth: beneathEdit
+            ? Value.absentIfNull(liveDepths?.avgDepth)
+            : Value(
+                parsed.avgDepthMeters != 0.0 ? parsed.avgDepthMeters : null,
+              ),
         runtime: Value(parsed.durationSeconds),
         diveDateTime: parsedStartMs != null
             ? Value(parsedStartMs)
@@ -781,21 +858,16 @@ class ReparseService {
     required String sourceId,
     required pigeon.ParsedDive parsed,
     required bool isPrimary,
+    required bool beneathEdit,
     required int timeOffset,
   }) async {
     // Delete existing profiles for this (diveId, computerId)
     await _profileSeries.deleteByComputer(diveId, computerId);
 
-    // A manual edit stays the live generation of its source: the fresh parse
-    // lands demoted beneath it, the rule DiveReimportService._replaceProfile
-    // follows for a file. Inserted primary it would sit live beside the edit
-    // and, stamped newer, outrank it on the next primary swap (issue #3189).
-    final beneathEdit =
-        isPrimary &&
-        computerId != null &&
-        await _profileSeries.hasLiveEdit(diveId, sourceId: sourceId);
-
-    // Re-insert from parsed samples
+    // Re-insert from parsed samples. [beneathEdit] lands them demoted, the
+    // rule DiveReimportService._replaceProfile follows for a file. Inserted
+    // primary they would sit live beside the edit and, stamped newer, outrank
+    // it on the next primary swap (issue #3189).
     if (parsed.samples.isNotEmpty) {
       await _profileSeries.insertSeries(
         diveId: diveId,
@@ -926,6 +998,7 @@ class ReparseService {
     required List<DownloadedTank> resolvedTanks,
     required pigeon.ParsedDive parsed,
     required List<GasSwitchEvent> switches,
+    required Set<String> switchedTankIds,
   }) async {
     final tankIdsByIndex = <int, String>{};
     // Get existing tanks
@@ -987,6 +1060,16 @@ class ReparseService {
           )
         : (edited: const <int>{}, importers: const <int>{});
 
+    // A cylinder a stored gas switch names was breathed, whatever this parse
+    // says (issue #32): neither the claim nor the unused-gas cleanup may
+    // take it, or the switch would cascade away with it.
+    final switchNamed = {
+      for (final tank in parsedTanks)
+        if (matches[tank.index] case final row?
+            when switchedTankIds.contains(row.id))
+          tank.index,
+    };
+
     // A bailout transmitter claims the computer's pressureless cylinder for
     // its gas (#3307). Stored roles the diver set count, so a transmitter the
     // diver made the bailout keeps the cylinder merged; a stored cylinder the
@@ -1026,6 +1109,7 @@ class ReparseService {
         // The wider unused-gas test: a hand-entered pressure, regulator, trip
         // cylinder or passport on such a row would go with a claim.
         ...unusedRows.edited,
+        ...switchNamed,
       },
     );
 
@@ -1034,7 +1118,10 @@ class ReparseService {
     // added in the editor reaches a dropped index only through the order
     // fallback and is left alone below.
     final unused = omitUnusedOcGases
-        ? dropUnusedOcGases(claim.tanks, keep: unusedRows.edited)
+        ? dropUnusedOcGases(
+            claim.tanks,
+            keep: {...unusedRows.edited, ...switchNamed},
+          )
         : (tanks: claim.tanks, dropped: const <int>{});
 
     // Claimed cylinders are gone from [claim.tanks]; a role overlaid above
@@ -1128,9 +1215,11 @@ class ReparseService {
       }
     }
 
-    // Delete tanks that exist in DB but were neither matched nor kept by
-    // order (the pre-v200 rule, so manual rows on a re-parsed dive behave as
-    // before).
+    // Delete the computer's tanks that exist in DB but were neither matched
+    // nor kept by order (the pre-v200 rule). A row with no source index that
+    // the parse did not match is the diver's own cylinder, or a pre-v200 row
+    // the parse never matched, which cannot be told apart: both are kept
+    // (issue #32), so a re-parse never takes a cylinder the diver added.
     // A stored cylinder a transmitter claimed is merged into it, so it goes
     // even though this parse matched it. A row the parse did not match keeps
     // the pre-v200 rule: its order still counts as taken.
@@ -1152,6 +1241,13 @@ class ReparseService {
     for (final existing in existingTanks) {
       final claimed = claimedIds.contains(existing.id);
       if (matchedIds.contains(existing.id) && !claimed) continue;
+      if (!matchedIds.contains(existing.id) &&
+          existing.sourceTankIndex == null) {
+        continue;
+      }
+      // A cylinder a stored switch names was breathed: the switch would
+      // cascade away with the row (issue #32).
+      if (switchedTankIds.contains(existing.id)) continue;
       if (claimed || !newTankOrders.contains(existing.tankOrder)) {
         await (db.delete(
           db.diveTanks,

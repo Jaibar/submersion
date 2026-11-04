@@ -8,6 +8,7 @@ import 'package:submersion/core/services/export/csv/codec/csv_text.dart';
 import 'package:submersion/core/services/export/csv/codec/csv_unit.dart';
 import 'package:submersion/core/services/export/csv/codec/tank_capacity.dart';
 import 'package:submersion/core/services/export/csv/dive_csv_columns.dart';
+import 'package:submersion/core/services/export/shared/gas_percent_cells.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_custom_field.dart';
 import 'package:submersion/features/dive_log/domain/services/dive_participant_names.dart';
@@ -104,6 +105,7 @@ class CsvDivesWriter {
 
     for (final dive in dives) {
       final tank = dive.tanks.isNotEmpty ? dive.tanks.first : null;
+      final gas = gasMixCells(tank?.gasMix);
       rows.add([
         dive.diveNumber ?? '',
         sanitizeCsvField(dive.effectiveName?.replaceAll('\n', ' ')),
@@ -114,7 +116,7 @@ class CsvDivesWriter {
         units.value(CsvColumns.maxDepth, dive.maxDepth),
         units.value(CsvColumns.avgDepth, dive.avgDepth),
         dive.bottomTime?.inMinutes ?? '',
-        dive.runtime?.inMinutes ?? '',
+        dive.measuredRuntime?.inMinutes ?? '',
         units.value(CsvColumns.waterTemp, dive.waterTemp),
         units.value(CsvColumns.airTemp, dive.airTemp),
         units.value(CsvColumns.visibility, dive.visibilityMeters),
@@ -132,7 +134,7 @@ class CsvDivesWriter {
         _tankVolume(tank),
         if (!units.isMetric)
           units.value(CsvColumns.workingPressure, tank?.workingPressure),
-        tank?.gasMix.o2.toStringAsFixed(0) ?? '',
+        gas?.o2 ?? '',
         sanitizeCsvField(dive.diveComputerModel),
         sanitizeCsvField(dive.diveComputerSerial),
         sanitizeCsvField(dive.diveComputerFirmware),
@@ -148,7 +150,7 @@ class CsvDivesWriter {
         sanitizeCsvField(dive.site?.region),
         sanitizeCsvField(dive.site?.country),
         sanitizeCsvField(dive.site?.island),
-        tank?.gasMix.he.toStringAsFixed(0) ?? '',
+        gas?.he ?? '',
         _customFieldsJson(dive.customFields),
         // A name cannot be turned back into its id, so the ids ride along.
         sanitizeCsvField(

@@ -37,6 +37,7 @@ void main() {
     'checklist_templates': 'checklistTemplates',
     'checklist_template_sections': 'checklistTemplateSections',
     'checklist_template_items': 'checklistTemplateItems',
+    'trip_checklists': 'tripChecklists',
     'trip_checklist_sections': 'tripChecklistSections',
     'trip_checklist_items': 'tripChecklistItems',
     'equipment': 'equipment',
@@ -136,6 +137,7 @@ void main() {
     'equipment_location_moves': 'equipmentLocationMoves',
     'dive_safety_reviews': 'diveSafetyReviews',
     'dive_safety_findings': 'diveSafetyFindings',
+    'dive_plan_series': 'divePlanSeries',
     'dive_plans': 'divePlans',
     'dive_plan_tanks': 'divePlanTanks',
     'dive_plan_segments': 'divePlanSegments',
@@ -143,6 +145,7 @@ void main() {
     'dive_plan_mission_legs': 'divePlanMissionLegs',
     'dive_plan_mission_members': 'divePlanMissionMembers',
     'dive_plan_equipment': 'divePlanEquipment',
+    'dive_scenarios': 'diveScenarios',
     'pre_dive_checklist_templates': 'preDiveChecklistTemplates',
     'pre_dive_checklist_template_sections': 'preDiveChecklistTemplateSections',
     'pre_dive_checklist_template_items': 'preDiveChecklistTemplateItems',
@@ -183,12 +186,18 @@ void main() {
     'checklist_templates': 'checklistTemplates',
     'media': 'media',
     'rule_runs': 'ruleRuns',
+    'dive_plan_series': 'divePlanSeries',
     // Checklist sections (issue #3360): a section is deletable (its items
     // fall back to no section, ON DELETE SET NULL), so this FK direction
     // needs checking too. Deliberately not also adding
     // pre_dive_checklist_templates or pre_dive_sessions here: they were not
     // in this map before this change, and adding them is a broader,
     // unrelated completeness fix this plan does not cover.
+    // Checklists (issue #3356): a checklist is deletable (its sections and
+    // items are deleted explicitly alongside it, never via SQL cascade;
+    // see TripChecklistsRepository.deleteChecklist), so this FK direction
+    // needs checking too.
+    'trip_checklists': 'tripChecklists',
     'trip_checklist_sections': 'tripChecklistSections',
     'checklist_template_sections': 'checklistTemplateSections',
     'pre_dive_checklist_template_sections': 'preDiveChecklistTemplateSections',

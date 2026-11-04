@@ -2,28 +2,30 @@ import 'package:drift/drift.dart';
 import 'package:submersion/core/constants/enums.dart' as en;
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/database.dart';
+import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/services/bulk_tank_undo_writer.dart';
 import 'package:submersion/features/dive_roles/data/repositories/dive_role_link_repository.dart';
 import 'package:submersion/features/dive_log/domain/entities/bulk_edit_request.dart';
 import 'package:submersion/features/dive_log/domain/entities/bulk_edit_snapshot.dart';
-import 'package:submersion/features/dive_log/domain/entities/dive.dart' as de;
-import 'package:submersion/features/dive_log/domain/entities/tank_extra_regulators.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_weight.dart'
     as dw;
 import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
 import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
 import 'package:submersion/features/marine_life/domain/entities/species.dart'
     as se;
+import 'package:submersion/features/trips/data/repositories/trip_date_stretch.dart';
+import 'package:submersion/features/trips/domain/services/trip_date_stretch.dart';
 
 /// Orchestrates a bulk edit across repositories in a single transaction.
 ///
 /// `DiveTank`, `DiveWeight`, `Sighting` referenced unprefixed here are the Drift
-/// row classes (from database.dart); the `de`/`dw`/`en`/`se` prefixes are the
-/// domain entities/enums.
+/// row classes (from database.dart); the `dw`/`en`/`se` prefixes are the domain
+/// entities/enums.
 class BulkDiveEditService {
   BulkDiveEditService(this._diveRepo, this._buddyRepo, this._speciesRepo);
 
@@ -32,12 +34,19 @@ class BulkDiveEditService {
   final SpeciesRepository _speciesRepo;
   final _sync = SyncRepository();
   final _roleLinks = DiveRoleLinkRepository();
+  final _tankUndo = BulkTankUndoWriter();
 
   AppDatabase get _db => DatabaseService.instance.database;
 
   /// Apply [req] to every dive in [req.diveIds] inside one transaction,
   /// capturing the prior state first. Fires a single local-change notification.
-  Future<BulkEditSnapshot> apply(BulkEditRequest req) async {
+  Future<BulkEditSnapshot> apply(BulkEditRequest req) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.bulkEdit,
+    body: () => _applyInner(req),
+  );
+
+  Future<BulkEditSnapshot> _applyInner(BulkEditRequest req) async {
     final ids = req.diveIds;
     if (ids.isEmpty) {
       return const BulkEditSnapshot(priorDiveRows: []);
@@ -54,14 +63,17 @@ class BulkDiveEditService {
     Map<String, List<GearProvenance>>? priorGear;
     Map<String, List<BuddyWithRole>>? priorBuddies;
     Map<String, List<String>>? priorDiverRoleIds;
-    Map<String, List<DiveTank>>? priorTanks;
+    BulkTankUndo? tankUndo;
     List<DiveTank>? priorTankSpecRows;
     Map<String, List<DiveWeight>>? priorWeights;
     Map<String, List<Sighting>>? priorSightings;
 
+    // Nothing is written until this loop ends, so a second op of a kind (the
+    // form sends an add and a remove) would read the same rows again.
     for (final op in req.ops) {
       switch (op) {
         case TagsOp():
+          if (priorTagIds != null) continue;
           final rows = await (_db.select(
             _db.diveTags,
           )..where((t) => t.diveId.isIn(ids))).get();
@@ -83,6 +95,7 @@ class BulkDiveEditService {
             for (final id in ids) id: current[id] ?? const <String>[],
           };
         case EquipmentOp():
+          if (priorGear != null) continue;
           final rows = await (_db.select(
             _db.diveEquipment,
           )..where((t) => t.diveId.isIn(ids))).get();
@@ -96,26 +109,21 @@ class BulkDiveEditService {
               ),
             );
           }
+        // Undo needs only who was on each dive and their roles, so the lean
+        // reader is enough.
         case BuddiesOp():
-          priorBuddies = {
-            for (final id in ids) id: await _buddyRepo.getBuddiesForDive(id),
-          };
+          priorBuddies ??= await _buddyRepo.getBuddiesForDivesInChunks(ids);
         case DiverRolesOp():
           priorDiverRoleIds = await _roleLinks.diverRoleIdsForDives(ids);
+        // Captured inside the transaction, below.
         case TanksOp():
-          final rows = await (_db.select(
-            _db.diveTanks,
-          )..where((t) => t.diveId.isIn(ids))).get();
-          priorTanks = {for (final id in ids) id: <DiveTank>[]};
-          for (final r in rows) {
-            priorTanks[r.diveId]!.add(r);
-          }
+          break;
         case TankSpecsOp():
           // Flat list, not keyed by dive: the restore matches on row id.
           priorTankSpecRows = await (_db.select(
             _db.diveTanks,
           )..where((t) => t.diveId.isIn(ids))).get();
-        case WeightsOp():
+        case WeightsOp() || WeightAmountOp():
           final rows = await (_db.select(
             _db.diveWeights,
           )..where((t) => t.diveId.isIn(ids))).get();
@@ -134,7 +142,20 @@ class BulkDiveEditService {
       }
     }
 
+    var tripDateStretches = const <TripDateStretch>[];
+
     await _db.transaction(() async {
+      // Inside the transaction, unlike the reads above: a tank a sync merge
+      // lands before this point is not the edit's for undo to remove, and one
+      // a replace then deletes is one for undo to put back.
+      final tankOps = req.ops.whereType<TanksOp>();
+      final tanksBefore = tankOps.isEmpty
+          ? null
+          : await _tankUndo.tankIdsOf(ids);
+      // Only a replace deletes tanks, and with them what they recorded.
+      if (tankOps.any((op) => op.mode == BulkCollectionMode.replace)) {
+        tankUndo = await _tankUndo.captureReplaced(ids);
+      }
       // The site goes first: its snap fills in water type, entry/exit and
       // dive types, and every row the diver set in this edit then lands on
       // top of it (#3657).
@@ -144,11 +165,26 @@ class BulkDiveEditService {
       if (req.hasScalarChanges) {
         await _diveRepo.bulkUpdateFields(ids, req.scalars);
       }
+      // Only the dives this edit moves: one already on the trip stays where
+      // the diver left it, outside the dates or not.
+      final trip = req.scalars.tripId;
+      if (trip.present && trip.value != null) {
+        tripDateStretches = await stretchTripsToCoverDives(_db, _sync, [
+          for (final row in priorDiveRows)
+            if (row.tripId != trip.value) row.id,
+        ], now: DateTime.now().millisecondsSinceEpoch);
+      }
       if (req.notesAppend != null && req.notesAppend!.isNotEmpty) {
         await _diveRepo.bulkAppendNotes(ids, req.notesAppend!);
       }
       for (final op in req.ops) {
         await _applyOp(ids, op);
+      }
+      if (tanksBefore != null) {
+        final tanksAfter = await _tankUndo.tankIdsOf(ids);
+        tankUndo = (tankUndo ?? const BulkTankUndo()).copyWith(
+          createdTankIds: tanksAfter.difference(tanksBefore).toList(),
+        );
       }
     });
 
@@ -162,16 +198,23 @@ class BulkDiveEditService {
       priorGear: priorGear,
       priorBuddies: priorBuddies,
       priorDiverRoleIds: priorDiverRoleIds,
-      priorTanks: priorTanks,
+      tankUndo: tankUndo,
       priorTankSpecRows: priorTankSpecRows,
       priorWeights: priorWeights,
       priorSightings: priorSightings,
+      tripDateStretches: tripDateStretches,
     );
   }
 
   /// Reverse a prior [apply]: restore each dive's prior scalar columns and the
   /// prior membership of every touched collection. One transaction, one notify.
-  Future<void> undo(BulkEditSnapshot snapshot) async {
+  Future<void> undo(BulkEditSnapshot snapshot) => ChangeLogScope.bulk(
+    DatabaseService.instance.databaseOrNull,
+    label: ChangeLogLabels.bulkEdit,
+    body: () => _undoInner(snapshot),
+  );
+
+  Future<void> _undoInner(BulkEditSnapshot snapshot) async {
     if (snapshot.priorDiveRows.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     final ids = snapshot.priorDiveRows.map((r) => r.id).toList();
@@ -189,6 +232,12 @@ class BulkDiveEditService {
           localUpdatedAt: now,
         );
       }
+      await restoreStretchedTripDates(
+        _db,
+        _sync,
+        snapshot.tripDateStretches,
+        now: now,
+      );
 
       final diverRoles = snapshot.priorDiverRoleIds;
       if (diverRoles != null) {
@@ -228,17 +277,9 @@ class BulkDiveEditService {
           await _buddyRepo.bulkReplaceBuddies([id], buddies[id] ?? const []);
         }
       }
-      final tanks = snapshot.priorTanks;
-      if (tanks != null) {
-        for (final id in ids) {
-          // The captured rows carry the registry's cylinder links, which
-          // a restore puts back and a template never writes.
-          await _diveRepo.bulkReplaceTanks(
-            [id],
-            _tanksFromRows(tanks[id] ?? const []),
-            restoreLinks: true,
-          );
-        }
+      final tankUndo = snapshot.tankUndo;
+      if (tankUndo != null) {
+        await _tankUndo.undo(tankUndo);
       }
       final tankSpecRows = snapshot.priorTankSpecRows;
       if (tankSpecRows != null) {
@@ -375,6 +416,14 @@ class BulkDiveEditService {
           case BulkCollectionMode.update:
             throw UnsupportedError('Weights have no in-place update');
         }
+      case WeightAmountOp(:final amountKg, :final newRowType):
+        for (final id in ids) {
+          await _diveRepo.setSingleWeightAmount(
+            id,
+            amountKg,
+            newRowType: newRowType,
+          );
+        }
       case SightingsOp(:final mode, :final sightings):
         switch (mode) {
           case BulkCollectionMode.replace:
@@ -418,47 +467,6 @@ class BulkDiveEditService {
   }
 
   // Map Drift rows back to the domain objects the bulk-replace methods consume.
-  List<de.DiveTank> _tanksFromRows(List<DiveTank> rows) => [
-    for (final r in rows)
-      de.DiveTank(
-        id: '',
-        name: r.tankName,
-        volume: r.volume,
-        workingPressure: r.workingPressure,
-        startPressure: r.startPressure,
-        endPressure: r.endPressure,
-        gasMix: de.GasMix(o2: r.o2Percent, he: r.hePercent),
-        role: en.TankRole.values.firstWhere(
-          (e) => e.name == r.tankRole,
-          orElse: () => en.TankRole.backGas,
-        ),
-        material: r.tankMaterial == null
-            ? null
-            : en.TankMaterial.values.firstWhere(
-                (e) => e.name == r.tankMaterial,
-                orElse: () => en.TankMaterial.aluminum,
-              ),
-        roleSource: en.TankRoleSource.fromName(r.roleSource),
-        presetName: r.presetName,
-        computerId: r.computerId,
-        transmitterSerial: r.transmitterSerial,
-        sourceId: r.sourceId,
-        regulatorEquipmentId: r.regulatorEquipmentId,
-        extraRegulatorIds: decodeExtraRegulatorIds(r.extraRegulatorIds),
-        tripCylinderId: r.tripCylinderId,
-        // The tagged cylinder (#2650), restore-only like the slot.
-        passportId: r.passportId,
-        sourceTankIndex: r.sourceTankIndex,
-        // The cylinder link the registry recorded; bulkReplaceTanks writes
-        // it only when told this is a restore.
-        equipmentId: r.equipmentId,
-        // What the source log recorded (#1496), likewise restore-only.
-        usageDuration: r.usageDuration != null
-            ? Duration(seconds: r.usageDuration!)
-            : null,
-      ),
-  ];
-
   List<dw.DiveWeight> _weightsFromRows(List<DiveWeight> rows) => [
     for (final r in rows)
       dw.DiveWeight(

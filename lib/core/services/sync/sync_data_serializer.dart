@@ -4,10 +4,11 @@ import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
-import 'package:path/path.dart' as p;
+import 'package:flutter/foundation.dart' show listEquals, visibleForTesting;
 import 'package:uuid/uuid.dart';
 
+import 'package:submersion/core/platform/compute/compute_jobs.dart';
+import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/database/app_sql_functions.dart';
 import 'package:submersion/core/database/database.dart';
@@ -16,17 +17,22 @@ import 'package:submersion/core/database/legacy_sample_staging.dart';
 import 'package:submersion/core/database/profile_series_pack.dart';
 import 'package:submersion/core/database/site_type_seed.dart';
 import 'package:submersion/core/database/tag_scope_tables.dart';
+import 'package:submersion/core/database/trip_checklist_default.dart';
 import 'package:submersion/core/services/sync/child_column_clears.dart';
 import 'package:submersion/core/services/sync/device_local_fields.dart';
 import 'package:submersion/core/services/sync/legacy_wire_keys.dart';
 import 'package:submersion/core/services/sync/sync_fact_groups.dart';
+import 'package:submersion/core/services/sync/sync_json_weight.dart';
 import 'package:submersion/core/services/sync/sync_record_overlay.dart';
 import 'package:submersion/core/services/sync/view_config_merge.dart';
 import 'package:submersion/core/services/sync/changeset_log/sync_temp_dir.dart';
+import 'package:submersion/core/services/sync/changeset_log/sync_temp_files.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/utils/off_isolate.dart';
 import 'package:submersion/features/media/data/repositories/smart_album_tag_repoint.dart';
 import 'package:submersion/features/dive_import/data/services/imported_file_reclaimer.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
 import 'package:submersion/features/dive_log/domain/codecs/profile_series_codec.dart';
 import 'package:submersion/features/dive_log/domain/codecs/profile_series_codec_exception.dart';
 import 'package:submersion/features/dive_log/domain/codecs/profile_series_summary.dart';
@@ -308,6 +314,7 @@ class SyncData {
   final List<Map<String, dynamic>> checklistTemplates;
   final List<Map<String, dynamic>> checklistTemplateSections;
   final List<Map<String, dynamic>> checklistTemplateItems;
+  final List<Map<String, dynamic>> tripChecklists;
   final List<Map<String, dynamic>> tripChecklistSections;
   final List<Map<String, dynamic>> tripChecklistItems;
   final List<Map<String, dynamic>> preDiveChecklistTemplates;
@@ -325,6 +332,8 @@ class SyncData {
   final List<Map<String, dynamic>> divePlanMissionLegs;
   final List<Map<String, dynamic>> divePlanMissionMembers;
   final List<Map<String, dynamic>> divePlanEquipment;
+  final List<Map<String, dynamic>> divePlanSeries;
+  final List<Map<String, dynamic>> diveScenarios;
   final List<Map<String, dynamic>> diverWeightEntries;
   final List<Map<String, dynamic>> tags;
   final List<Map<String, dynamic>> diveTags;
@@ -453,6 +462,7 @@ class SyncData {
     this.checklistTemplates = const [],
     this.checklistTemplateSections = const [],
     this.checklistTemplateItems = const [],
+    this.tripChecklists = const [],
     this.tripChecklistSections = const [],
     this.tripChecklistItems = const [],
     this.preDiveChecklistTemplates = const [],
@@ -470,6 +480,8 @@ class SyncData {
     this.divePlanMissionLegs = const [],
     this.divePlanMissionMembers = const [],
     this.divePlanEquipment = const [],
+    this.divePlanSeries = const [],
+    this.diveScenarios = const [],
     this.diverWeightEntries = const [],
     this.tags = const [],
     this.diveTags = const [],
@@ -586,6 +598,7 @@ class SyncData {
     'checklistTemplates': checklistTemplates,
     'checklistTemplateSections': checklistTemplateSections,
     'checklistTemplateItems': checklistTemplateItems,
+    'tripChecklists': tripChecklists,
     'tripChecklistSections': tripChecklistSections,
     'tripChecklistItems': tripChecklistItems,
     'preDiveChecklistTemplates': preDiveChecklistTemplates,
@@ -603,6 +616,8 @@ class SyncData {
     'divePlanMissionLegs': divePlanMissionLegs,
     'divePlanMissionMembers': divePlanMissionMembers,
     'divePlanEquipment': divePlanEquipment,
+    'divePlanSeries': divePlanSeries,
+    'diveScenarios': diveScenarios,
     'diverWeightEntries': diverWeightEntries,
     'tags': tags,
     'diveTags': diveTags,
@@ -726,6 +741,7 @@ class SyncData {
       checklistTemplates: _parseList(json['checklistTemplates']),
       checklistTemplateSections: _parseList(json['checklistTemplateSections']),
       checklistTemplateItems: _parseList(json['checklistTemplateItems']),
+      tripChecklists: _parseList(json['tripChecklists']),
       tripChecklistSections: _parseList(json['tripChecklistSections']),
       tripChecklistItems: _parseList(json['tripChecklistItems']),
       preDiveChecklistTemplates: _parseList(json['preDiveChecklistTemplates']),
@@ -747,6 +763,8 @@ class SyncData {
       divePlanMissionLegs: _parseList(json['divePlanMissionLegs']),
       divePlanMissionMembers: _parseList(json['divePlanMissionMembers']),
       divePlanEquipment: _parseList(json['divePlanEquipment']),
+      divePlanSeries: _parseList(json['divePlanSeries']),
+      diveScenarios: _parseList(json['diveScenarios']),
       diverWeightEntries: _parseList(json['diverWeightEntries']),
       tags: _parseList(json['tags']),
       diveTags: _parseList(json['diveTags']),
@@ -877,6 +895,77 @@ class SyncDataSerializer {
   /// lives outside the library and so outside any delete cascade.
   final Future<void> Function(String trackId) _evictTrackGeometry;
 
+  /// Evicts the cached geometry of each track in [trackIds].
+  ///
+  /// The cache is derived data, so failing to evict must never fail the
+  /// merge. The local cache sweep catches a missed eviction for a deleted
+  /// track; for an edited one the stale LODs stay until the track is next
+  /// edited, which still beats aborting the merge over a cache.
+  Future<void> _evictGeometryOf(Iterable<String> trackIds) async {
+    for (final trackId in trackIds) {
+      try {
+        await _evictTrackGeometry(trackId);
+      } catch (e, stackTrace) {
+        _log.warning(
+          'Could not evict cached geometry for track $trackId',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+  }
+
+  /// Ids of the [incoming] tracks whose cached LODs may no longer match, read
+  /// BEFORE the upsert overwrites the stored rows.
+  ///
+  /// A trim or split made on this device evicts its own cached LODs
+  /// (trimTrackProvider, splitTrackProvider); one arriving from a peer only
+  /// overwrites the row, and the cache has no TTL, so without this the map
+  /// kept drawing the pre-trim polyline for good (issue #2447). Only a stored
+  /// row that draws exactly like the incoming one proves the cache still
+  /// valid, so a metadata-only edit (a rename) keeps it. A track with no
+  /// stored row is included: LODs can outlive their track (a delete that
+  /// predates eviction, or a failed eviction), and there is nothing to
+  /// compare them against.
+  Future<Set<String>> _gpsTracksWithNewGeometry(
+    List<GpsTrackRow> incoming,
+  ) async {
+    final byId = {for (final track in incoming) track.id: track};
+    final ids = byId.keys.toList();
+    final geometryChanged = ids.toSet();
+    // Chunked to stay under SQLite's bound-variable limit.
+    for (final chunk in seriesIdChunks(ids)) {
+      final stored = await (_db.select(
+        _db.gpsTracks,
+      )..where((t) => t.id.isIn(chunk))).get();
+      for (final row in stored) {
+        final next = byId[row.id]!;
+        if (row.trimStartTime == next.trimStartTime &&
+            row.trimEndTime == next.trimEndTime &&
+            row.pointCount == next.pointCount &&
+            // A null blob is left out of the upsert, so the stored points
+            // stand and the cached lines still match them.
+            (next.points == null || listEquals(row.points, next.points))) {
+          geometryChanged.remove(row.id);
+        }
+      }
+    }
+    return geometryChanged;
+  }
+
+  /// The insert for a gps_tracks upsert.
+  ///
+  /// Null columns stay out of it, so a row arriving without its points blob
+  /// cannot wipe the recording, but the trim bounds always go in: a null there
+  /// is a peer's Reset trim, and leaving it out kept the old trim for good.
+  /// Do not switch this to `.toCompanion(false)`, which would clear the blob.
+  static GpsTracksCompanion _gpsTrackUpsert(GpsTrackRow track) => track
+      .toCompanion(true)
+      .copyWith(
+        trimStartTime: Value(track.trimStartTime),
+        trimEndTime: Value(track.trimEndTime),
+      );
+
   Future<List<Map<String, dynamic>>> _safeExport(
     String label,
     Future<List<Map<String, dynamic>>> Function() loader,
@@ -907,13 +996,13 @@ class SyncDataSerializer {
     try {
       _log.info('Exporting full data snapshot');
       final data = await _buildSyncData(null);
-      final dataJson = jsonEncode(data.toJson());
+      final checksum = await checksumOfOffIsolate(data);
       return SyncPayload(
         version: syncFormatVersion,
         exportedAt: DateTime.now().millisecondsSinceEpoch,
         deviceId: deviceId,
         lastSyncTimestamp: lastSyncTimestamp,
-        checksum: _computeChecksum(dataJson),
+        checksum: checksum,
         data: data,
         deletions: _groupDeletions(deletions),
         uploadNonce: uploadNonce,
@@ -961,12 +1050,12 @@ class SyncDataSerializer {
         : deletions
               .where((d) => d.hlc == null || d.hlc!.compareTo(hlcWatermark) > 0)
               .toList();
-    final dataJson = jsonEncode(data.toJson());
+    final checksum = await checksumOfOffIsolate(data);
     return SyncPayload(
       version: syncFormatVersion,
       exportedAt: DateTime.now().millisecondsSinceEpoch,
       deviceId: deviceId,
-      checksum: _computeChecksum(dataJson),
+      checksum: checksum,
       data: data,
       deletions: _groupDeletions(includedDeletions),
       seq: seq,
@@ -1180,6 +1269,7 @@ class SyncDataSerializer {
       blob: false,
       full: null,
     ),
+    (key: 'tripChecklists', table: _db.tripChecklists, blob: false, full: null),
     (
       key: 'tripChecklistSections',
       table: _db.tripChecklistSections,
@@ -1268,6 +1358,8 @@ class SyncDataSerializer {
       blob: false,
       full: () => _exportDivePlanEquipment(null),
     ),
+    (key: 'divePlanSeries', table: _db.divePlanSeries, blob: false, full: null),
+    (key: 'diveScenarios', table: _db.diveScenarios, blob: false, full: null),
     (
       key: 'diverWeightEntries',
       table: _db.diverWeightEntries,
@@ -1632,39 +1724,43 @@ class SyncDataSerializer {
     DateTime Function() now = DateTime.now,
     Future<Directory> Function()? tempDir,
   }) async {
-    final dir = await (tempDir?.call() ?? resolveSyncTempDir());
-    // p.join, not a literal '/': on Windows the temp dir is backslashed, and a
-    // path mixing both separators is what broke the move into the publish
-    // directory in #1304.
-    final path = p.join(
-      dir.path,
+    // The sink joins the directory and name itself (never a literal '/':
+    // a mixed-separator path broke the Windows publish in #1304). A browser
+    // has one temp directory and no provider to ask, so none is resolved.
+    final directoryPath = tempDir == null && HostPlatform.isWeb
+        ? null
+        : (await (tempDir?.call() ?? resolveSyncTempDir())).path;
+    final out = await SyncTempFiles.create(
       'ssv1_base_${deviceId}_${seq ?? 0}.${_baseTempUuid.v4()}.json',
+      directoryPath: directoryPath,
     );
-    final raf = await File(path).open(mode: FileMode.write);
+    final path = out.path;
     final digestSink = _Sha256DigestSink();
     final dataHash = sha256.startChunkedConversion(digestSink);
     final exportedAt = now().millisecondsSinceEpoch;
     String? maxRowHlc;
     var rowCount = 0;
 
-    // Writes + hashes only the `data` object bytes (matches _computeChecksum,
+    // Writes + hashes only the `data` object bytes (matches checksumOf,
     // which hashes jsonEncode(data.toJson())).
     Future<void> writeData(String s) async {
       final bytes = utf8.encode(s);
       dataHash.add(bytes);
-      await raf.writeFrom(bytes);
+      await out.add(bytes);
     }
 
     try {
       // Header up to (but not including) the checksum value.
-      await raf.writeString(
-        '{"version":$syncFormatVersion,"exportedAt":$exportedAt,'
-        '"deviceId":${jsonEncode(deviceId)},"lastSyncTimestamp":null,'
-        '"checksum":"',
+      await out.add(
+        utf8.encode(
+          '{"version":$syncFormatVersion,"exportedAt":$exportedAt,'
+          '"deviceId":${jsonEncode(deviceId)},"lastSyncTimestamp":null,'
+          '"checksum":"',
+        ),
       );
-      final checksumOffset = await raf.position();
-      await raf.writeFrom(List.filled(64, 0x30)); // '0'*64 placeholder
-      await raf.writeString('","data":');
+      final checksumOffset = out.length;
+      await out.add(List.filled(64, 0x30)); // '0'*64 placeholder
+      await out.add(utf8.encode('","data":'));
 
       // ---- data object (hashed) ----
       await writeData('{');
@@ -1763,18 +1859,16 @@ class SyncDataSerializer {
         (k, v) => tailBuf.write(',${jsonEncode(k)}:${jsonEncode(v)}'),
       );
       tailBuf.write('}');
-      await raf.writeString(tailBuf.toString());
+      await out.add(utf8.encode(tailBuf.toString()));
 
       // ---- patch the checksum placeholder with the real data digest ----
       dataHash.close();
-      final endPos = await raf.position();
-      await raf.setPosition(checksumOffset);
-      await raf.writeFrom(utf8.encode(digestSink.value.toString()));
-      await raf.setPosition(endPos);
-      await raf.flush();
-      await raf.close();
-
-      final byteLength = await File(path).length();
+      await out.writeAt(
+        checksumOffset,
+        utf8.encode(digestSink.value.toString()),
+      );
+      final byteLength = out.length;
+      await out.close();
       return (
         path: path,
         byteLength: byteLength,
@@ -1783,9 +1877,11 @@ class SyncDataSerializer {
         rowCount: rowCount,
       );
     } catch (_) {
-      await raf.close();
       try {
-        await File(path).delete();
+        await out.close();
+      } catch (_) {}
+      try {
+        await SyncTempFiles.delete(path);
       } catch (_) {}
       rethrow;
     }
@@ -2508,6 +2604,10 @@ class SyncDataSerializer {
         'checklistTemplateItems',
         () => _exportChecklistTemplateItems(hlcSince),
       ),
+      tripChecklists: await _safeExport(
+        'tripChecklists',
+        () => _exportTripChecklists(hlcSince),
+      ),
       tripChecklistSections: await _safeExport(
         'tripChecklistSections',
         () => _exportTripChecklistSections(hlcSince),
@@ -2579,6 +2679,14 @@ class SyncDataSerializer {
           await _exportDivePlanEquipment(hlcSince),
           pendingChildren,
         ),
+      ),
+      divePlanSeries: await _safeExport(
+        'divePlanSeries',
+        () => _exportDivePlanSeries(hlcSince),
+      ),
+      diveScenarios: await _safeExport(
+        'diveScenarios',
+        () => _exportDiveScenarios(hlcSince),
       ),
       diverWeightEntries: await _safeExport(
         'diverWeightEntries',
@@ -2958,37 +3066,48 @@ class SyncDataSerializer {
   /// True when a previous apply left rows staged that it could not place.
   Future<bool> hasStagedLegacySamples() => hasStagedLegacyRows(_db);
 
-  /// Convert payload to JSON string
-  String serializePayload(SyncPayload payload) {
-    return jsonEncode(payload.toJson());
-  }
-
-  /// Parse JSON string to payload
-  SyncPayload deserializePayload(String json) {
-    final map = jsonDecode(json) as Map<String, dynamic>;
-    return SyncPayload.fromJson(map);
-  }
-
   /// Validate checksum of payload.
   ///
   /// Verified over the data section as received ([SyncPayload.rawDataJson])
   /// so payloads written by builds with fewer/more entity keys still
   /// validate; falls back to re-serializing for locally built payloads.
-  bool validateChecksum(SyncPayload payload) => checksumIsValid(payload);
-
-  /// [validateChecksum] without an instance, for nearby sync's receiver.
   static bool checksumIsValid(SyncPayload payload) {
     final dataJson = payload.rawDataJson ?? jsonEncode(payload.data.toJson());
     return _sha256Hex(dataJson) == payload.checksum;
   }
 
-  /// Compute SHA-256 checksum
-  String _computeChecksum(String data) => _sha256Hex(data);
-
-  /// The checksum a payload carrying [data] must have, for a caller that
-  /// rebuilds a payload's data (nearby sync's per-writer filter).
+  /// The checksum a payload carrying [data] must have.
   static String checksumOf(SyncData data) =>
       _sha256Hex(jsonEncode(data.toJson()));
+
+  /// [checksumOf] on a worker once [data] is substantial: hashing costs more
+  /// than the JSON it covers, and a sync usually runs on the UI isolate. Static
+  /// so that the closure holds [data] alone, not this serializer's database.
+  static Future<String> checksumOfOffIsolate(
+    SyncData data, {
+    @visibleForTesting int minBytes = kOffIsolateMinBytes,
+    @visibleForTesting OffIsolateRunner runner = isolateRun,
+  }) {
+    if (HostPlatform.isWeb) return _checksumInWorker(data, minBytes: minBytes);
+    return runOffIsolate(
+      () => checksumOf(data),
+      bytes: syncJsonWeight(data.toJson(), limit: minBytes),
+      minBytes: minBytes,
+      runner: runner,
+    );
+  }
+
+  /// [checksumOf] with the hash in the compute worker. The JSON is encoded
+  /// here, since a Dart object cannot cross to a worker, and only the bytes
+  /// go over; the hex form matches [checksumOf].
+  static Future<String> _checksumInWorker(
+    SyncData data, {
+    required int minBytes,
+  }) async {
+    final json = Uint8List.fromList(utf8.encode(jsonEncode(data.toJson())));
+    final digest = await ComputeJobs.sha256(json, minBytes: minBytes);
+    return [for (final b in digest) b.toRadixString(16).padLeft(2, '0')].join();
+  }
 
   static String _sha256Hex(String data) =>
       sha256.convert(utf8.encode(data)).toString();
@@ -3026,6 +3145,26 @@ class SyncDataSerializer {
   /// [alignLinkedRouteOwners]).
   Future<void> repairDanglingForeignKeys() async {
     await _repairDanglingReferences();
+    await _rederivePeerValues();
+  }
+
+  /// [repairDanglingForeignKeys] for one row just written from a peer, which a
+  /// diver resolving a list of conflicts runs once per row. PRAGMA
+  /// foreign_key_check reads every row of every table, and writing one row can
+  /// only leave its own table dangling, so the whole-database pass runs only
+  /// when that table reports something. Must run inside
+  /// [applyInDeferredFkTransaction].
+  Future<void> repairAfterRowWrite(String entityType) async {
+    final table = _syncTableFor(entityType).actualTableName;
+    final dangling = await _db
+        .customSelect('PRAGMA foreign_key_check("$table")')
+        .get();
+    if (dangling.isNotEmpty) await _repairDanglingReferences();
+    await _rederivePeerValues();
+  }
+
+  /// The values a peer's row may not carry, derived again after every apply.
+  Future<void> _rederivePeerValues() async {
     await alignLinkedRouteOwners();
     await seedRepresentativeCourseLinks();
     await anchorTankInspectionClocks();
@@ -3400,6 +3539,11 @@ class SyncDataSerializer {
           _db.checklistTemplateItems,
         )..where((t) => t.id.equals(recordId))).getSingleOrNull();
         return row?.toJson();
+      case 'tripChecklists':
+        final row = await (_db.select(
+          _db.tripChecklists,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row?.toJson();
       case 'tripChecklistSections':
         final row = await (_db.select(
           _db.tripChecklistSections,
@@ -3455,6 +3599,16 @@ class SyncDataSerializer {
       case 'divePlans':
         final row = await (_db.select(
           _db.divePlans,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row?.toJson();
+      case 'divePlanSeries':
+        final row = await (_db.select(
+          _db.divePlanSeries,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row?.toJson();
+      case 'diveScenarios':
+        final row = await (_db.select(
+          _db.diveScenarios,
         )..where((t) => t.id.equals(recordId))).getSingleOrNull();
         return row?.toJson();
       case 'divePlanTanks':
@@ -4040,6 +4194,11 @@ class SyncDataSerializer {
           _db.checklistTemplateItems,
         )..where((t) => t.id.isIn(idList))).get();
         return {for (final r in rows) r.id: r.toJson()};
+      case 'tripChecklists':
+        final rows = await (_db.select(
+          _db.tripChecklists,
+        )..where((t) => t.id.isIn(idList))).get();
+        return {for (final r in rows) r.id: r.toJson()};
       case 'tripChecklistSections':
         final rows = await (_db.select(
           _db.tripChecklistSections,
@@ -4083,6 +4242,16 @@ class SyncDataSerializer {
       case 'divePlans':
         final rows = await (_db.select(
           _db.divePlans,
+        )..where((t) => t.id.isIn(idList))).get();
+        return {for (final r in rows) r.id: r.toJson()};
+      case 'divePlanSeries':
+        final rows = await (_db.select(
+          _db.divePlanSeries,
+        )..where((t) => t.id.isIn(idList))).get();
+        return {for (final r in rows) r.id: r.toJson()};
+      case 'diveScenarios':
+        final rows = await (_db.select(
+          _db.diveScenarios,
         )..where((t) => t.id.isIn(idList))).get();
         return {for (final r in rows) r.id: r.toJson()};
       case 'divePlanTanks':
@@ -5123,6 +5292,7 @@ class SyncDataSerializer {
     String entityType,
     Map<String, dynamic> data,
   ) async {
+    await _ensureLegacyDefaultChecklists(entityType, [data]);
     data = _withoutUnsetNulls(
       entityType,
       withCurrentWireKeys(
@@ -5458,6 +5628,13 @@ class SyncDataSerializer {
               ChecklistTemplateItem.fromJson(data).toCompanion(false),
             );
         return;
+      case 'tripChecklists':
+        await _db
+            .into(_db.tripChecklists)
+            .insertOnConflictUpdate(
+              TripChecklistRow.fromJson(data).toCompanion(false),
+            );
+        return;
       case 'tripChecklistSections':
         await _db
             .into(_db.tripChecklistSections)
@@ -5517,11 +5694,15 @@ class SyncDataSerializer {
             );
         return;
       case 'gpsTracks':
+        final track = GpsTrackRow.fromJson(
+          data,
+          serializer: _syncBlobSerializer,
+        );
+        final geometryChanged = await _gpsTracksWithNewGeometry([track]);
         await _db
             .into(_db.gpsTracks)
-            .insertOnConflictUpdate(
-              GpsTrackRow.fromJson(data, serializer: _syncBlobSerializer),
-            );
+            .insertOnConflictUpdate(_gpsTrackUpsert(track));
+        await _evictGeometryOf(geometryChanged);
         return;
       case 'navTracks':
         // The data-class upsert leaves null columns out (nullToAbsent), so a
@@ -5538,6 +5719,20 @@ class SyncDataSerializer {
         await _db
             .into(_db.divePlans)
             .insertOnConflictUpdate(DivePlan.fromJson(data).toCompanion(false));
+        return;
+      case 'divePlanSeries':
+        await _db
+            .into(_db.divePlanSeries)
+            .insertOnConflictUpdate(
+              DivePlanSeriesRow.fromJson(data).toCompanion(false),
+            );
+        return;
+      case 'diveScenarios':
+        await _db
+            .into(_db.diveScenarios)
+            .insertOnConflictUpdate(
+              DiveScenario.fromJson(data).toCompanion(false),
+            );
         return;
       case 'divePlanTanks':
         await _db
@@ -6163,6 +6358,7 @@ class SyncDataSerializer {
     List<Map<String, dynamic>> records,
   ) async {
     if (records.isEmpty) return;
+    await _ensureLegacyDefaultChecklists(entityType, records);
     records = await _withLocalForOmitted(
       entityType,
       await _withDeviceLocalFromHere(entityType, [
@@ -6658,6 +6854,16 @@ class SyncDataSerializer {
           ),
         );
         return;
+      case 'tripChecklists':
+        await _db.batch(
+          (b) => b.insertAllOnConflictUpdate(
+            _db.tripChecklists,
+            records
+                .map((r) => TripChecklistRow.fromJson(r).toCompanion(false))
+                .toList(),
+          ),
+        );
+        return;
       case 'tripChecklistSections':
         await _db.batch(
           (b) => b.insertAllOnConflictUpdate(
@@ -6755,17 +6961,18 @@ class SyncDataSerializer {
         );
         return;
       case 'gpsTracks':
+        final tracks = records
+            .map(
+              (r) => GpsTrackRow.fromJson(r, serializer: _syncBlobSerializer),
+            )
+            .toList();
+        final geometryChanged = await _gpsTracksWithNewGeometry(tracks);
         await _db.batch(
-          (b) => b.insertAllOnConflictUpdate(
-            _db.gpsTracks,
-            records
-                .map(
-                  (r) =>
-                      GpsTrackRow.fromJson(r, serializer: _syncBlobSerializer),
-                )
-                .toList(),
-          ),
+          (b) => b.insertAllOnConflictUpdate(_db.gpsTracks, [
+            for (final track in tracks) _gpsTrackUpsert(track),
+          ]),
         );
+        await _evictGeometryOf(geometryChanged);
         return;
       case 'navTracks':
         await _db.batch(
@@ -6786,6 +6993,26 @@ class SyncDataSerializer {
             _db.divePlans,
             records
                 .map((r) => DivePlan.fromJson(r).toCompanion(false))
+                .toList(),
+          ),
+        );
+        return;
+      case 'divePlanSeries':
+        await _db.batch(
+          (b) => b.insertAllOnConflictUpdate(
+            _db.divePlanSeries,
+            records
+                .map((r) => DivePlanSeriesRow.fromJson(r).toCompanion(false))
+                .toList(),
+          ),
+        );
+        return;
+      case 'diveScenarios':
+        await _db.batch(
+          (b) => b.insertAllOnConflictUpdate(
+            _db.diveScenarios,
+            records
+                .map((r) => DiveScenario.fromJson(r).toCompanion(false))
                 .toList(),
           ),
         );
@@ -7862,6 +8089,8 @@ class SyncDataSerializer {
         );
       case 'checklistTemplateItems':
         return plain(_db.checklistTemplateItems, _db.checklistTemplateItems.id);
+      case 'tripChecklists':
+        return plain(_db.tripChecklists, _db.tripChecklists.id);
       case 'tripChecklistSections':
         return plain(_db.tripChecklistSections, _db.tripChecklistSections.id);
       case 'tripChecklistItems':
@@ -7893,6 +8122,10 @@ class SyncDataSerializer {
         return plain(_db.navTracks, _db.navTracks.id);
       case 'divePlans':
         return plain(_db.divePlans, _db.divePlans.id);
+      case 'divePlanSeries':
+        return plain(_db.divePlanSeries, _db.divePlanSeries.id);
+      case 'diveScenarios':
+        return plain(_db.diveScenarios, _db.diveScenarios.id);
       case 'divePlanTanks':
         return plain(_db.divePlanTanks, _db.divePlanTanks.id);
       case 'divePlanSegments':
@@ -8416,6 +8649,8 @@ class SyncDataSerializer {
         return _db.checklistTemplateSections;
       case 'checklistTemplateItems':
         return _db.checklistTemplateItems;
+      case 'tripChecklists':
+        return _db.tripChecklists;
       case 'tripChecklistSections':
         return _db.tripChecklistSections;
       case 'tripChecklistItems':
@@ -8438,6 +8673,10 @@ class SyncDataSerializer {
         return _db.navTracks;
       case 'divePlans':
         return _db.divePlans;
+      case 'divePlanSeries':
+        return _db.divePlanSeries;
+      case 'diveScenarios':
+        return _db.diveScenarios;
       case 'divePlanTanks':
         return _db.divePlanTanks;
       case 'divePlanSegments':
@@ -8903,6 +9142,11 @@ class SyncDataSerializer {
           _db.checklistTemplateItems,
         )..where((t) => t.id.equals(recordId))).go();
         return;
+      case 'tripChecklists':
+        await (_db.delete(
+          _db.tripChecklists,
+        )..where((t) => t.id.equals(recordId))).go();
+        return;
       case 'tripChecklistSections':
         await (_db.delete(
           _db.tripChecklistSections,
@@ -8950,17 +9194,8 @@ class SyncDataSerializer {
         // A delete made on this device evicts the cached LODs itself
         // (deleteTrackProvider); one arriving from a peer has to do it here,
         // or up to three blobs outlive the track until the next local cache
-        // sweep (issue #1929). The cache is derived data, so failing to evict
-        // must never fail the merge: the sweep catches what this misses.
-        try {
-          await _evictTrackGeometry(recordId);
-        } catch (e, stackTrace) {
-          _log.warning(
-            'Could not evict cached geometry for track $recordId',
-            error: e,
-            stackTrace: stackTrace,
-          );
-        }
+        // sweep (issue #1929).
+        await _evictGeometryOf([recordId]);
         return;
       case 'navTracks':
         await (_db.delete(
@@ -8970,6 +9205,16 @@ class SyncDataSerializer {
       case 'divePlans':
         await (_db.delete(
           _db.divePlans,
+        )..where((t) => t.id.equals(recordId))).go();
+        return;
+      case 'divePlanSeries':
+        await (_db.delete(
+          _db.divePlanSeries,
+        )..where((t) => t.id.equals(recordId))).go();
+        return;
+      case 'diveScenarios':
+        await (_db.delete(
+          _db.diveScenarios,
         )..where((t) => t.id.equals(recordId))).go();
         return;
       case 'divePlanTanks':
@@ -10050,6 +10295,17 @@ class SyncDataSerializer {
     return rows.map((r) => r.toJson()).toList();
   }
 
+  Future<List<Map<String, dynamic>>> _exportTripChecklists(
+    String? hlcSince,
+  ) async {
+    final query = _db.select(_db.tripChecklists);
+    if (hlcSince != null) {
+      query.where((t) => t.hlc.isBiggerThanValue(hlcSince));
+    }
+    final rows = await query.get();
+    return rows.map((r) => r.toJson()).toList();
+  }
+
   Future<List<Map<String, dynamic>>> _exportTripChecklistSections(
     String? hlcSince,
   ) async {
@@ -10255,6 +10511,28 @@ class SyncDataSerializer {
 
   Future<List<Map<String, dynamic>>> _exportDivePlans(String? hlcSince) async {
     final query = _db.select(_db.divePlans);
+    if (hlcSince != null) {
+      query.where((t) => t.hlc.isBiggerThanValue(hlcSince));
+    }
+    final rows = await query.get();
+    return rows.map((r) => r.toJson()).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> _exportDivePlanSeries(
+    String? hlcSince,
+  ) async {
+    final query = _db.select(_db.divePlanSeries);
+    if (hlcSince != null) {
+      query.where((t) => t.hlc.isBiggerThanValue(hlcSince));
+    }
+    final rows = await query.get();
+    return rows.map((r) => r.toJson()).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> _exportDiveScenarios(
+    String? hlcSince,
+  ) async {
+    final query = _db.select(_db.diveScenarios);
     if (hlcSince != null) {
       query.where((t) => t.hlc.isBiggerThanValue(hlcSince));
     }
@@ -11435,6 +11713,35 @@ class SyncDataSerializer {
       filled.add(values == null ? record : {...record, ...values});
     }
     return filled;
+  }
+
+  /// Issue #3356. A checklist row from a peer below v336 lands in its trip's
+  /// default checklist ([withCurrentWireKeys]), which this device may not
+  /// hold: the trip may have had nothing to migrate here, or be new here.
+  /// The row is created unstamped, like the migration's own, so the next sync
+  /// publishes it, and its id is deterministic, so every device that creates
+  /// it creates the same row.
+  Future<void> _ensureLegacyDefaultChecklists(
+    String entityType,
+    List<Map<String, dynamic>> records,
+  ) async {
+    final tripIds = {
+      for (final record in records) ?legacyChecklistTripId(entityType, record),
+    };
+    if (tripIds.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await _db.batch(
+      (b) => b.insertAll(_db.tripChecklists, [
+        for (final tripId in tripIds)
+          TripChecklistsCompanion.insert(
+            id: defaultTripChecklistId(tripId),
+            tripId: tripId,
+            name: kDefaultTripChecklistName,
+            createdAt: now,
+            updatedAt: now,
+          ),
+      ], mode: InsertMode.insertOrIgnore),
+    );
   }
 
   /// Fills each key [records] omit from the row this device already holds
