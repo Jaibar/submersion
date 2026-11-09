@@ -8,7 +8,7 @@ name: Private daily status
 #   - this fork: newest build and release, and how far custom/v1.8 is behind
 # Read-only against upstream. Runs from the default branch (custom/v1.8).
 #
-# Expires: after EXPIRES (3 weeks from 2026-10-19) the first run disables this
+# Expires: after EXPIRES (extended 3 weeks on 2026-11-09) the first run disables this
 # workflow itself, so it stops without anyone having to remember. To extend it,
 # move EXPIRES and re-enable the workflow in the Actions tab.
 
@@ -31,7 +31,7 @@ jobs:
         id: expiry
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPIRES: '2026-11-09'
+          EXPIRES: '2026-11-30'
         run: |
           if [[ "$(date -u +%F)" > "$EXPIRES" ]]; then
             gh api -X PUT "repos/${{ github.repository }}/actions/workflows/private-daily.yml/disable"
