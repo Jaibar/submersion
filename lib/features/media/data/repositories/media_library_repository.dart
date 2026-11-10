@@ -6,11 +6,14 @@ import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/utils/stream_debounce.dart';
+import 'package:submersion/features/media/data/repositories/media_library_group_order.dart';
+import 'package:submersion/features/media/data/repositories/media_library_tile_markers.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
 import 'package:submersion/features/media/data/repositories/media_row_mapper.dart';
 import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
 import 'package:submersion/features/media/domain/entities/media_library_filter.dart';
+import 'package:submersion/features/media/domain/entities/media_library_grouping.dart';
 import 'package:submersion/features/media/domain/entities/media_library_sort.dart';
 import 'package:submersion/features/media/domain/entities/media_map_point.dart';
 import 'package:submersion/features/media/domain/entities/media_source_type.dart';
@@ -80,6 +83,26 @@ class MediaLibraryRepository {
   Expression<bool> _diverScope(String? diverId) => diverId == null
       ? const Constant(true)
       : _db.media.diveId.isNull() | _db.dives.diverId.equals(diverId);
+
+  /// Rows attached to any of [kinds] (issue #4224), by the row's own links in
+  /// [MediaAttachmentKind]'s precedence, the one `groupByDive` and the By
+  /// dive group key use. Reads only media columns, so it adds no join.
+  Expression<bool> _attachedToFacet(Set<MediaAttachmentKind> kinds) {
+    final m = _db.media;
+    final noDive = m.diveId.isNull();
+    final noSite = m.siteId.isNull();
+    return [
+      for (final kind in kinds)
+        switch (kind) {
+          MediaAttachmentKind.dive => m.diveId.isNotNull(),
+          MediaAttachmentKind.site => noDive & m.siteId.isNotNull(),
+          MediaAttachmentKind.equipment =>
+            noDive & noSite & m.equipmentId.isNotNull(),
+          MediaAttachmentKind.unlinked =>
+            noDive & noSite & m.equipmentId.isNull(),
+        },
+    ].reduce((a, b) => a | b);
+  }
 
   /// Any of the selected buddies, or the viewing diver's own Me tags
   /// (issue #1745). EXISTS for the same reason as the tag facet: a photo
@@ -232,6 +255,19 @@ class MediaLibraryRepository {
     if (filter.hasPeople) {
       where = where & _peopleFacet(diverId, filter);
     }
+    if (filter.attachedTo.isNotEmpty) {
+      where = where & _attachedToFacet(filter.attachedTo);
+    }
+    // The cleanup facets (issue #4148) negate the tile markers' own SQL, so
+    // a row shows under each exactly when its tile lacks that marker.
+    if (filter.noPeople) {
+      where = where & LibraryTileMarkers.hasPeople.not();
+    }
+    if (filter.notPlacedInDive) {
+      // Only dive rows: a row with no dive cannot be placed in one.
+      where =
+          where & m.diveId.isNotNull() & LibraryTileMarkers.hasTimeInDive.not();
+    }
     // taken_at is stored as wall-clock-as-UTC millis, so a bound picked in
     // local time has to be normalised the same way before it can be
     // compared -- otherwise the window slides by the host's UTC offset.
@@ -291,6 +327,35 @@ class MediaLibraryRepository {
     return beyond | (key.equals(value) & tie);
   }
 
+  /// The keyset predicate across a grouped page's leading [keys] and then
+  /// [sortAfter], the sort key's own predicate: a row is past the cursor
+  /// when it is in a later group, or in the cursor's group and past it by
+  /// [sortAfter]. With no keys this is [sortAfter] itself.
+  ///
+  /// A cursor from a walk under a different grouping cannot be continued
+  /// here (it holds the wrong keys), so it is refused rather than read as
+  /// some other group.
+  Expression<bool> _afterGroups(
+    List<LibraryGroupKey> keys,
+    MediaLibraryCursor after,
+    Expression<bool> sortAfter,
+  ) {
+    if (after.groupKeys.length != keys.length) {
+      throw ArgumentError.value(
+        after,
+        'after',
+        'cursor carries ${after.groupKeys.length} group keys, '
+            'the page orders by ${keys.length}',
+      );
+    }
+    Expression<bool> result = sortAfter;
+    for (var i = keys.length - 1; i >= 0; i--) {
+      final value = after.groupKeys[i];
+      result = keys[i].after(value) | (keys[i].equalTo(value) & result);
+    }
+    return result;
+  }
+
   /// The cursor value for [row] under [field]. Mirrors the COALESCE in the
   /// matching key expression: if these two ever disagree, pagination skips or
   /// repeats rows at the boundary.
@@ -311,10 +376,16 @@ class MediaLibraryRepository {
   /// One page of library entries for [diverId] (null = all divers), ordered
   /// by [sort] (newest first by default). Pass the previous page's
   /// [MediaLibraryPageResult.nextCursor] as [after] to continue.
+  ///
+  /// A [grouping] orders by the group first and by [sort] within each group,
+  /// so a grouped view gets every group in one run (issue #4268). Pass the
+  /// same grouping for every page of one walk: the cursor is only meaningful
+  /// under the order that produced it.
   Future<MediaLibraryPageResult> getPage({
     required String? diverId,
     MediaLibraryFilter filter = MediaLibraryFilter.none,
     SortState<MediaSortField> sort = kDefaultMediaSort,
+    MediaLibraryGrouping grouping = MediaLibraryGrouping.none,
     MediaLibraryCursor? after,
     int limit = pageSize,
   }) async {
@@ -327,30 +398,39 @@ class MediaLibraryRepository {
       final attached = _db.alias(_db.diveSites, 'attached_site');
       final e = _db.equipment;
 
+      final groupKeys = libraryGroupKeys(
+        grouping.forSort(sort.field),
+        db: _db,
+        dateDescending: groupsNewestFirst(sort.field, sort.direction),
+        dateKey: _dateKey,
+        dives: d,
+        attachedSites: attached,
+        equipment: e,
+      );
+
       Expression<bool> where = _baseWhere(diverId, filter);
       if (after != null) {
-        where =
-            where &
-            switch (sort.field) {
-              MediaSortField.dateTaken => _afterCursor(
-                _dateKey,
-                after.sortKey as int,
-                after.id,
-                sort.direction,
-              ),
-              MediaSortField.fileName => _afterCursor(
-                _nameKey,
-                after.sortKey as String,
-                after.id,
-                sort.direction,
-              ),
-              MediaSortField.fileSize => _afterCursor(
-                _sizeKey,
-                after.sortKey as int,
-                after.id,
-                sort.direction,
-              ),
-            };
+        final sortAfter = switch (sort.field) {
+          MediaSortField.dateTaken => _afterCursor(
+            _dateKey,
+            after.sortKey as int,
+            after.id,
+            sort.direction,
+          ),
+          MediaSortField.fileName => _afterCursor(
+            _nameKey,
+            after.sortKey as String,
+            after.id,
+            sort.direction,
+          ),
+          MediaSortField.fileSize => _afterCursor(
+            _sizeKey,
+            after.sortKey as int,
+            after.id,
+            sort.direction,
+          ),
+        };
+        where = where & _afterGroups(groupKeys, after, sortAfter);
       }
 
       final mode = sort.direction == SortDirection.descending
@@ -364,8 +444,13 @@ class MediaLibraryRepository {
               leftOuterJoin(attached, attached.id.equalsExp(m.siteId)),
               leftOuterJoin(e, e.id.equalsExp(m.equipmentId)),
             ])
+            ..addColumns([
+              for (final key in groupKeys) key.expression,
+              ...LibraryTileMarkers.all,
+            ])
             ..where(where)
             ..orderBy([
+              for (final key in groupKeys) key.ordering,
               OrderingTerm(expression: _sortExpression(sort.field), mode: mode),
               OrderingTerm(expression: m.id, mode: mode),
             ])
@@ -394,15 +479,20 @@ class MediaLibraryRepository {
           siteName: siteRow?.name,
           attachedSiteName: row.readTableOrNull(attached)?.name,
           attachedEquipmentName: row.readTableOrNull(e)?.name,
+          hasPeople: row.read(LibraryTileMarkers.hasPeople) ?? false,
+          hasSpecies: row.read(LibraryTileMarkers.hasSpecies) ?? false,
+          hasTimeInDive: row.read(LibraryTileMarkers.hasTimeInDive) ?? false,
         );
       }).toList();
 
       MediaLibraryCursor? next;
       if (hasMore && entries.isNotEmpty) {
-        final last = visible.last.readTable(m);
+        final lastRow = visible.last;
+        final last = lastRow.readTable(m);
         next = MediaLibraryCursor(
           sortKey: _cursorValue(last, sort.field),
           id: last.id,
+          groupKeys: [for (final key in groupKeys) key.readFrom(lastRow)],
         );
       }
       return MediaLibraryPageResult(entries: entries, nextCursor: next);
@@ -598,7 +688,8 @@ class MediaLibraryRepository {
   /// Emits whenever anything that can move a map point, or change which
   /// points are in scope, changes: the media row itself, a dive's entry fix,
   /// a site's coordinates, or a species, tag or people tag (each filter is
-  /// an EXISTS over its link table). Built and debounced exactly like
+  /// an EXISTS over its link table), or a time in the dive (the "not placed"
+  /// facet's EXISTS over `media_enrichment`). Built and debounced exactly like
   /// [watchMediaChanges]; see its notes on why a `tableUpdates` stream and
   /// not a watched query.
   Stream<void> watchMapChanges() => _db
@@ -610,6 +701,7 @@ class MediaLibraryRepository {
           _db.mediaSpecies,
           _db.mediaTags,
           _db.mediaPeople,
+          _db.mediaEnrichment,
         ]),
       )
       .debounce(MediaRepository.changeTickDebounce);
@@ -653,6 +745,8 @@ class MediaLibraryRepository {
   /// and `divers` decide whether a facet applies at all
   /// and who Me names. Deleting a tag or buddy already ticks through its
   /// cascade; these catch one arriving late or changing owner.
+  /// `media_enrichment` decides each tile's time-in-dive marker (issue
+  /// #4218), which the enricher writes without touching the media row.
   Stream<void> watchLibraryChanges() => _db
       .tableUpdates(
         TableUpdateQuery.onAllTables([
@@ -660,6 +754,7 @@ class MediaLibraryRepository {
           _db.mediaTags,
           _db.mediaPeople,
           _db.mediaSpecies,
+          _db.mediaEnrichment,
           _db.trips,
           _db.dives,
           _db.diveSites,

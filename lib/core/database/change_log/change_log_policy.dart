@@ -42,6 +42,7 @@ const Map<String, ChangeLogClass> changeLogTables = {
   'cylinder_config_items': ChangeLogClass.tracked,
   'cylinder_configs': ChangeLogClass.tracked,
   'cylinder_fills': ChangeLogClass.tracked,
+  'cylinder_pairings': ChangeLogClass.tracked,
   'dive_buddies': ChangeLogClass.tracked,
   'dive_buddy_roles': ChangeLogClass.tracked,
   'dive_center_gear_notes': ChangeLogClass.tracked,
@@ -149,6 +150,7 @@ const Map<String, ChangeLogClass> changeLogTables = {
   'media_enrichment': ChangeLogClass.deleteCopyOnly,
   'tank_pressure_series': ChangeLogClass.deleteCopyOnly,
   'tide_records': ChangeLogClass.deleteCopyOnly,
+  'dive_health_records': ChangeLogClass.deleteCopyOnly,
   'cached_regions': ChangeLogClass.excluded,
   'change_log_context': ChangeLogClass.excluded,
   'change_log_events': ChangeLogClass.excluded,
@@ -235,6 +237,11 @@ const Map<String, ChangeLogParent> changeLogParents = {
   'cylinder_fills': ChangeLogParent(
     rootTable: 'equipment',
     column: 'equipment_id',
+  ),
+  // A twin set pairing (issue #4242) is a change to its first cylinder.
+  'cylinder_pairings': ChangeLogParent(
+    rootTable: 'equipment',
+    column: 'cylinder_a_id',
   ),
   'dive_buddies': ChangeLogParent(rootTable: 'dives', column: 'dive_id'),
   'dive_buddy_roles': ChangeLogParent(rootTable: 'dives', column: 'dive_id'),
@@ -388,6 +395,7 @@ const Map<String, ChangeLogParent> changeLogParents = {
     column: 'dive_id',
   ),
   'tide_records': ChangeLogParent(rootTable: 'dives', column: 'dive_id'),
+  'dive_health_records': ChangeLogParent(rootTable: 'dives', column: 'dive_id'),
   'trip_checklist_items': ChangeLogParent(
     rootTable: 'trip_checklists',
     column: 'checklist_id',

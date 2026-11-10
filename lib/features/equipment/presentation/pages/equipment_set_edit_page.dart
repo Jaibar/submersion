@@ -18,7 +18,7 @@ import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/equipment/presentation/utils/equipment_enum_display.dart';
 import 'package:submersion/features/equipment/domain/services/equipment_arranger.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_arrangement_provider.dart';
-import 'package:submersion/features/equipment/presentation/widgets/equipment_group_header.dart';
+import 'package:submersion/features/equipment/presentation/widgets/foldable_type_group_rows.dart';
 import 'package:submersion/features/equipment/figure/domain/figure_composer.dart';
 import 'package:submersion/features/equipment/figure/domain/figure_inputs.dart';
 import 'package:submersion/features/equipment/figure/presentation/figure_model_memo.dart';
@@ -26,6 +26,7 @@ import 'package:submersion/features/equipment/figure/presentation/figure_number_
 import 'package:submersion/features/equipment/figure/presentation/figure_palette_theme.dart';
 import 'package:submersion/features/equipment/figure/presentation/figure_selection.dart';
 import 'package:submersion/features/equipment/figure/presentation/gear_figure.dart';
+import 'package:submersion/features/equipment/presentation/helpers/equipment_set_history_save.dart';
 import 'package:submersion/features/equipment/presentation/helpers/gear_expansion.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_component_providers.dart';
 import 'package:submersion/shared/widgets/app_bar_text_action.dart';
@@ -45,7 +46,9 @@ class EquipmentSetEditPage extends ConsumerStatefulWidget {
 }
 
 class _EquipmentSetEditPageState extends ConsumerState<EquipmentSetEditPage>
-    with FigureSelection<EquipmentSetEditPage> {
+    with
+        FigureSelection<EquipmentSetEditPage>,
+        FoldableTypeGroupsState<EquipmentSetEditPage> {
   final _formKey = GlobalKey<FormState>();
 
   /// The live figure's model, reused while the ticked items are unchanged.
@@ -395,6 +398,17 @@ class _EquipmentSetEditPageState extends ConsumerState<EquipmentSetEditPage>
                 // Labelled as one list, so identical items read differently
                 // from each other (#1549).
                 final labels = equipmentRowLabelsOf(context, ref, listed);
+                // Folding (issue #3364): once the set's members are known,
+                // groups holding one start open and the rest closed.
+                final typeGroups = [
+                  for (final group in groups) (group.type, group.items),
+                ];
+                ensureOpenTypeGroups(
+                  typeGroups,
+                  _selectedEquipmentIds,
+                  ready: !widget.isEditing || _isInitialized,
+                );
+
                 // Members the diver can no longer see (a share was removed,
                 // issue #2046) stay selected, so saving keeps them; they are
                 // listed without a checkbox and marked.
@@ -509,33 +523,20 @@ class _EquipmentSetEditPageState extends ConsumerState<EquipmentSetEditPage>
                           ],
                         ),
                       ),
-                    for (final group in groups)
-                      Card(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (group.type != null)
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  16,
-                                  12,
-                                  16,
-                                  0,
-                                ),
-                                child: EquipmentGroupHeader(type: group.type!),
-                              ),
-                            for (final item in group.items)
-                              _buildEquipmentCheckbox(
-                                context,
-                                item,
-                                labels,
-                                numberById[item.id],
-                                badgeSlot: badgeSlot,
-                              ),
-                          ],
-                        ),
+                    ...foldableTypeGroupRows(
+                      context,
+                      groups: typeGroups,
+                      open: openTypeGroups,
+                      ticked: _selectedEquipmentIds,
+                      onToggle: toggleTypeGroup,
+                      rowBuilder: (item) => _buildEquipmentCheckbox(
+                        context,
+                        item,
+                        labels,
+                        numberById[item.id],
+                        badgeSlot: badgeSlot,
                       ),
+                    ),
                   ],
                 );
               },
@@ -709,11 +710,8 @@ class _EquipmentSetEditPageState extends ConsumerState<EquipmentSetEditPage>
 
   Future<void> _saveSet(EquipmentSet? existingSet) async {
     if (!_formKey.currentState!.validate()) return;
-
     setState(() => _isLoading = true);
-
     try {
-      // Get the current diver ID - preserve existing for edits, get fresh for new sets
       final diverId =
           existingSet?.diverId ??
           await ref.read(validatedCurrentDiverIdProvider.future);
@@ -731,42 +729,46 @@ class _EquipmentSetEditPageState extends ConsumerState<EquipmentSetEditPage>
       );
 
       final notifier = ref.read(equipmentSetListNotifierProvider.notifier);
-
       final String savedId;
+      Future<void> Function()? replay;
       if (widget.isEditing) {
-        await notifier.updateSet(set);
+        // A cancel in the dives question (issue #4283) saves nothing.
+        if (!mounted) return;
+        replay = await saveSetWithHistory(context, ref, set, existingSet!);
+        if (replay == null) return;
         savedId = set.id;
       } else {
         final created = await notifier.addSet(set);
         savedId = created.id;
       }
 
-      // Default flag (per-diver mutual exclusion handled in the repository).
-      // Turning the switch off clears the flag, leaving the diver with no
-      // default so nothing auto-applies until one is set again.
-      if (_isDefault) {
-        await notifier.setAsDefault(savedId);
-      } else if (existingSet?.isDefault ?? false) {
-        await notifier.clearDefault(savedId);
-      }
+      await saveThenReplay(() async {
+        // Default flag (per-diver mutual exclusion in the repository). Off
+        // clears it, so nothing auto-applies until one is set again.
+        if (_isDefault) {
+          await notifier.setAsDefault(savedId);
+        } else if (existingSet?.isDefault ?? false) {
+          await notifier.clearDefault(savedId);
+        }
 
-      // Reconcile geofences: remove dropped, add/update the rest.
-      final repo = ref.read(equipmentSetRepositoryProvider);
-      final existingGeofences = await repo.getGeofencesForSet(savedId);
-      final keptIds = _geofences.map((g) => g.id).toSet();
-      for (final old in existingGeofences) {
-        if (!keptIds.contains(old.id)) {
-          await notifier.removeGeofence(savedId, old.id);
+        // Reconcile geofences: remove dropped, add/update the rest.
+        final repo = ref.read(equipmentSetRepositoryProvider);
+        final existingGeofences = await repo.getGeofencesForSet(savedId);
+        final keptIds = _geofences.map((g) => g.id).toSet();
+        for (final old in existingGeofences) {
+          if (!keptIds.contains(old.id)) {
+            await notifier.removeGeofence(savedId, old.id);
+          }
         }
-      }
-      for (final g in _geofences) {
-        final fence = g.copyWith(setId: savedId);
-        if (existingGeofences.any((e) => e.id == g.id)) {
-          await notifier.updateGeofence(fence);
-        } else {
-          await notifier.addGeofence(fence);
+        for (final g in _geofences) {
+          final fence = g.copyWith(setId: savedId);
+          if (existingGeofences.any((e) => e.id == g.id)) {
+            await notifier.updateGeofence(fence);
+          } else {
+            await notifier.addGeofence(fence);
+          }
         }
-      }
+      }, replay);
 
       if (mounted) {
         context.pop();

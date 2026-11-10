@@ -407,6 +407,10 @@ final Map<String, ConflictField> diverSettingsFields = {
     (l) => l.settings_conflict_field_equipmentGroupByLocation,
     FieldKind.boolean,
   ),
+  'equipmentCollapsedGroups': ConflictField(
+    (l) => l.settings_conflict_field_equipmentCollapsedGroups,
+    FieldKind.opaque,
+  ),
   'listArrangementHlc': ConflictField(
     (l) => l.settings_conflict_field_listArrangementHlc,
     FieldKind.opaque,
@@ -696,6 +700,18 @@ final Map<String, ConflictField> diverSettingsFields = {
   'showMapBackgroundOnDiveCards': ConflictField(
     (l) => l.settings_conflict_field_showMapBackgroundOnDiveCards,
     FieldKind.boolean,
+  ),
+  'showPhotoBackgroundOnDiveCards': ConflictField(
+    (l) => l.settings_conflict_field_showPhotoBackgroundOnDiveCards,
+    FieldKind.boolean,
+  ),
+  'cardPhotoOverlayDark': ConflictField(
+    (l) => l.settings_conflict_field_cardPhotoOverlayDark,
+    FieldKind.fraction,
+  ),
+  'cardPhotoOverlayLight': ConflictField(
+    (l) => l.settings_conflict_field_cardPhotoOverlayLight,
+    FieldKind.fraction,
   ),
   'showMapBackgroundOnSiteCards': ConflictField(
     (l) => l.settings_conflict_field_showMapBackgroundOnSiteCards,

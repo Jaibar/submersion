@@ -611,6 +611,12 @@ class AppLocalizationsHu extends AppLocalizations {
   String get enum_equipmentField_owner_short => 'Tulajdonos';
 
   @override
+  String get enum_equipmentField_location => 'Hely';
+
+  @override
+  String get enum_equipmentField_location_short => 'Hely';
+
+  @override
   String get equipment_set_noLongerShared => 'Már nincs megosztva';
 
   @override
@@ -1420,6 +1426,21 @@ class AppLocalizationsHu extends AppLocalizations {
       'Búvárfigura megjelenítése';
 
   @override
+  String get equipment_setEdit_historyAsk =>
+      'A változásokat azokra a merülésekre is alkalmazza, vagy csak mostantól?';
+
+  @override
+  String equipment_setEdit_historyOnDives(num count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Ez a csoport $count naplózott merülésen szerepel.',
+      one: 'Ez a csoport 1 naplózott merülésen szerepel.',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get equipment_color_red => 'Piros';
 
   @override
@@ -1898,6 +1919,24 @@ class AppLocalizationsHu extends AppLocalizations {
   String get trips_story_rhythm_semantics => 'A nap merülési idői';
 
   @override
+  String trips_story_rhythm_semanticsSunriseSunset(
+    String sunrise,
+    String sunset,
+  ) {
+    return 'A nap merülési idői. Napkelte $sunrise, napnyugta $sunset.';
+  }
+
+  @override
+  String trips_story_rhythm_semanticsSunrise(String sunrise) {
+    return 'A nap merülési idői. Napkelte $sunrise.';
+  }
+
+  @override
+  String trips_story_rhythm_semanticsSunset(String sunset) {
+    return 'A nap merülési idői. Napnyugta $sunset.';
+  }
+
+  @override
   String trips_story_dayMap_semantics(int number) {
     return '$number. nap térképe';
   }
@@ -1997,6 +2036,9 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get diveLog_bulkEdit_tankSpecsHint =>
       'Válaszd ki, mely tulajdonságok íródjanak felül a merülésekhez már tartozó palackokon. A kezdő és a záró nyomás soha nem változik.';
+
+  @override
+  String get diveLog_bulkEdit_tankSpecsTemplateTitle => 'Minden palack';
 
   @override
   String get diveLog_bulkEdit_tankSpecsNoFields =>
@@ -4627,6 +4669,11 @@ class AppLocalizationsHu extends AppLocalizations {
   String get certifications_list_section_expiringSoon => 'Hamarosan lejár';
 
   @override
+  String certifications_list_section_professional(String agency) {
+    return '$agency Profi';
+  }
+
+  @override
   String get certifications_list_section_valid => 'Érvényes';
 
   @override
@@ -5378,6 +5425,58 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get diveLog_gear_unknownSet => 'Készlet';
+
+  @override
+  String get diveLog_health_after15 => '15 perc után';
+
+  @override
+  String get diveLog_health_after5 => '5 perc után';
+
+  @override
+  String get diveLog_health_atSurfacing => 'Felszínre éréskor';
+
+  @override
+  String get diveLog_health_average => 'Átlag';
+
+  @override
+  String diveLog_health_bpm(int value) {
+    return '$value bpm';
+  }
+
+  @override
+  String get diveLog_health_maximum => 'Maximum';
+
+  @override
+  String diveLog_health_ms(int value) {
+    return '$value ms';
+  }
+
+  @override
+  String get diveLog_health_noneFound =>
+      'Az Apple Health nem tartalmaz adatot ehhez a merüléshez';
+
+  @override
+  String get diveLog_health_overnightHrv =>
+      'Szívfrekvencia-változékonyság a következő éjszaka';
+
+  @override
+  String get diveLog_health_readFailed =>
+      'Nem sikerült olvasni az Apple Health adatait';
+
+  @override
+  String get diveLog_health_recovery => 'Regeneráció';
+
+  @override
+  String get diveLog_health_recoveryExplain =>
+      'Szívfrekvencia felszínre éréskor, valamint 5 és 15 perccel később, az Apple Healthből.';
+
+  @override
+  String diveLog_health_sleepBefore(int hours, int minutes) {
+    return '$hours óra $minutes perc alvás az előző éjszaka';
+  }
+
+  @override
+  String get diveLog_health_title => 'Szívfrekvencia és regeneráció';
 
   @override
   String get diveLog_listPage_bottomSheet_preDiveChecklist =>
@@ -6286,6 +6385,9 @@ class AppLocalizationsHu extends AppLocalizations {
       'Legutóbbi merülőhelyek térképe';
 
   @override
+  String get settings_homeCards_card_waitingForDownload => 'Letöltésre vár';
+
+  @override
   String get dashboard_allHidden_message =>
       'Minden kezdőlapi kártya el van rejtve.';
 
@@ -6503,6 +6605,20 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get dashboard_semantics_greetingBanner =>
       'Irányítópult üdvözlő banner';
+
+  @override
+  String get dashboard_waitingForDownload_download => 'Letöltés most';
+
+  @override
+  String dashboard_waitingForDownload_title(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count merülés vár a búvárkomputeredre',
+      one: '1 merülés vár a búvárkomputeredre',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get decoCalculator_addToPlanner => 'Hozzáadás a tervezőhöz';
@@ -7384,6 +7500,10 @@ class AppLocalizationsHu extends AppLocalizations {
       'Ezek a felvételek időben nem fedik egymást, így valószínűleg az egyik számítógép órája rosszul jár. A merülés az elsődleges számítógép idejét tartja meg.';
 
   @override
+  String get diveLog_consolidate_clockNoteOverlap =>
+      'Ezek a mélységprofilok más időpontban egyeznek, mint amit a számítógépek órái mutatnak, így valószínűleg az egyik számítógép órája rosszul jár. A merülés az elsődleges számítógép idejét tartja meg.';
+
+  @override
   String get diveLog_consolidate_clockNoteShort =>
       'Valószínűleg az egyik számítógép órája rosszul jár.';
 
@@ -7498,6 +7618,79 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get diveLog_deco_semantics_required => 'Dekompresszió szükséges';
+
+  @override
+  String diveLog_deco_compartmentLeading(int number) {
+    return 'Vezető: #$number';
+  }
+
+  @override
+  String diveLog_deco_compartmentOther(int number) {
+    return 'Kamra: #$number';
+  }
+
+  @override
+  String get diveLog_deco_metricLoad => 'Terhelés';
+
+  @override
+  String get diveLog_deco_gasOngassing => 'Feltöltődés';
+
+  @override
+  String get diveLog_deco_gasOffgassing => 'Leürülés';
+
+  @override
+  String get diveLog_deco_gasEquilibrium => 'Egyensúly';
+
+  @override
+  String get diveLog_deco_heatMapRows =>
+      'Sorok: gyors (fent) és lassú (lent) között';
+
+  @override
+  String get diveLog_deco_surfaceLevel => 'Felszíni szint';
+
+  @override
+  String get diveLog_deco_mValue => 'M-érték';
+
+  @override
+  String diveLog_deco_tooltipCompartment(int number) {
+    return '$number. kamra';
+  }
+
+  @override
+  String diveLog_deco_tooltipLoaded(String percent) {
+    return '$percent% terhelés';
+  }
+
+  @override
+  String diveLog_deco_tooltipHalfTime(String minutes) {
+    return 'Felezési idő: $minutes perc';
+  }
+
+  @override
+  String diveLog_deco_tooltipSurfaceLevel(String percent) {
+    return 'Felszíni szint: $percent%';
+  }
+
+  @override
+  String diveLog_deco_barChartSemantics(int count, int number, String percent) {
+    return 'Szövetterhelési diagram. $count kamra, terhelés az M-értékhez viszonyítva; a vezető kamra a(z) $number. $percent%-on.';
+  }
+
+  @override
+  String get diveLog_deco_heatMapUndersaturated => 'Alultelített';
+
+  @override
+  String get diveLog_deco_heatMapSupersaturated => 'Túltelített';
+
+  @override
+  String diveLog_deco_percentValue(String value) {
+    return '$value%';
+  }
+
+  @override
+  String diveLog_deco_minutesValue(String value) {
+    return '$value perc';
+  }
 
   @override
   String get diveLog_deco_tissueFast => 'Gyors';
@@ -7952,9 +8145,6 @@ class AppLocalizationsHu extends AppLocalizations {
   String get diveLog_diveMode_title => 'Merülési mód';
 
   @override
-  String get diveLog_editSighting_count => 'Darab';
-
-  @override
   String get diveLog_editSighting_notes => 'Jegyzetek';
 
   @override
@@ -8093,6 +8283,17 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
+  String diveLog_edit_gasSwitches_fillDetected(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count váltás kitöltése a palacknyomásokból',
+      one: '1 váltás kitöltése a palacknyomásokból',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get diveLog_edit_gettingLocation => 'Helymeghatározás...';
 
   @override
@@ -8220,6 +8421,38 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get diveLog_edit_noMarineLife => 'Nincs rögzített faj';
+
+  @override
+  String diveLog_edit_suggestions_title(String siteName) {
+    return 'Javaslatok: $siteName';
+  }
+
+  @override
+  String diveLog_edit_suggestions_add(String species) {
+    return '$species hozzáadása';
+  }
+
+  @override
+  String diveLog_edit_suggestions_seenOnDives(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Itt $count másik merülésen látott',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get diveLog_edit_suggestions_expected =>
+      'A merülőhely várt fajainak listáján';
+
+  @override
+  String diveLog_edit_suggestions_showAll(int count) {
+    return 'Az összes ($count)';
+  }
+
+  @override
+  String get diveLog_edit_suggestions_showFewer => 'Kevesebb';
 
   @override
   String get diveLog_edit_notSpecified => 'Nincs megadva';
@@ -8606,6 +8839,19 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get diveLog_edit_useSet => 'Készlet használata';
+
+  @override
+  String get diveLog_edit_removeSet => 'Készlet eltávolítása';
+
+  @override
+  String get diveLog_bulkEdit_setsToRemove => 'Eltávolítandó készletek';
+
+  @override
+  String get diveLog_bulkEdit_removeSetTitle =>
+      'Felszerelés-készlet eltávolítása';
+
+  @override
+  String get diveLog_bulkEdit_equipmentSets => 'Felszerelés-készletek';
 
   @override
   String get diveLog_edit_weightPreset_use => 'Séma használata';
@@ -9075,6 +9321,9 @@ class AppLocalizationsHu extends AppLocalizations {
   String get diveLog_legend_label_annotations => 'Jelölések';
 
   @override
+  String get diveLog_legend_label_plan => 'Terv';
+
+  @override
   String get diveLog_legend_label_computedEvents => 'Számított események';
 
   @override
@@ -9335,6 +9584,40 @@ class AppLocalizationsHu extends AppLocalizations {
     );
     return '$_temp0';
   }
+
+  @override
+  String diveLog_fetchConditions_confirmBodySelected(int count, int total) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'A kiválasztott $total merülésből $count esetében hiányoznak a körülmények.',
+      one:
+          'A kiválasztott $total merülésből $count esetében hiányoznak a körülmények.',
+    );
+    return '$_temp0 Csak az üres mezők töltődnek ki, a már megadott adatok nem változnak.';
+  }
+
+  @override
+  String diveLog_fetchConditions_skippedNoLocation(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$count merülésnek nincs helyszínkoordinátája vagy GPS-pozíciója, ezért kimaradnak.',
+      one:
+          '$count merülésnek nincs helyszínkoordinátája vagy GPS-pozíciója, ezért kimarad.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get diveLog_fetchConditions_noneNeededSelected =>
+      'A kiválasztott merülések egyikéből sem hiányoznak a körülmények.';
+
+  @override
+  String get diveLog_fetchConditions_noneLocatedSelected =>
+      'A kiválasztott, körülmények nélküli merüléseknek nincs helyszínkoordinátája vagy GPS-pozíciója.';
 
   @override
   String diveLog_fetchConditions_summaryCancelled(int count) {
@@ -9782,6 +10065,9 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get siteSuggestion_titleDiveComputer => 'Helyszín a búvárkomputerből';
+
+  @override
+  String get siteSuggestion_titleDraft => 'Ahol vízbe szálltál';
 
   @override
   String siteSuggestion_assignButton(Object name) {
@@ -10748,6 +11034,16 @@ class AppLocalizationsHu extends AppLocalizations {
   String get diveLog_tank_label_endPressure => 'Végnyomás';
 
   @override
+  String get diveLog_tank_label_surfaceBreathing => 'A felszínen belélegezve';
+
+  @override
+  String get diveLog_tank_surfaceBreathing_helper =>
+      'Percek ezen a palackon azután, hogy a komputer leállította a naplózást, például oxigén a hajón';
+
+  @override
+  String get diveLog_tank_surfaceBreathing_unit => 'perc';
+
+  @override
   String get diveLog_tank_label_he => 'He';
 
   @override
@@ -10799,6 +11095,16 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String diveLog_cylinders_figureUsed(String pressure) {
     return 'Felhasznált $pressure';
+  }
+
+  @override
+  String diveLog_cylinders_figureNow(String pressure) {
+    return 'Most $pressure';
+  }
+
+  @override
+  String diveLog_cylinders_figureNowEstimated(String pressure) {
+    return 'Most $pressure (becs.)';
   }
 
   @override
@@ -11280,6 +11586,9 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get divePlanner_label_minutesUnit => 'perc';
+
+  @override
+  String get divePlanner_label_secondsUnit => 'mp';
 
   @override
   String get divePlanner_label_ndl => 'NDL';
@@ -14149,6 +14458,9 @@ class AppLocalizationsHu extends AppLocalizations {
   String get enum_tankRole_stage => 'Stage';
 
   @override
+  String get enum_tankRole_suitInflation => 'Ruhatöltő palack';
+
+  @override
   String get enum_tankRole_twinSet => 'Ikerpalack';
 
   @override
@@ -14444,6 +14756,10 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get passport_history_deleteConfirm =>
       'Törli ezt a töltési bejegyzést?';
+
+  @override
+  String get passport_history_deleteFailed =>
+      'A töltés törlése nem sikerült. Próbálja újra.';
 
   @override
   String get passport_tag_title => 'Címke';
@@ -16657,7 +16973,50 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
+  String equipment_group_foldedTypeCount(int count, String type) {
+    return '$type $count';
+  }
+
+  @override
+  String equipment_group_foldedServiceDue(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count szerviz esedékes',
+      one: '$count szerviz esedékes',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String equipment_group_foldedMoreTypes(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'és még $count',
+      one: 'és még $count',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String equipment_group_foldedSelected(int selected, int total) {
+    return '$selected / $total kiválasztva';
+  }
+
+  @override
+  String get equipment_list_expandAllGroups => 'Összes kibontása';
+
+  @override
+  String get equipment_list_collapseAllGroups => 'Összes összecsukása';
+
+  @override
   String get equipment_location_activeFilter => 'Hely';
+
+  @override
+  String equipment_location_tileSemantics(String name) {
+    return 'Hely: $name';
+  }
 
   @override
   String get equipment_filter_section_location => 'Hely';
@@ -17777,9 +18136,6 @@ class AppLocalizationsHu extends AppLocalizations {
   String get gasCalculators_consumption_volume => 'Térfogat';
 
   @override
-  String get gasCalculators_mod_aboutMod => 'A MOD-ról';
-
-  @override
   String get gasCalculators_mod_mode => 'Mód';
 
   @override
@@ -17980,10 +18336,6 @@ class AppLocalizationsHu extends AppLocalizations {
       'Az ellenőrzött mélységekben a ppO₂-, END- és sűrűséghatáraidon belül.';
 
   @override
-  String get gasCalculators_mod_aboutModesBody =>
-      'A MOD az a mélység, ahol a keverék eléri a ppO₂-határt. Mindig lefelé kerekítjük, soha nem felfelé.\n\nA Rec 10 méterenként 1 barral számol, mint a napló. Az OC Tec és a CCR Tec a vízfajtából veszi a környezeti nyomást, mint a gázsűrűség-kalkulátor, ezért ugyanaz a keverék ott valamivel sekélyebb MOD-ot mutathat.\n\nAz EAD a nitrogént tekinti narkotikusnak, az END a nitrogént és az oxigént. Az END-határod, hogy az oxigén narkotikusnak számít-e, és az alapértelmezett ppO₂-határok a búvárprofilodból származnak.';
-
-  @override
   String get gasCalculators_mod_modeRec => 'Rec';
 
   @override
@@ -18035,13 +18387,6 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get gasCalculators_mnd_hePercent => 'He %';
-
-  @override
-  String get gasCalculators_mnd_infoContent =>
-      'A Maximum Narkotikus Mélység (MND) az a legnagyobb mélység, ameddig a narkózis nem haladja meg az END határt. Az Ekvivalens Narkotikus Mélység (END) megmutatja a gázkeverék narkotikus hatását adott mélységben.\n\nHa az \'O2 narkotikus\' be van kapcsolva, az oxigén és a nitrogén egyaránt hozzájárul a narkózishoz (konzervatívabb). Ha ki van kapcsolva, csak a nitrogén számít narkotikusnak.';
-
-  @override
-  String get gasCalculators_mnd_infoTitle => 'MND/END névjegy';
 
   @override
   String get gasCalculators_mnd_unlimited => 'korlátlan';
@@ -18109,13 +18454,6 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get gasCalculators_icd_applyButton => 'Alkalmaz';
-
-  @override
-  String get gasCalculators_icd_infoTitle => 'Az izobár ellendiffúzióról';
-
-  @override
-  String get gasCalculators_icd_infoContent =>
-      'Az izobár ellendiffúzió (ICD) annak a kockázata, hogy egy héliumban gazdagabb gázról egy nitrogénben gazdagabb gázra váltás növeli a szövetekben az összes inert gáz feszültségét, mivel a hélium gyorsabban diffundál, mint a nitrogén. Az ötödszabály egy gyakori ökölszabály: a nitrogénhányad legfeljebb a héliumhányad csökkenésének ötödével nőhet.\n\nA szervezetek véleménye eltér arról, hogy ez mennyire számít a valóságban egy jól megtervezett, szabványos gázokkal végzett merülésnél. Ez a kalkulátor a két megadott gázra alkalmazza az ökölszabályt; nem helyettesíti a képzést vagy a szakmai tanácsot.';
 
   @override
   String get gasCalculators_ppO2Limit => 'ppO₂ limit';
@@ -18256,13 +18594,6 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get gasCalculators_blender_error_implausibleStartMix =>
       'A palack nyomás alatt van, de sem oxigént, sem héliumot nem tartalmaz, ami tiszta nitrogén lenne. Ellenőrizd a palackban lévő keveréket.';
-
-  @override
-  String get gasCalculators_blender_about => 'A keverésről';
-
-  @override
-  String get gasCalculators_blender_aboutBody =>
-      'Parciális nyomású keverés a cél keverékhez. Add hozzá a töltőgázokat sorrendben, a megadott nyomásig, majd hagyd a palackot kiegyenlítődni. A töltőgázok és a sorrendjük állítható: ha az utolsó gázt 32/0-ra állítod, levegő helyett EAN32-vel tölt fel. A kész keveréket mindig elemezd, mielőtt lemerülnél vele.';
 
   @override
   String get gasCalculators_blender_conditions => 'Keverési körülmények';
@@ -18696,10 +19027,6 @@ class AppLocalizationsHu extends AppLocalizations {
       'Egyenértékű levegősűrűség-mélység (EADD)';
 
   @override
-  String get gasCalculators_density_eaddInfo =>
-      'Az EADD az a mélység, ahol a levegő ugyanolyan sűrű lenne, mint ez a gáz. A g/L-ben megadott sűrűséggel ellentétben nem függ a hőmérséklettől.';
-
-  @override
   String get gasCalculators_density_loopGasTitle => 'Hurokgáz mélységben';
 
   @override
@@ -18718,14 +19045,6 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String gasCalculators_density_diluentAboveSetpoint(Object ppO2) {
     return 'A hígítógáz önmagában itt $ppO2 ppO2-t ad, ami a setpoint felett van. A sűrűség a hígítógáz ppO2-jével számol.';
-  }
-
-  @override
-  String get gasCalculators_density_infoTitle => 'A gázsűrűségről';
-
-  @override
-  String gasCalculators_density_infoContent(Object warn, Object critical) {
-    return 'A sűrű gázt nehezebb belélegezni, és növeli a CO2-visszatartás kockázatát. Tartsd a sűrűséget legfeljebb $warn g/L-en; $critical g/L az abszolút felső határ.\n\nCCR esetén a hurokgáz sűrűsége számít: oxigén a setpoint szerint, a maradék nitrogén és hélium a hígítógáz arányában.\n\nA hidegebb gáz sűrűbb, ezért a hidegebb hőmérséklet a konzervatív választás. A számítás ideális gázt feltételez.';
   }
 
   @override
@@ -18831,9 +19150,6 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get marineLife_speciesDetail_topSitesTitle => 'Legjobb merülőhelyek';
-
-  @override
-  String get marineLife_speciesDetail_totalSightingsLabel => 'Összes észlelés';
 
   @override
   String get marineLife_speciesEdit_addTitle => 'Faj hozzáadása';
@@ -19144,7 +19460,32 @@ class AppLocalizationsHu extends AppLocalizations {
   String get marineLife_speciesPage_sortTooltip => 'Rendezés';
 
   @override
-  String get marineLife_speciesPage_sort_mostSightings => 'Legtöbb észlelés';
+  String get marineLife_speciesPage_sort_mostDives => 'Legtöbb merülés';
+
+  @override
+  String get marineLife_abundance_label => 'Hány';
+
+  @override
+  String get marineLife_abundance_seen => 'Látott';
+
+  @override
+  String get marineLife_abundance_single => 'Egy';
+
+  @override
+  String get marineLife_abundance_few => 'Néhány';
+
+  @override
+  String get marineLife_abundance_many => 'Sok';
+
+  @override
+  String get marineLife_abundance_abundant => 'Rengeteg';
+
+  @override
+  String get marineLife_abundance_exact => 'Pontos';
+
+  @override
+  String get marineLife_abundance_ranges =>
+      'Néhány 2 és 10 között, Sok 11 és 100 között, Rengeteg 100 felett';
 
   @override
   String get marineLife_speciesPage_sort_recentlySeen => 'Nemrég látott';
@@ -19211,6 +19552,200 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get marineLife_speciesPage_retry => 'Újra';
+
+  @override
+  String get speciesMap_title => 'Fajtérkép';
+
+  @override
+  String get speciesMap_openTooltip => 'Fajtérkép';
+
+  @override
+  String get speciesMap_pickSpeciesTooltip => 'Faj kiválasztása';
+
+  @override
+  String get speciesMap_list_searchHint => 'Keresés az összes faj között';
+
+  @override
+  String get speciesMap_list_allSites => 'Minden merülőhely';
+
+  @override
+  String get speciesMap_list_allSitesSubtitle => 'Mit hol rögzítettél';
+
+  @override
+  String get speciesMap_list_notSeen => 'Még nem láttad';
+
+  @override
+  String speciesMap_list_counts(int sightings, int sites) {
+    String _temp0 = intl.Intl.pluralLogic(
+      sightings,
+      locale: localeName,
+      other: '$sightings észlelés',
+      one: '$sightings észlelés',
+    );
+    String _temp1 = intl.Intl.pluralLogic(
+      sites,
+      locale: localeName,
+      other: '$sites merülőhely',
+      one: '$sites merülőhely',
+    );
+    return '$_temp0, $_temp1';
+  }
+
+  @override
+  String get speciesMap_legend_mySightings => 'Saját észleléseim';
+
+  @override
+  String get speciesMap_legend_expected => 'Várható, nincs rögzítve';
+
+  @override
+  String get speciesMap_legend_publicRecords => 'Nyilvános adatok';
+
+  @override
+  String get speciesMap_legend_speciesLogged =>
+      'Egy merülőhelyen rögzített fajok';
+
+  @override
+  String get speciesMap_layers_tooltip => 'Térképrétegek';
+
+  @override
+  String get speciesMap_layers_public => 'Nyilvános adatok (GBIF)';
+
+  @override
+  String get speciesMap_layers_publicHint =>
+      'Elküldi a GBIF-nek a kiválasztott fajt vagy a megérintett merülőhely helyét.';
+
+  @override
+  String get speciesMap_layers_expectedHeading => 'Várható fajok forrása';
+
+  @override
+  String get speciesMap_layers_scopeMine => 'Saját merülőhelyeim';
+
+  @override
+  String get speciesMap_layers_scopeAllVisible =>
+      'Minden általam látható merülőhely';
+
+  @override
+  String get speciesMap_card_loggedHere => 'Itt rögzítve';
+
+  @override
+  String get speciesMap_card_expectedNotLogged => 'Várható, még nincs rögzítve';
+
+  @override
+  String get speciesMap_card_expectedPin => 'Itt várható, még nincs rögzítve';
+
+  @override
+  String get speciesMap_card_nothingLogged => 'Itt még semmi nincs rögzítve';
+
+  @override
+  String get speciesMap_card_close => 'Bezárás';
+
+  @override
+  String get speciesMap_card_openSite => 'Merülőhely megnyitása';
+
+  @override
+  String speciesMap_card_speciesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count faj',
+      one: '$count faj',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String speciesMap_card_sightingRow(String date, String number, int count) {
+    return '$date, $number. merülés, ×$count';
+  }
+
+  @override
+  String speciesMap_card_speciesWithCount(String species, int count) {
+    return '$species ×$count';
+  }
+
+  @override
+  String speciesMap_unplaced(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$count észlelés térképen nem szereplő merülőhelyű merüléseken van',
+      one: '$count észlelés térképen nem szereplő merülőhelyű merülésen van',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get speciesMap_noPublicRecords =>
+      'Ehhez a fajhoz nem jeleníthetők meg nyilvános adatok: olyan tudományos név kell hozzá, amelyet a GBIF ismer.';
+
+  @override
+  String get speciesMap_publicUnavailable =>
+      'A nyilvános adatokat nem sikerült betölteni.';
+
+  @override
+  String get speciesMap_error_loading =>
+      'A fajtérképet nem sikerült betölteni.';
+
+  @override
+  String get speciesMap_suggestPublic =>
+      'Ezt a fajt egyetlen térképen szereplő merülőhelyen sem rögzítetted. Kapcsold be a nyilvános adatokat, hogy lásd, hol látták mások.';
+
+  @override
+  String get speciesMap_attribution => 'Adatok: GBIF.org';
+
+  @override
+  String speciesMap_semantics_sitePin(String site, int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count faj',
+      one: '$count faj',
+    );
+    return '$site, $_temp0';
+  }
+
+  @override
+  String speciesMap_semantics_loggedPin(String site, int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count észlelés',
+      one: '$count észlelés',
+    );
+    return '$site, $_temp0';
+  }
+
+  @override
+  String speciesMap_semantics_expectedPin(String site) {
+    return '$site, várható';
+  }
+
+  @override
+  String speciesMap_semantics_cluster(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count merülőhely',
+      one: '$count merülőhely',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get speciesMap_whereSeen_title => 'Hol láttad';
+
+  @override
+  String get speciesMap_whereSeen_openFullMap => 'Teljes térkép megnyitása';
+
+  @override
+  String get speciesMap_whereSeen_empty =>
+      'Még nincs rögzítve térképen szereplő merülőhelyen.';
+
+  @override
+  String speciesMap_whereSeen_siteWithCount(String site, int count) {
+    return '$site ($count)';
+  }
 
   @override
   String marineLife_speciesDetail_sightingsTitle(Object count) {
@@ -19703,6 +20238,17 @@ class AppLocalizationsHu extends AppLocalizations {
   String get media_photoPicker_selectAllButton => 'Összes kijelölése';
 
   @override
+  String get media_photoPicker_albumFilter_all => 'Összes album';
+
+  @override
+  String media_photoPicker_albumFilter_chip(String album, int count) {
+    return '$album ($count)';
+  }
+
+  @override
+  String get media_photoPicker_albumFilter_label => 'Szűrés album szerint';
+
+  @override
   String media_photoPicker_selectedCount(int count) {
     return '$count kijelölve';
   }
@@ -20166,6 +20712,10 @@ class AppLocalizationsHu extends AppLocalizations {
   String get media_photoViewer_videoFileNotFound => 'Videó fájl nem található';
 
   @override
+  String get media_photoViewer_videoNeedsNormalWindow =>
+      'A videó lejátszásához normál böngészőablak szükséges. A privát ablakok nem tudnak streamelni a Google Drive-ról vagy WebDAV-ről.';
+
+  @override
   String get media_photoViewer_videoNotLinked =>
       'A videó nincs a könyvtárhoz csatolva';
 
@@ -20564,6 +21114,9 @@ class AppLocalizationsHu extends AppLocalizations {
   String get media_library_empty => 'Még nincs média';
 
   @override
+  String get media_library_emptyFiltered => 'Nincs a szűrőknek megfelelő média';
+
+  @override
   String get media_library_filter_all => 'Összes';
 
   @override
@@ -20594,6 +21147,43 @@ class AppLocalizationsHu extends AppLocalizations {
   String media_library_filter_missingCount(int count) {
     return 'Hiányzó fájlok ($count)';
   }
+
+  @override
+  String get media_library_filter_noPeople => 'Nincs megjelölt személy';
+
+  @override
+  String media_library_filter_peopleTwo(String first, String second) {
+    return '$first, $second';
+  }
+
+  @override
+  String media_library_filter_peopleAndMore(String names, int count) {
+    return '$names +$count';
+  }
+
+  @override
+  String media_library_filter_peopleCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count személy',
+      one: '$count személy',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get media_library_filter_peopleSearchHint => 'Személyek keresése';
+
+  @override
+  String get media_library_filter_peopleNoMatch => 'Nincs egyező személy';
+
+  @override
+  String get media_library_filter_peopleClear => 'Személyek törlése';
+
+  @override
+  String get media_library_filter_notPlacedInDive =>
+      'Nincs elhelyezve a merülésben';
 
   @override
   String get media_library_filter_clear => 'Szűrők törlése';
@@ -20630,6 +21220,12 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get media_library_unlinkedHeader => 'Nem csatolt';
+
+  @override
+  String get media_library_sectionSitePictures => 'Merülőhely képei';
+
+  @override
+  String get media_library_sectionEquipmentPictures => 'Felszerelés képei';
 
   @override
   String get media_library_diveHeaderHint => 'Merülés megnyitása';
@@ -22082,10 +22678,6 @@ class AppLocalizationsHu extends AppLocalizations {
       'Felhajtóerő a merülés során, ingadozás, ledobható ólom';
 
   @override
-  String get buoyancy_tooltip =>
-      'Modellezett nettó felhajtóerő a merülés során a profilból, gázfogyasztásból és felszerelésből.';
-
-  @override
   String buoyancy_verdictBuoyant(String depth, String amount) {
     return 'Az utolsó megállónál (~$depth) körülbelül $amount felhajtóerőd volt';
   }
@@ -22226,6 +22818,10 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get diveDetailSection_equipment_name => 'Felszerelés';
+
+  @override
+  String get diveDetailSection_health_description =>
+      'Szívfrekvencia, regeneráció és alvás az Apple Healthből';
 
   @override
   String get diveDetailSection_equipment_description =>
@@ -22374,6 +22970,26 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get settings_appearance_mapBackgroundDiveCards_subtitleWithNote =>
       'Merülőhely térkép megjelenítés háttérként a merülési kártyákon (merülőhely szükséges)';
+
+  @override
+  String get settings_appearance_photoBackgroundDiveCards =>
+      'Fotóháttér a merüléskártyákon';
+
+  @override
+  String get settings_appearance_photoBackgroundDiveCards_subtitle =>
+      'A merülés egyik fotójának megjelenítése háttérként a merüléskártyákon (fotó nélkül a térkép vagy a szín látszik)';
+
+  @override
+  String get settings_appearance_photoOverlayDark =>
+      'Fotó fedőréteg átlátszatlansága, sötét téma';
+
+  @override
+  String get settings_appearance_photoOverlayLight =>
+      'Fotó fedőréteg átlátszatlansága, világos téma';
+
+  @override
+  String get settings_appearance_photoOverlay_subtitle =>
+      'Magasabb érték olvashatóbb szöveget, alacsonyabb több fotót ad';
 
   @override
   String get settings_appearance_mapBackgroundSiteCards =>
@@ -24139,6 +24755,9 @@ class AppLocalizationsHu extends AppLocalizations {
       'Importált merülések címkézése';
 
   @override
+  String get settings_conflict_field_avgHeartRate => 'Átlagos szívfrekvencia';
+
+  @override
   String get settings_conflict_field_downloadsFollowComputerOwner =>
       'Letöltések hozzáadása a komputer tulajdonosához';
 
@@ -24192,6 +24811,10 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get settings_conflict_field_equipmentGroupByLocation =>
       'Felszerelés hely szerint csoportosítva';
+
+  @override
+  String get settings_conflict_field_equipmentCollapsedGroups =>
+      'Összecsukott felszereléscsoportok';
 
   @override
   String get settings_conflict_field_listArrangementHlc =>
@@ -25030,6 +25653,22 @@ class AppLocalizationsHu extends AppLocalizations {
       'Iránykorrekció fokban';
 
   @override
+  String get settings_conflict_field_heartRateAtExit =>
+      'Szívfrekvencia felszínre éréskor';
+
+  @override
+  String get settings_conflict_field_heartRateExitPlus15 =>
+      'Szívfrekvencia 15 perccel a felszínre érés után';
+
+  @override
+  String get settings_conflict_field_heartRateExitPlus5 =>
+      'Szívfrekvencia 5 perccel a felszínre érés után';
+
+  @override
+  String get settings_conflict_field_heartRateSamples =>
+      'Szívfrekvencia az Apple Healthből';
+
+  @override
   String get settings_conflict_field_scaleFactor =>
       'A nyomvonal méretezési tényezője';
 
@@ -25124,6 +25763,12 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get settings_conflict_field_isDone => 'Kész';
+
+  @override
+  String get settings_conflict_field_isDraft => 'Merülésvázlat';
+
+  @override
+  String get settings_conflict_field_isEdit => 'Profil kézzel szerkesztve';
 
   @override
   String get settings_conflict_field_isOrphaned => 'Hiányzó fájl';
@@ -25271,6 +25916,9 @@ class AppLocalizationsHu extends AppLocalizations {
       'Legnagyobb lemerülési sebesség';
 
   @override
+  String get settings_conflict_field_maxHeartRate => 'Maximális szívfrekvencia';
+
+  @override
   String get settings_conflict_field_maxSpeed => 'Végsebesség';
 
   @override
@@ -25338,6 +25986,10 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get settings_conflict_field_overdueServices => 'Esedékes szervizek';
+
+  @override
+  String get settings_conflict_field_overnightHrvMs =>
+      'Éjszakai szívfrekvencia-változékonyság';
 
   @override
   String get settings_conflict_field_params => 'Részletek';
@@ -25805,6 +26457,18 @@ class AppLocalizationsHu extends AppLocalizations {
       'Térkép a merüléskártyák mögött';
 
   @override
+  String get settings_conflict_field_showPhotoBackgroundOnDiveCards =>
+      'Fotó a merüléskártyák mögött';
+
+  @override
+  String get settings_conflict_field_cardPhotoOverlayDark =>
+      'Merüléskártya fotó fedőréteg (sötét téma)';
+
+  @override
+  String get settings_conflict_field_cardPhotoOverlayLight =>
+      'Merüléskártya fotó fedőréteg (világos téma)';
+
+  @override
   String get settings_conflict_field_showMapBackgroundOnSiteCards =>
       'Térkép a merülőhely-kártyák mögött';
 
@@ -25854,6 +26518,10 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get settings_conflict_field_size => 'Méret';
+
+  @override
+  String get settings_conflict_field_sleepBeforeMinutes =>
+      'Alvás az előző éjszaka';
 
   @override
   String get settings_conflict_field_sortOrder => 'Sorrend';
@@ -25927,6 +26595,10 @@ class AppLocalizationsHu extends AppLocalizations {
       'Csak erre a merülésre vonatkozó beállítások';
 
   @override
+  String get settings_conflict_field_settled =>
+      'Az Apple Health adatai teljesek';
+
+  @override
   String get settings_conflict_field_startTime => 'Kezdés ideje';
 
   @override
@@ -25969,6 +26641,10 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get settings_conflict_field_supersedesRuleId =>
       'Beépített szabályt helyettesít';
+
+  @override
+  String get settings_conflict_field_surfaceBreathingDuration =>
+      'A felszínen belélegzett idő';
 
   @override
   String get settings_conflict_field_surfaceConditions =>
@@ -26738,6 +27414,14 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
+  String get notifications_draftReminder_body =>
+      'Töltsd le a búvárkomputered adatait a vázlat kitöltéséhez.';
+
+  @override
+  String get notifications_draftReminder_title =>
+      'Egy merülés a búvárkomputeredre vár';
+
+  @override
   String get notifications_document_expiresToday_body =>
       'Újítsd meg a következő merülés előtt.';
 
@@ -27262,6 +27946,10 @@ class AppLocalizationsHu extends AppLocalizations {
       'Az utolsó mentés nem került fel a felhőbe';
 
   @override
+  String get dataHealth_backup_extraCopyMissing =>
+      'Az utolsó mentés nem került fel minden fiókba';
+
+  @override
   String get dataHealth_backup_noOffDeviceCopy =>
       'Nincs másolat ezen az eszközön kívül';
 
@@ -27333,7 +28021,7 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get settings_data_dataTools_subtitle =>
-      'Merülési idők javítása, társak összekapcsolása, felszerelés átsorolása, adatminőség, táblázatszerkesztő';
+      'Merülési idők javítása, társak összekapcsolása, felszerelés átsorolása, adatminőség, táblázatszerkesztő, merülések újraelemzése';
 
   @override
   String get settings_agentAccess_title => 'Ügynökhozzáférés';
@@ -27689,13 +28377,6 @@ class AppLocalizationsHu extends AppLocalizations {
     );
     return '$_temp0';
   }
-
-  @override
-  String get settings_decompression_aboutContent =>
-      'A Gradiens Faktorok (GF) szabályozzák, mennyire konzervatív a dekompressziós számítás. A GF Low a mély megállókra, míg a GF High a sekély megállókra hat.\n\nAlacsonyabb értékek = konzervatívabb = hosszabb dekó megállók\nMagasabb értékek = kevésbé konzervatív = rövidebb dekó megállók';
-
-  @override
-  String get settings_decompression_aboutTitle => 'Gradiens Faktorokról';
 
   @override
   String get settings_decompression_currentSettings => 'Jelenlegi beállítások';
@@ -28513,6 +29194,14 @@ class AppLocalizationsHu extends AppLocalizations {
   String get settings_notifications_disabled_title => 'Értesítések letiltva';
 
   @override
+  String get settings_notifications_draftReminder =>
+      'Emlékeztess a merülésvázlatokra';
+
+  @override
+  String get settings_notifications_draftReminder_subtitle =>
+      'Három nappal azután, hogy egy vázlat kiszállt a vízből, ha még mindig letöltésre vár';
+
+  @override
   String get settings_notifications_enableServiceReminders =>
       'Szerviz emlékeztetők engedélyezése';
 
@@ -28527,13 +29216,6 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get settings_notifications_header_serviceReminders =>
       'Szerviz emlékeztetők';
-
-  @override
-  String get settings_notifications_howItWorks_content =>
-      'Az értesítések az alkalmazás indításakor kerülnek ütemezésre, és rendszeresen frissülnek a háttérben. Az egyes felszerelések emlékeztetőit a szerkesztési képernyőjükön szabhatja testre.';
-
-  @override
-  String get settings_notifications_howItWorks_title => 'Hogyan működik';
 
   @override
   String get settings_notifications_permissionRequired =>
@@ -30429,19 +31111,35 @@ class AppLocalizationsHu extends AppLocalizations {
   String get insights_gas_gasMix_title => 'Gázkeverék megoszlás';
 
   @override
-  String get insights_gas_sacByRole_empty => 'Nincsenek többpalackos adatok';
+  String get insights_gas_roleUse_title => 'Fogyasztás palackszerep szerint';
 
   @override
-  String get insights_gas_sacByRole_error =>
-      'Nem sikerült a szerep szerinti fogyasztás betöltése';
+  String get insights_gas_roleUse_subtitle =>
+      'Minden szerep a belélegzés ideje alatt';
 
   @override
-  String get insights_gas_sacByRole_subtitle =>
-      'Átlagos felhasználás palack típus szerint';
+  String get insights_gas_roleUse_empty =>
+      'Még nincs érték palackszerep szerint';
 
   @override
-  String get insights_gas_sacByRole_title =>
-      'Gázfogyasztás palack szerep szerint';
+  String get insights_gas_roleUse_error =>
+      'Nem sikerült betölteni a palackszerep szerinti fogyasztást';
+
+  @override
+  String get insights_gas_roleGroup_bottomGas => 'Fenékgáz';
+
+  @override
+  String insights_gas_roleUse_leftOut(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          '$count merülés kimaradt: egy stage-, dekó-, póni- vagy bailout-palack gázt vesztett, de nem volt rá gázváltás',
+      one:
+          '$count merülés kimaradt: egy stage-, dekó-, póni- vagy bailout-palack gázt vesztett, de nem volt rá gázváltás',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get insights_gas_ccrUse_title => 'Rebreather gázfogyasztás';
@@ -31042,9 +31740,6 @@ class AppLocalizationsHu extends AppLocalizations {
   String get insights_focus_gas_trimix => 'Trimix';
 
   @override
-  String get insights_gas_tankRole_backGas => 'Háttérgáz';
-
-  @override
   String get insights_gas_tankRole_bailout => 'Bailout';
 
   @override
@@ -31054,22 +31749,10 @@ class AppLocalizationsHu extends AppLocalizations {
   String get insights_gas_tankRole_diluent => 'Hígító';
 
   @override
-  String get insights_gas_tankRole_oxygenSupply => 'O₂ ellátás';
-
-  @override
   String get insights_gas_tankRole_pony => 'Pony';
 
   @override
-  String get insights_gas_tankRole_sidemountLeft => 'Sidemount B';
-
-  @override
-  String get insights_gas_tankRole_sidemountRight => 'Sidemount J';
-
-  @override
   String get insights_gas_tankRole_stage => 'Stage';
-
-  @override
-  String get insights_gas_tankRole_twinSet => 'Ikerpalack';
 
   @override
   String get insights_geographic_appBar_title => 'Földrajzi';
@@ -32069,14 +32752,6 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
-  String get surfaceInterval_aboutTissueLoading_body =>
-      'A testednek 16 szövetkamrája van, amelyek különböző sebességgel nyelik el és adják le a nitrogént. A gyors szövetek (mint a vér) gyorsan telítődnek, de gyorsan is ürülnek. A lassú szövetek (mint a csont és a zsír) tovább tart, hogy mindkettőt betöltsék és kiürüljenek. A \"vezető kamra\" az a szövet, amelyik a legtelítettebb, és általában ez szabályozza a dekompresszió nélküli határidőt (NDL). A felszíni intervallum alatt minden szövet kiürül a felszíni telítettségi szintek felé (~40% telítettség).';
-
-  @override
-  String get surfaceInterval_aboutTissueLoading_title =>
-      'A szövet telítettségről';
-
-  @override
   String get surfaceInterval_action_resetDefaults =>
       'Alapértelmezések visszaállítása';
 
@@ -32492,6 +33167,40 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get tags_manage_colorLabel => 'Szín';
+
+  @override
+  String tags_color_shadeLight(String color) {
+    return '$color, világos';
+  }
+
+  @override
+  String tags_color_shadeDark(String color) {
+    return '$color, sötét';
+  }
+
+  @override
+  String tags_color_current(String code) {
+    return 'Jelenlegi szín, $code';
+  }
+
+  @override
+  String get tags_color_custom => 'Egyéni szín';
+
+  @override
+  String get tags_color_hexLabel => 'Hexakód';
+
+  @override
+  String get tags_color_hexError =>
+      'Adjon meg hat karaktert (0-9 vagy A-F), például #2E8B57';
+
+  @override
+  String get tags_color_use => 'Használat';
+
+  @override
+  String get tags_color_hueLabel => 'Színárnyalat';
+
+  @override
+  String get tags_color_squareLabel => 'Telítettség és fényerő';
 
   @override
   String get tags_manage_narrowDialog_confirm => 'Eltávolítás';
@@ -35424,6 +36133,21 @@ class AppLocalizationsHu extends AppLocalizations {
       'Ez a formátum még nem támogatott. Exportálj UDDF vagy CSV formátumban.';
 
   @override
+  String universalImport_fillDraft_ambiguous(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count vázlathoz illik. Válaszd ki, melyiket tölti ki.',
+      one:
+          'Egy másik merülés is illik ehhez a vázlathoz. Válaszd ki a vázlatot, amelyet kitölt.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get universalImport_fillDraft_choose => 'Vázlat kiválasztása';
+
+  @override
   String get universalImport_error_duplicateCheckFailed =>
       'A duplikátumkeresés nem futott le, ezért ebben a listában semmi nincs megjelölve úgy, hogy már szerepel a naplóban. Importálás előtt ellenőrizd a listát.';
 
@@ -35570,6 +36294,28 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get universalImport_compare_fillPlannedSubtitle =>
       'Ennek a letöltésnek a hozzárendelése a tervezett merüléshez';
+
+  @override
+  String get universalImport_label_fillDraft => 'Vázlat kitöltése';
+
+  @override
+  String get universalImport_compare_fillDraftSubtitle =>
+      'A letöltés csatolása a helyszínen megjelölt merüléshez';
+
+  @override
+  String universalImport_fillDraft_target(String label) {
+    return 'Kitölti a vázlatot: $label';
+  }
+
+  @override
+  String universalImport_fillDraft_window(String start, String end) {
+    return 'Vázlat $start és $end között';
+  }
+
+  @override
+  String universalImport_fillDraft_windowOpen(String start) {
+    return 'Vázlat $start óta';
+  }
 
   @override
   String get universalImport_label_filledPlanned =>
@@ -36544,13 +37290,6 @@ class AppLocalizationsHu extends AppLocalizations {
   String get divePlanner_undo => 'Visszavonás';
 
   @override
-  String get gasCalculators_rockBottom_aboutDescription =>
-      'A Rock Bottom az a minimális gáztartalék, ami egy veszélyes helyzetben szükséges a felszínre éréshez, miközben levegőt oszt meg a búvártársával.\n\n- Stresszes RMV értékeket használ (2-3x normális)\n- Feltételezi, hogy mindkét merülő egy palackról szív\n- Tartalmazza a biztonsági megállót, ha engedélyezve van\n\nMindig forduljon vissza, mielőtt eléri a Rock Bottom értéket!';
-
-  @override
-  String get gasCalculators_rockBottom_aboutTitle => 'A Rock Bottom-ról';
-
-  @override
   String get gasCalculators_rockBottom_ascentGasRequired =>
       'Emelkedéshez szükséges gáz';
 
@@ -36706,6 +37445,38 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get gpsLogger_stopButton => 'Rögzítés leállítása';
+
+  @override
+  String get gpsLogger_enteredWater => 'Vízbe szálltam';
+
+  @override
+  String get gpsLogger_surfaced => 'Felszínen vagyok';
+
+  @override
+  String get gpsLogger_surfaceOnStop_title => 'Még a vízben vagy?';
+
+  @override
+  String gpsLogger_surfaceOnStop_body(String time) {
+    return '$time-kor szálltál vízbe. Jelöld most, hogy felszínre értél, vagy hagyd nyitva a merülést, és később koppints a Felszínen vagyok gombra.';
+  }
+
+  @override
+  String get gpsLogger_surfaceOnStop_surfaceNow => 'Felszínre érés most';
+
+  @override
+  String get gpsLogger_surfaceOnStop_leaveOpen => 'Nyitva hagyás';
+
+  @override
+  String get gpsLogger_markNotification_title =>
+      'A GPS-nyomvonalad rögzítése folyamatban';
+
+  @override
+  String get gpsLogger_markNotification_bodyEnter =>
+      'Koppints a Vízbe szálltam gombra, amikor vízbe szállsz.';
+
+  @override
+  String get gpsLogger_markNotification_bodySurface =>
+      'A vízben. Koppints a Felszínen vagyok gombra, amikor kijöttél.';
 
   @override
   String gpsLogger_stripStatus(num count) {
@@ -37427,6 +38198,56 @@ class AppLocalizationsHu extends AppLocalizations {
       'Merülések importálása Apple Watch-ról a HealthKit segítségével';
 
   @override
+  String get healthAutoImport_newDive_title => 'Új merülés az Apple Watchodról';
+
+  @override
+  String healthAutoImport_newDives_title(int count) {
+    return '$count új merülés az Apple Watchodról';
+  }
+
+  @override
+  String get healthAutoImport_newDive_body => 'Hozzáadsz részleteket?';
+
+  @override
+  String get healthAutoImport_addDetails => 'Részletek hozzáadása';
+
+  @override
+  String get healthAutoImport_review_title =>
+      'Egy Apple Watch-merülést át kell nézni';
+
+  @override
+  String get healthAutoImport_review_body =>
+      'Több merüléshez is tartozhat. Válassz az Apple Health-importálásban.';
+
+  @override
+  String get healthAutoImport_planReview_body =>
+      'Ez lehet egy általad tervezett merülés. Nézd át, hogy kitöltsd a tervet.';
+
+  @override
+  String get healthAutoImport_review => 'Áttekintés';
+
+  @override
+  String get settings_appleHealth_autoImport_title =>
+      'Apple Watch-merülések automatikus importálása';
+
+  @override
+  String get settings_appleHealth_autoImport_subtitle =>
+      'Az órád új merülései megjelennek, amikor megnyitod az alkalmazást.';
+
+  @override
+  String get settings_appleHealth_metrics_title =>
+      'Szívfrekvencia, regeneráció és alvás';
+
+  @override
+  String get settings_appleHealth_metrics_subtitle =>
+      'Hozzáadja a szívfrekvenciát minden merülés alatt és után, az éjszakai HRV-t és az előtte lévő alvást.';
+
+  @override
+  String settings_appleHealth_boundDiver(String name) {
+    return 'Kinek: $name';
+  }
+
+  @override
   String get settings_dataSources_appleHealth_privacy =>
       'Egészségügyi adatait helyben, ezen az eszközön tároljuk, és soha nem osztjuk meg harmadik felekkel. A Submersion csak olvassa az Apple HealthKit adatait, és nem ír vissza adatot a HealthKitbe.';
 
@@ -37931,25 +38752,6 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
-  String diveComputer_detail_reparseAllProgress(int count) {
-    return '$count merülés újraelemzése folyamatban...';
-  }
-
-  @override
-  String diveComputer_detail_reparseAllSuccess(int count) {
-    return '$count merülés sikeresen újraelemezve';
-  }
-
-  @override
-  String diveComputer_detail_reparseAllPartial(
-    int succeeded,
-    int total,
-    int failed,
-  ) {
-    return '$succeeded / $total merülés újraelemezve. $failed sikertelen.';
-  }
-
-  @override
   String diveComputer_detail_reparseRawDataCount(int count) {
     return '$count merülés nyers adattal';
   }
@@ -37961,6 +38763,130 @@ class AppLocalizationsHu extends AppLocalizations {
   ) {
     return '$count merülés nyers adattal ($without anélkül)';
   }
+
+  @override
+  String get reparseBatch_progressTitle => 'Merülések újraelemzése';
+
+  @override
+  String reparseBatch_progressCount(int done, int total) {
+    return '$done / $total merülés újraelemzése';
+  }
+
+  @override
+  String get reparseBatch_cancelling => 'Megszakítás...';
+
+  @override
+  String get reparseBatch_resultTitle => 'Az újraelemzés befejeződött';
+
+  @override
+  String get reparseBatch_resultCancelledTitle => 'Az újraelemzés megszakadt';
+
+  @override
+  String get reparseBatch_resultErrorTitle =>
+      'Az újraelemzés hiba miatt leállt';
+
+  @override
+  String reparseBatch_resultNotReached(int count) {
+    return 'Nem feldolgozott: $count';
+  }
+
+  @override
+  String reparseBatch_resultSummary(int succeeded, int total) {
+    return '$succeeded / $total merülés újraelemezve.';
+  }
+
+  @override
+  String reparseBatch_resultFailed(int count) {
+    return 'Sikertelen: $count';
+  }
+
+  @override
+  String reparseBatch_resultNotProcessed(int count) {
+    return 'Nem feldolgozott (megszakítva): $count';
+  }
+
+  @override
+  String reparseBatch_resultSkipped(int count) {
+    return 'Kihagyva, nincs nyers adat: $count';
+  }
+
+  @override
+  String reparseBatch_resultProfilesPreserved(int count) {
+    return 'Összevont merülések, amelyek megtartották a profiljukat: $count';
+  }
+
+  @override
+  String get reparseBatch_failedListHeader => 'Sikertelen merülések';
+
+  @override
+  String reparseBatch_failedDiveTitle(int number) {
+    return '$number. merülés';
+  }
+
+  @override
+  String get reparseBatch_failedDiveUnnumbered => 'Sorszám nélküli merülés';
+
+  @override
+  String get reparseBatch_missingDescriptors =>
+      'Hiányoznak a búvárkomputer adatai';
+
+  @override
+  String get reparseBatch_confirmTitle => 'Merülések újraelemzése';
+
+  @override
+  String reparseBatch_confirmMessage(int count) {
+    return 'A merüléselemző újrafuttatása $count merülésre, amelyekhez nyers adat tartozik. Ez frissíti a profil- és érzékelőadatokat, de megőrzi a jegyzeteket, helyszíneket, búvártársakat és egyéb szerkesztéseket.';
+  }
+
+  @override
+  String reparseBatch_confirmSkipped(int count) {
+    return 'Kijelölt merülések nyers adat nélkül (kihagyva): $count';
+  }
+
+  @override
+  String get reparseBatch_noneWithRawData =>
+      'A kijelölt merülések egyikéhez sincs újraelemezhető nyers adat.';
+
+  @override
+  String get diveLog_selection_tooltip_fetchConditions =>
+      'Körülmények lekérése';
+
+  @override
+  String get diveLog_selection_tooltip_reparse => 'Újraelemzés';
+
+  @override
+  String get settings_reparseDives_title => 'Merülések újraelemzése';
+
+  @override
+  String get settings_reparseDives_subtitle =>
+      'A merüléselemző újrafuttatása minden merülésre, amelyhez nyers adat tartozik';
+
+  @override
+  String get settings_reparseDives_intro =>
+      'Akkor használd, ha egy alkalmazásfrissítés javítja a búvárkomputer-adatok beolvasását. A jegyzetek, helyszínek, búvártársak és egyéb szerkesztések megmaradnak.';
+
+  @override
+  String settings_reparseDives_withRawData(int count) {
+    return 'Merülések nyers adattal: $count';
+  }
+
+  @override
+  String settings_reparseDives_withoutRawData(int count) {
+    return 'Merülések nyers adat nélkül (nem elemezzük újra): $count';
+  }
+
+  @override
+  String get settings_reparseDives_byComputer => 'Búvárkomputerenként';
+
+  @override
+  String get settings_reparseDives_unknownComputer => 'Ismeretlen komputer';
+
+  @override
+  String get settings_reparseDives_none =>
+      'Egyik merüléshez sincs újraelemezhető nyers adat.';
+
+  @override
+  String get settings_reparseDives_button => 'Összes újraelemzése';
 
   @override
   String get diveComputer_rawData_discardAction => 'Elvetés';
@@ -39740,6 +40666,9 @@ class AppLocalizationsHu extends AppLocalizations {
   String get attrLabel_valve_type => 'Szelep';
 
   @override
+  String get attrLabel_cylinder_use => 'Palack felhasználása';
+
+  @override
   String get attrLabel_tank_identifier => 'Azonosító';
 
   @override
@@ -40096,6 +41025,12 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get attrChoice_valve_type_convertible => 'Átalakítható';
+
+  @override
+  String get attrChoice_cylinder_use_breathing_gas => 'Légzőgáz';
+
+  @override
+  String get attrChoice_cylinder_use_suit_inflation => 'Ruhatöltő palack';
 
   @override
   String get attrChoice_connection_din => 'DIN';
@@ -40591,18 +41526,20 @@ class AppLocalizationsHu extends AppLocalizations {
       'Mélységprofil nélkül a CNS% és az OTU nem számítható ki. Az alábbi összesítések nem tartalmazzák.';
 
   @override
-  String get safetyHub_cnsOtu_about_title => 'A CNS-ről és az OTU-ról';
+  String get safetyHub_tissueLoading_clear_title =>
+      'Nincs maradék szövetterhelés';
 
   @override
-  String get safetyHub_cnsOtu_about_body =>
-      'A CNS% (oxigénóra) a merülés után 90 perces felezési idővel csökken -- körülbelül egy nap múlva gyakorlatilag visszatér 0-ra.\n\nA napi OTU minden éjjel éjfélkor nullázódik. A heti OTU az utolsó 7 nap gördülő összege: a régebbi merülések automatikusan kikerülnek a számításból, amint kiesnek ebből az időablakból.';
+  String get safetyHub_tissueLoading_clear_body =>
+      'Minden kamra ismét egyensúlyban van a felszíni levegővel. A normál szintjükön maradnak (az egyes oszlopokon lévő jelölésnél), nem 0%-on.';
 
   @override
-  String get safetyHub_tissueLoading_about_title => 'A szövettelítődésről';
+  String get safetyHub_tissueLoading_unavailable_title =>
+      'A szövetterhelés nem érhető el';
 
   @override
-  String get safetyHub_tissueLoading_about_body =>
-      'A testednek 16 szövetkompartmentje van, amelyek különböző sebességgel vesznek fel és adnak le nitrogént (trimix- vagy újralégzős merüléseknél héliumot is). A gyors szövetek gyorsan telítődnek és ürülnek; a lassú szövetek mindkettőhöz sokkal több időt igényelnek.\n\nHéliumos merülés után egyazon kompartmentben a nitrogén és a hélium rövid ideig ellentétes irányba mozoghat: amíg a hélium még távozik, ugyanaz a kompartment egyidejűleg kis mennyiségű nitrogént vehet fel, amíg mindkét gáz egyensúlyba nem kerül a belélegzett levegővel. Ezért egy kompartment rövid időre \"Ongassing\" jelzést mutathat, miközben a teljes terhelése továbbra is csökken.';
+  String get safetyHub_tissueLoading_unavailable_body =>
+      'Az utolsó merüléshez nincs adat a szövetterhelés kiszámításához, például mélységprofil nélküli merülésnél, mélységmérő módban vagy setpoint nélküli rebreatherrel.';
 
   @override
   String safetyHub_noFly_category_single(int hours) {
@@ -41053,6 +41990,54 @@ class AppLocalizationsHu extends AppLocalizations {
   String get diveLog_planned_chip => 'Tervezett';
 
   @override
+  String get diveLog_draft_chip => 'Letöltésre vár';
+
+  @override
+  String get diveLog_draft_inWaterChip => 'A vízben';
+
+  @override
+  String get diveLog_draft_title => 'Merülésvázlat';
+
+  @override
+  String diveLog_draft_bannerBody(int minutes) {
+    return 'Körülbelül $minutes perc a koppintásaid alapján. Töltsd le a búvárkomputered adatait a mélység és az idő kitöltéséhez.';
+  }
+
+  @override
+  String get diveLog_draft_bannerBodyOpen =>
+      'Koppints a Felszínen vagyok gombra, amikor kijöttél a vízből.';
+
+  @override
+  String get diveLog_draft_downloadNow => 'Letöltés most';
+
+  @override
+  String get diveLog_draft_markComplete => 'Megjelölés befejezettként';
+
+  @override
+  String get diveLog_draft_surfaced => 'Felszínen vagyok';
+
+  @override
+  String get diveLog_draft_markedComplete => 'Befejezettként megjelölve';
+
+  @override
+  String get diveLog_draft_markCompleteFailed =>
+      'Nem sikerült befejezettként megjelölni a merülést.';
+
+  @override
+  String get diveLog_draft_stale_title => 'Felszínre értél?';
+
+  @override
+  String diveLog_draft_stale_body(String time) {
+    return '$time-kor szálltál vízbe, és a merülés még nyitva van.';
+  }
+
+  @override
+  String get diveLog_draft_stale_stillIn => 'Még a vízben vagyok';
+
+  @override
+  String get diveLog_draft_stale_setTime => 'Felszínre érés idejének megadása';
+
+  @override
   String get diveLog_planned_bannerTitle => 'Tervezett merülés';
 
   @override
@@ -41115,6 +42100,10 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get diveLog_detail_loggedWithPlanned => 'a búvárkomputerére vár';
+
+  @override
+  String get diveLog_detail_menu_addHeartRate =>
+      'Szívfrekvencia hozzáadása az Apple Healthből';
 
   @override
   String diveLog_detail_linkedIncidents(int count) {
@@ -42153,6 +43142,9 @@ class AppLocalizationsHu extends AppLocalizations {
   String get dataQuality_detector_tank_assignment => 'Rossz palack';
 
   @override
+  String get dataQuality_detector_missing_gas_switch => 'Hiányzó gázváltás';
+
+  @override
   String get dataQuality_detector_source_conflict => 'Ütköző források';
 
   @override
@@ -42194,6 +43186,11 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String dataQuality_msg_clock_overlap(int minutes) {
     return '$minutes perccel átfed egy másik merülést';
+  }
+
+  @override
+  String dataQuality_msg_clock_profileFit(int minutes) {
+    return 'Egy forrás $minutes percre van attól a ponttól, ahol a profilja egyezik az elsődlegesével';
   }
 
   @override
@@ -42345,6 +43342,61 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
+  String dataQuality_msg_missingSwitches(int count, String switches) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other:
+          'Nem rögzült gázváltás, de a palacknyomások ezeket a váltásokat mutatják: $switches.',
+      one:
+          'Nem rögzült gázváltás, de a palacknyomások ezt a váltást mutatják: $switches.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String dataQuality_msg_missingSwitchItem(
+    int tankNumber,
+    String gas,
+    String time,
+    String depth,
+  ) {
+    return '$tankNumber. palack ($gas), $time, $depth';
+  }
+
+  @override
+  String get dataQuality_msg_missingSwitchSeparator => '; ';
+
+  @override
+  String dataQuality_msg_missingSwitchDeep(
+    int tankNumber,
+    String gas,
+    String depth,
+    String mod,
+  ) {
+    return 'Nem rögzült gázváltás. A palacknyomások $depth mélységben váltást mutatnak a(z) $tankNumber. palackra ($gas), mélyebben a $mod MOD-jánál, ezért nem javaslunk rá váltást.';
+  }
+
+  @override
+  String dataQuality_msg_missingSwitchDeepAlso(
+    int tankNumber,
+    String gas,
+    String depth,
+    String mod,
+  ) {
+    return 'A palacknyomások $depth mélységben a(z) $tankNumber. palackra ($gas) való váltást is mutatnak, mélyebben a $mod MOD-jánál, ezért nem javaslunk rá váltást.';
+  }
+
+  @override
+  String dataQuality_msg_missingSwitchUnplaced(
+    int tankNumber,
+    String gas,
+    String time,
+  ) {
+    return 'Nem rögzült gázváltás. A(z) $tankNumber. palackból ($gas) szünet után $time időponttól ismét lélegeztek, így közben egy másik palackból lélegeztek, és kettőnél több palacknál a nyomások nem mutatják meg, melyikből. Add hozzá a váltásokat a merülésszerkesztőben.';
+  }
+
+  @override
   String get dataQuality_detector_transmitter_role => 'Jeladó szerepe';
 
   @override
@@ -42409,6 +43461,15 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get dataQuality_repairLabel_fixSourceClockAll =>
       'A számítógép javítása a többi, azonos eltérésű merülésnél is';
+
+  @override
+  String get dataQuality_repairLabel_alignSourceProfile =>
+      'A számítógép igazítása a profilja alapján';
+
+  @override
+  String dataQuality_repairLabel_alignSourceProfileNamed(String computer) {
+    return '$computer igazítása a profilja alapján';
+  }
 
   @override
   String get dataQuality_repairLabel_consolidate => 'Konszolidálás';
@@ -42575,6 +43636,17 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get dataQuality_repairLabel_reassignSeries =>
       'Sorozat áthelyezése másik palackra';
+
+  @override
+  String dataQuality_repairLabel_addGasSwitches(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count gázváltás hozzáadása',
+      one: 'Gázváltás hozzáadása',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get dataQuality_repairLabel_setPrimary =>
@@ -50079,6 +51151,11 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
+  String diveLog_listPage_semanticsDraftDiveAtSite(String siteName) {
+    return 'Merülésvázlat itt: $siteName';
+  }
+
+  @override
   String diveLog_listPage_semanticsPlannedDiveAtSite(String siteName) {
     return 'Tervezett merülés itt: $siteName';
   }
@@ -52494,6 +53571,10 @@ class AppLocalizationsHu extends AppLocalizations {
       'Ehhez a merüléshez nincs profiladat';
 
   @override
+  String get diveLog_estimatedProfile_caption =>
+      'Becslés a maximális mélység és az idő alapján, nem rögzített profil';
+
+  @override
   String get settings_export_progress_divesCsv =>
       'Merülések exportálása CSV-be...';
 
@@ -53431,6 +54512,14 @@ class AppLocalizationsHu extends AppLocalizations {
       'Kis ikon, amely megmutatja, honnan érkezik az egyes elemek tartalma. A problémajelvények mindig láthatók.';
 
   @override
+  String get settings_media_tagBadges =>
+      'Címkejelvények megjelenítése a bélyegképeken';
+
+  @override
+  String get settings_media_tagBadgesSubtitle =>
+      'Kis ikonok a megjelölt személyeket, megjelölt fajokat vagy merülésbeli időpontot tartalmazó fotókhoz.';
+
+  @override
   String get settings_media_autoColorCorrection => 'Automatikus színkorrekció';
 
   @override
@@ -53480,6 +54569,15 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get media_status_notBackedUp => 'Nincs mentve';
+
+  @override
+  String get media_tileMarker_people => 'Személyek megjelölve';
+
+  @override
+  String get media_tileMarker_species => 'Fajok megjelölve';
+
+  @override
+  String get media_tileMarker_timeInDive => 'A merülési profilon elhelyezve';
 
   @override
   String get media_tile_infoMenuItem => 'Média infó';
@@ -55239,7 +56337,7 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String transmitters_apply_content(int tanks, int dives) {
-    return '$tanks palack $dives merülésben viseli ezt a jeladót. Az üres méret-, anyag-, név- és felszerelésmezők kitöltődnek, és a még Hátgázra állított vagy a jeladó nevéből kiolvasott szerep lecserélődik.';
+    return '$tanks palacknak $dives merülésben, amely ezt a jeladót viseli, szüksége van a beállítására. Az üres méret-, anyag-, név- és felszerelésmezők kitöltődnek, és a még Hátgázra állított vagy a jeladó nevéből kiolvasott szerep lecserélődik.';
   }
 
   @override
@@ -55248,8 +56346,43 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
-  String get transmitters_apply_nothing =>
-      'Egyetlen palack sem viseli ezt a jeladót';
+  String transmitters_apply_slot_label(String computer) {
+    return 'Hely ($computer)';
+  }
+
+  @override
+  String get transmitters_apply_slot_none => 'Nincs hely szerinti párosítás';
+
+  @override
+  String transmitters_apply_slot_option(int slot, int dives) {
+    String _temp0 = intl.Intl.pluralLogic(
+      dives,
+      locale: localeName,
+      other: '$dives merülés',
+      one: '$dives merülés',
+    );
+    return 'T$slot: $_temp0';
+  }
+
+  @override
+  String get transmitters_apply_slot_reading => 'Importált fájlok olvasása';
+
+  @override
+  String get transmitters_apply_slot_intro =>
+      'A fájlból importált palackoknak nincs sorozatszáma. Kitölthetők annak a helynek az alapján, amelyet ez a jeladó a búvárkomputeren elfoglalt.';
+
+  @override
+  String transmitters_apply_summary(int serialDives, int slotDives) {
+    return 'Sorozatszám alapján kitöltött merülések: $serialDives, hely alapján: $slotDives';
+  }
+
+  @override
+  String get transmitters_apply_nothing_to_fill =>
+      'Egyetlen palacknak sincs szüksége ennek a jeladónak a beállítására';
+
+  @override
+  String get transmitters_apply_slot_read_failed =>
+      'Az importált fájlokat nem sikerült beolvasni, így a palackok nem párosíthatók foglalat szerint';
 
   @override
   String transmitters_channel(String computer, int channel) {
@@ -56607,6 +57740,9 @@ class AppLocalizationsHu extends AppLocalizations {
   String get query_dives_diveOperator => 'Szolgáltató';
 
   @override
+  String get query_dives_draft => 'Piszkozat';
+
+  @override
   String get query_dives_entryMethod => 'Beszállás módja';
 
   @override
@@ -57586,6 +58722,11 @@ class AppLocalizationsHu extends AppLocalizations {
   String get rules_value_empty => '(üres)';
 
   @override
+  String rules_value_gearViaSet(String item, String set) {
+    return '$item ($set)';
+  }
+
+  @override
   String get rules_collection_diveTypes => 'merüléstípusok';
 
   @override
@@ -57599,6 +58740,9 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get rules_collection_courses => 'tanfolyamok';
+
+  @override
+  String get rules_collection_equipmentSets => 'felszerelés-készletek';
 
   @override
   String get rules_collection_siteTags => 'helyszíncímkék';
@@ -58462,6 +59606,18 @@ class AppLocalizationsHu extends AppLocalizations {
       'A másolat fiókját eltávolították';
 
   @override
+  String settings_backups_alsoCopyTo(String account) {
+    return 'Másolat ide is: $account';
+  }
+
+  @override
+  String get settings_backups_addCopyAccount => 'Másolás egy másik fiókba is';
+
+  @override
+  String get settings_backups_extraCopyMissed =>
+      'Az utolsó mentés nem került fel ebbe a fiókba';
+
+  @override
   String get settings_backups_auto => 'Automatikus mentés';
 
   @override
@@ -58897,6 +60053,29 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get media_library_filter_tags => 'Címkék';
+
+  @override
+  String get media_library_filter_attachedTo => 'Csatolva ehhez';
+
+  @override
+  String get media_library_filter_attachedDive => 'Merülés';
+
+  @override
+  String get media_library_filter_attachedSite => 'Merülőhely';
+
+  @override
+  String get media_library_filter_attachedEquipment => 'Felszerelés';
+
+  @override
+  String get media_library_filter_attachedUnlinked => 'Nem csatolt';
+
+  @override
+  String media_library_filter_attachedToChip(String kinds) {
+    return 'Csatolva ehhez: $kinds';
+  }
+
+  @override
+  String get media_library_filter_listSeparator => ', ';
 
   @override
   String media_bulkTags_confirmAdding(int count) {
@@ -60187,73 +61366,1650 @@ class AppLocalizationsHu extends AppLocalizations {
   }
 
   @override
-  String get diveLog_gasGfWhatIf_tissueTitle => 'Tissue loading';
+  String get twinSet_title => 'Ikerpalack';
 
   @override
-  String get diveLog_gasGfWhatIf_ceilingTitle => 'Depth and ceiling';
+  String get twinSet_none => 'Nem része ikerpalacknak';
 
   @override
-  String get diveLog_gasGfWhatIf_maxPpO2 => 'Max ppO2';
+  String get twinSet_link => 'Társpalack hozzákapcsolása';
 
   @override
-  String get diveLog_gasGfWhatIf_cnsEnd => 'CNS at end';
+  String twinSet_since(String date) {
+    return '$date óta';
+  }
 
   @override
-  String get diveLog_gasGfWhatIf_peakTissue => 'Peak tissue loading';
+  String get twinSet_replace => 'Társ cseréje';
 
   @override
-  String get diveLog_gasGfWhatIf_no => 'No';
+  String get twinSet_unlink => 'Szétválasztás';
 
   @override
-  String get diveLog_gasGfWhatIf_yes => 'Yes';
+  String get twinSet_history => 'Előzmények';
 
   @override
-  String get diveLog_gasGfWhatIf_decoObligation => 'Deco obligation';
+  String twinSet_historyRange(String partner, String from, String to) {
+    return '$partner, $from és $to között';
+  }
 
   @override
-  String get diveLog_gasGfWhatIf_maxCeiling => 'Deepest ceiling';
+  String get twinSet_deletePairing => 'Párosítás törlése';
 
   @override
-  String get diveLog_gasGfWhatIf_decoShort => 'Deco';
+  String get twinSet_deletePairingConfirm =>
+      'Törli ezt a párosítást az előzményekből? A töltések és a merülések nem változnak.';
 
   @override
-  String get diveLog_gasGfWhatIf_minNdl => 'Shortest NDL';
+  String get twinSet_pickerTitle => 'Társpalack';
 
   @override
-  String get diveLog_gasGfWhatIf_metricsTitle => 'How close to deco';
+  String get twinSet_pickerEmpty => 'Nincs más palack a párosításhoz.';
 
   @override
-  String get diveLog_gasGfWhatIf_reset => 'Reset to logged';
+  String get twinSet_pairedOnHelp => 'Párosítva ekkortól';
 
   @override
-  String get diveLog_gasGfWhatIf_firstCylinderNote =>
-      'Oxygen applies to the first cylinder.';
+  String get twinSet_unpairedOnHelp => 'Szétválasztva ekkor';
 
   @override
-  String get diveLog_gasGfWhatIf_gfHighLabel => 'GF high';
+  String get twinSet_pressureMismatchTitle => 'Eltérő üzemi nyomások';
 
   @override
-  String get diveLog_gasGfWhatIf_gfLowLabel => 'GF low';
+  String twinSet_pressureMismatchBody(
+    String a,
+    String aPressure,
+    String b,
+    String bPressure,
+  ) {
+    return '$a üzemi nyomása $aPressure, $b palacké $bPressure. Az összekötött pár egy nyomásra töltődik.';
+  }
 
   @override
-  String get diveLog_gasGfWhatIf_o2Label => 'Oxygen';
+  String get twinSet_continue => 'Folytatás';
 
   @override
-  String get diveLog_gasGfWhatIf_whatIfLabel => 'What if';
+  String get twinSet_replaceTitle => 'Lecseréli a társat?';
 
   @override
-  String get diveLog_gasGfWhatIf_loggedLabel => 'Logged';
+  String twinSet_replaceClash(String cylinder, String partner) {
+    return '$cylinder párja jelenleg $partner.';
+  }
 
   @override
-  String get diveLog_gasGfWhatIf_noProfile =>
-      'This dive has no profile to analyse.';
+  String twinSet_replaceQuestion(String a, String b) {
+    return 'Inkább $a és $b legyen pár?';
+  }
 
   @override
-  String get diveLog_gasGfWhatIf_title => 'What if: gas and GF';
+  String twinSet_leftAlone(String name) {
+    return '$name egyedül marad.';
+  }
 
   @override
-  String get diveLog_detail_menu_gasGfWhatIf => 'What if: gas / GF';
+  String get twinSet_replaceConfirm => 'Csere';
 
   @override
-  String get diveLog_whatIf_fullProfile => 'Include ascent (whole dive)';
+  String get twinSet_clashTitle => 'Átfedő párosítás';
+
+  @override
+  String twinSet_clashBody(String pairs) {
+    return 'Ez átfedi ezt a párosítást: $pairs. Egy palack egy napon csak egy ikerpalack része lehet.';
+  }
+
+  @override
+  String twinSet_pairNames(String a, String b) {
+    return '$a és $b';
+  }
+
+  @override
+  String twinSet_endBeforeStart(String date) {
+    return 'A záró dátumnak $date utáninak kell lennie.';
+  }
+
+  @override
+  String get twinSet_saveFailed => 'Az ikerpalack módosítása nem menthető.';
+
+  @override
+  String twinSet_with(String partner) {
+    return 'Ikerpalack ezzel: $partner';
+  }
+
+  @override
+  String passport_logFill_twinSwitch(String partner) {
+    return 'Az ikerpalack mindkét palackja ($partner)';
+  }
+
+  @override
+  String twinSet_partnerStatus(String partner, String status) {
+    return '$partner, $status';
+  }
+
+  @override
+  String get passport_logFill_editTitle => 'Töltés szerkesztése';
+
+  @override
+  String get passport_logFill_overPressureTitle => 'Az üzemi nyomás felett';
+
+  @override
+  String passport_logFill_overPressureBody(
+    String pressure,
+    String name,
+    String workingPressure,
+  ) {
+    return '$pressure meghaladja $name üzemi nyomását ($workingPressure).';
+  }
+
+  @override
+  String get passport_logFill_saveAnyway => 'Mentés mégis';
+
+  @override
+  String get passport_logFill_back => 'Vissza';
+
+  @override
+  String passport_logFill_applyToTied(String partner) {
+    return '$partner töltésére is alkalmazza?';
+  }
+
+  @override
+  String get passport_logFill_applyBoth => 'Igen';
+
+  @override
+  String get passport_logFill_onlyThisOne => 'Csak ezt';
+
+  @override
+  String get passport_history_anotherCylinder => 'egy másik palack';
+
+  @override
+  String passport_history_filledWith(String partner) {
+    return '$partner palackkal együtt töltve';
+  }
+
+  @override
+  String get passport_history_deleteTiedBody =>
+      'Mindkét palackról törli ezt a töltést, vagy csak erről?';
+
+  @override
+  String get passport_history_deleteBoth => 'Mindkét palack';
+
+  @override
+  String get passport_history_edit => 'Töltés szerkesztése';
+
+  @override
+  String get twinSet_choiceTitle => 'Az ikerpalackot használja?';
+
+  @override
+  String twinSet_choicePair(String a, String b, String volume) {
+    return 'Ikerpalack ($a + $b, $volume)';
+  }
+
+  @override
+  String twinSet_choiceSingle(String a) {
+    return 'Csak $a';
+  }
+
+  @override
+  String get settings_conflict_field_pairedOn => 'Párosítva ekkortól';
+
+  @override
+  String get settings_conflict_field_unpairedOn => 'Szétválasztva ekkor';
+
+  @override
+  String get settings_conflict_field_filledTogetherId => 'Ikerpalack-töltés';
+
+  @override
+  String get settings_conflict_field_twinPassportId => 'Társpalack útlevele';
+
+  @override
+  String info_button_semantics(String title) {
+    return 'Tudnivalók: $title';
+  }
+
+  @override
+  String get info_sheet_background => 'Háttér';
+
+  @override
+  String get info_sheet_howToUse => 'Használat';
+
+  @override
+  String get info_sheet_close => 'Bezárás';
+
+  @override
+  String get info_term_ndl_label => 'NDL (dekompressziómentes határ)';
+
+  @override
+  String get info_term_ndl_body =>
+      'A jelenlegi mélységben hátralévő percek, mielőtt a modell dekompressziós megállókat ír elő. Csökken, amíg a búvár mélyen marad, és felemelkedéskor újra nő.';
+
+  @override
+  String get info_term_ceiling_label => 'Plafon';
+
+  @override
+  String get info_term_ceiling_body =>
+      'A legkisebb mélység, amelyet a dekompressziós modell abban a pillanatban megenged. A nulla azt jelenti, hogy a közvetlen felszínre emelkedés belefér a modellbe.';
+
+  @override
+  String get info_term_decoStops_label => 'Dekómegállók';
+
+  @override
+  String info_term_decoStops_body(String step) {
+    return 'Tervezett szünetek felfelé jövet, mindegyik egy mélységgel és egy időtartammal, amelyek alatt az oldott gáz távozik a testből. A megállók általában $step távolságra vannak egymástól.';
+  }
+
+  @override
+  String get info_term_tts_label => 'TTS (felszínig hátralévő idő)';
+
+  @override
+  String get info_term_tts_body =>
+      'Innen a felszínig szükséges percek, az emelkedéssel és minden kötelező megállóval együtt.';
+
+  @override
+  String get info_term_gtr_label => 'GTR (hátralévő gázidő)';
+
+  @override
+  String get info_term_gtr_body =>
+      'Percek a jelenlegi mélységben és légzési ütemben, amíg a palack a tartaléknyomásra esik. Megállók nélküli, közvetlen emelkedést feltételez.';
+
+  @override
+  String get info_term_gf99_label => 'GF99';
+
+  @override
+  String get info_term_gf99_body =>
+      'Mennyire van most közel a legterheltebb szövet az M-értékéhez, százalékban. 100%-nál pontosan a módosítatlan Buhlmann-határon van.';
+
+  @override
+  String get info_term_surfaceGf_label => 'SurfGF (felszíni gradiensfaktor)';
+
+  @override
+  String get info_term_surfaceGf_body =>
+      'Az a GF99, amely a szövetekre jellemző lenne, ha a búvár azonnal a felszínre jönne. 100% fölött a felszínen túllépné a módosítatlan Buhlmann-határt.';
+
+  @override
+  String get info_term_gradientFactors_label => 'GF (gradiensfaktorok)';
+
+  @override
+  String get info_term_gradientFactors_body =>
+      'Két százalék, amely szűkíti a Buhlmann-határokat: a GF Low az első megálló helyét, a GF High a felszínre érkezés határát állítja be. Alacsonyabb értékek hosszabb, óvatosabb tervet adnak.';
+
+  @override
+  String get info_term_cns_label =>
+      'CNS% (központi idegrendszeri oxigénterhelés)';
+
+  @override
+  String get info_term_cns_body =>
+      'Az egy merülésre vonatkozó, agyat és idegeket érintő oxigénhatár része a NOAA ppO2-táblázata szerint. A felszínen nagyjából 90 percenként feleződik.';
+
+  @override
+  String get info_term_otu_label => 'OTU (oxigéntolerancia-egység)';
+
+  @override
+  String get info_term_otu_body =>
+      'Lassabb, az egész testre ható oxigéndózis, amely több búvárnap alatt összeadódik. Egy OTU egy perc tiszta oxigén 1 bar nyomáson.';
+
+  @override
+  String get info_term_ppO2_label => 'ppO2 (oxigén parciális nyomása)';
+
+  @override
+  String get info_term_ppO2_body =>
+      'A légzőgázban egyedül az oxigén által kifejtett nyomás ebben a mélységben, barban. A szokásos határ munkavégzés közben 1,4 bar, dekompresszió alatt 1,6 bar.';
+
+  @override
+  String get info_term_ppN2_label => 'ppN2 (nitrogén parciális nyomása)';
+
+  @override
+  String get info_term_ppN2_body =>
+      'A légzőgáz nitrogénje által kifejtett nyomás ebben a mélységben, barban. Ez határozza meg a nitrogénfelvételt és a narkózist.';
+
+  @override
+  String get info_term_ppHe_label => 'ppHe (hélium parciális nyomása)';
+
+  @override
+  String get info_term_ppHe_body =>
+      'A légzőgáz héliuma által kifejtett nyomás ebben a mélységben, barban. A hélium gyorsabban telít és deszaturál, mint a nitrogén, és nem narkotikus.';
+
+  @override
+  String get info_term_o2Cells_label => 'O2-cellák';
+
+  @override
+  String get info_term_o2Cells_body =>
+      'Egy rebreather hurokjában lévő érzékelők, amelyek egyenként mérik a ppO2-t. Az eltérő értékek meghibásodó vagy nedves cellára utalnak.';
+
+  @override
+  String get info_term_mod_label => 'MOD (maximális üzemi mélység)';
+
+  @override
+  String get info_term_mod_body =>
+      'Az a mélység, ahol egy gáz eléri a ppO2-határát. Ennél mélyebben az oxigénterhelés a határ fölött van.';
+
+  @override
+  String get info_term_mnd_label => 'MND (maximális narkotikus mélység)';
+
+  @override
+  String get info_term_mnd_body =>
+      'Az a legnagyobb mélység, ahol egy gáz a búvár END-határán belül marad. A keverékben lévő hélium mélyebbre tolja.';
+
+  @override
+  String get info_term_end_label => 'END (egyenértékű narkotikus mélység)';
+
+  @override
+  String get info_term_end_body =>
+      'Az a levegős mélység, amely ugyanolyan narkotikus lenne, mint ez a gáz ebben a mélységben. A hélium csökkenti, mert nem narkotikus.';
+
+  @override
+  String get info_term_ead_label => 'EAD (egyenértékű levegőmélység)';
+
+  @override
+  String get info_term_ead_body =>
+      'Az a levegős mélység, amely ugyanolyan ütemben telítene nitrogénnel, mint ez a nitrox ebben a mélységben. Kisebb a valódi mélységnél, mert a nitrox kevesebb nitrogént tartalmaz.';
+
+  @override
+  String get info_term_eadd_label =>
+      'EADD (egyenértékű levegősűrűségi mélység)';
+
+  @override
+  String get info_term_eadd_body =>
+      'Az a mélység, ahol a levegő olyan sűrű lenne, mint ez a gáz ebben a mélységben. A g/L-ben megadott sűrűséggel ellentétben nem függ a hőmérséklettől.';
+
+  @override
+  String get info_term_gasDensity_label => 'Gázsűrűség';
+
+  @override
+  String info_term_gasDensity_body(String warn, String critical) {
+    return 'Milyen nehéz a légzőgáz a mélyben, gramm per literben, ami a légzés nehézségét határozza meg. A publikált kutatás $warn g/l-t ajánlott maximumként, $critical g/l-t felső határként említ.';
+  }
+
+  @override
+  String get info_term_sac_label => 'SAC (felszíni levegőfogyasztás)';
+
+  @override
+  String get info_term_sac_body =>
+      'Percenkénti gázfogyasztás felszíni nyomásra átszámítva, percenkénti nyomásesésként kijelezve. A palack méretétől függ, ezért azonos palackkal tett merüléseket hasonlít össze.';
+
+  @override
+  String get info_term_rmv_label => 'RMV (légzési perctérfogat)';
+
+  @override
+  String get info_term_rmv_body =>
+      'Percenként belélegzett gáztérfogat felszíni nyomásra átszámítva. A SAC-kal ellentétben nem függ a palack méretétől.';
+
+  @override
+  String get info_term_ascentRate_label => 'Emelkedési sebesség';
+
+  @override
+  String info_term_ascentRate_body(String rate) {
+    return 'Milyen gyorsan csökken a mélység percenként. A szokásos képzés $rate értéket vesz maximumnak.';
+  }
+
+  @override
+  String get info_term_descentRate_label => 'Süllyedési sebesség';
+
+  @override
+  String get info_term_descentRate_body =>
+      'Milyen gyorsan nő a mélység percenként.';
+
+  @override
+  String get info_term_meanDepth_label => 'Átlagmélység';
+
+  @override
+  String get info_term_meanDepth_body =>
+      'A merülés időarányosan súlyozott átlagmélysége. A gázfogyasztás és a dekompresszió jobban követi, mint a maximális mélységet.';
+
+  @override
+  String get info_term_bottomTime_label => 'Fenékidő';
+
+  @override
+  String get info_term_bottomTime_body =>
+      'A felszín elhagyásától az utolsó emelkedés kezdetéig eltelt idő. A profilból számítjuk.';
+
+  @override
+  String get info_term_runtime_label => 'Teljes merülési idő';
+
+  @override
+  String get info_term_runtime_body =>
+      'A felszín elhagyásától a felszínre érkezésig eltelt teljes idő. A technikai merülési tervek ehhez igazodnak.';
+
+  @override
+  String get info_term_safetyStop_label => 'Biztonsági megálló';
+
+  @override
+  String info_term_safetyStop_body(String depth) {
+    return 'Nem kötelező szünet $depth közelében, általában három perc, a felszínre érkezés előtt. A modell dekompressziómentes merülésnél nem írja elő.';
+  }
+
+  @override
+  String get info_term_surfaceInterval_label => 'Felszíni idő';
+
+  @override
+  String get info_term_surfaceInterval_body =>
+      'Két merülés között a felszínen töltött idő. A szövetek közben tovább adják le a gázt, így hosszabb szünet kevesebbet visz át a következő merülésre.';
+
+  @override
+  String get info_term_tissueCompartment_label => 'Szövetkompartmentek';
+
+  @override
+  String get info_term_tissueCompartment_body =>
+      'A modell 16 elképzelt szövete, amelyek mind a saját ütemükben vesznek fel és adnak le gázt. A gyorsak a jól vérellátott szöveteket, a lassúak a zsírt és a csontot jelképezik.';
+
+  @override
+  String get info_term_leadingCompartment_label => 'Vezető kompartment';
+
+  @override
+  String get info_term_leadingCompartment_body =>
+      'Az a kompartment, amely éppen a legközelebb van a határához. Ez határozza meg a plafont, és merülés közben változik.';
+
+  @override
+  String get info_term_tissueLoad_label => 'Terhelés';
+
+  @override
+  String get info_term_tissueLoad_body =>
+      'Mennyi inert gázt tartalmaz egy kompartment a határához képest, százalékban. 100%-nál az M-értékén van.';
+
+  @override
+  String get info_term_mValue_label => 'M-érték';
+
+  @override
+  String get info_term_mValue_body =>
+      'Az a legnagyobb inertgáz-nyomás, amelyet egy kompartment adott mélységben a Buhlmann-modell szerint megtarthat. A gradiensfaktorok szabják meg, mennyit használunk ki belőle.';
+
+  @override
+  String get info_term_surfaceLevel_label => 'Felszíni szint';
+
+  @override
+  String get info_term_surfaceLevel_body =>
+      'Az a gáznyomás, amely egy kompartmentben a felszínen, levegőn teljesen kiegyenlítődve van. A vonal fölötti oszlopok még többletgázt hordoznak.';
+
+  @override
+  String get info_term_halfTime_label => 'Felezési idő';
+
+  @override
+  String get info_term_halfTime_body =>
+      'Ennyi perc alatt teszi meg egy kompartment a környezeti nyomás felé vezető út felét. A tartomány néhány perctől tíz óránál is többig terjed.';
+
+  @override
+  String get info_term_ongassing_label => 'Telítődés és deszaturáció';
+
+  @override
+  String get info_term_ongassing_body =>
+      'Telítődéskor a kompartment gázt vesz fel, mert a környezeti nyomás nagyobb, deszaturációkor gázt ad le. A szín mutatja, melyik irányba halad az egyes kompartment.';
+
+  @override
+  String get info_term_heatMap_label => 'Hőtérkép';
+
+  @override
+  String get info_term_heatMap_body =>
+      'Minden sor egy kompartment, fent a gyorsak, lent a lassúak, az idő balról jobbra halad. A szín mutatja, mennyire terhelt az adott kompartment abban a pillanatban.';
+
+  @override
+  String get info_term_nitrox_label => 'Nitrox (EANx)';
+
+  @override
+  String get info_term_nitrox_body =>
+      'Oxigénnel dúsított levegő, oxigénszázaléka szerint elnevezve, például EAN32. A kevesebb nitrogén meghosszabbítja a dekompressziómentes időt, a több oxigén sekélyebbé teszi a MOD-ot.';
+
+  @override
+  String get info_term_trimix_label => 'Trimix';
+
+  @override
+  String get info_term_trimix_body =>
+      'Oxigén, hélium és nitrogén keveréke, oxigén per hélium alakban írva, például 18/45. A hélium csökkenti a narkózist és a gázsűrűséget a mélyben.';
+
+  @override
+  String get info_term_diluent_label => 'Hígítógáz';
+
+  @override
+  String get info_term_diluent_body =>
+      'Az a gáz, amelyet a rebreather a hurokba ad a térfogat fenntartásához. A készülék ezen felül oxigént ad hozzá a setpoint tartásához.';
+
+  @override
+  String get info_term_setpoint_label => 'Setpoint';
+
+  @override
+  String get info_term_setpoint_body =>
+      'Az a ppO2, amelyet egy zárt rendszerű rebreather a hurokban tartani próbál. A készülékek merülés közben gyakran váltanak alacsony és magas setpoint között.';
+
+  @override
+  String get info_term_bailout_label => 'Bailout';
+
+  @override
+  String get info_term_bailout_body =>
+      'Nyitott rendszerű gáz, amelyet rebreatheres merülésen visznek a hurkon kívüli emelkedéshez. A bailout-tervek a hurok elvesztésével számolnak.';
+
+  @override
+  String get info_term_loop_label => 'Hurok';
+
+  @override
+  String get info_term_loop_body =>
+      'A rebreather légzőköre, ahol a kilélegzett gázból eltávolítják a szén-dioxidot, és újra belélegzik.';
+
+  @override
+  String get info_term_stage_label => 'Stage';
+
+  @override
+  String get info_term_stage_body =>
+      'Oldalra csatolt plusz palack, amelyet a merülés egy szakaszára visznek, és útközben átváltanak rá.';
+
+  @override
+  String get info_term_decoGas_label => 'Dekógáz';
+
+  @override
+  String get info_term_decoGas_body =>
+      'Oxigénben gazdagabb gáz, amelyet a dekómegállókon lélegeznek. Sekély mélységben gyorsítja a deszaturációt.';
+
+  @override
+  String get info_term_pony_label => 'Pony';
+
+  @override
+  String get info_term_pony_body =>
+      'Kis, önálló palack saját légzőautomatával, tartalék gázforrásként viszik.';
+
+  @override
+  String get info_term_sidemount_label => 'Sidemount';
+
+  @override
+  String get info_term_sidemount_body =>
+      'A hát helyett oldalt viselt palackok, mindegyik saját légzőautomatával.';
+
+  @override
+  String get info_term_twinBackmount_label => 'Ikerpalack';
+
+  @override
+  String get info_term_twinBackmount_body =>
+      'Két, a háton összekapcsolt palack, általában hídcsappal, egy forrásként lélegezve.';
+
+  @override
+  String get info_term_altitudeGroup_label => 'Magassági csoport';
+
+  @override
+  String get info_term_altitudeGroup_body =>
+      'Magassági sáv, amelyre ugyanazok a táblázatok és modellbeállítások érvényesek. Magasabb csoportokban kisebb a légnyomás a felszínen.';
+
+  @override
+  String get info_term_surfacePressure_label => 'Felszíni nyomás';
+
+  @override
+  String get info_term_surfacePressure_body =>
+      'A légnyomás a merülőhely felszínén. Magasban kisebb, így a modell óvatosabban számol.';
+
+  @override
+  String get info_term_salinity_label => 'Víz típusa';
+
+  @override
+  String get info_term_salinity_body =>
+      'A sós víz sűrűbb az édesvíznél, ezért ugyanaz a nyomás tengerben kicsit kisebb mélységnek felel meg. A komputerek ezzel számítják a nyomásból a mélységet.';
+
+  @override
+  String get info_term_isobaricCounterdiffusion_label =>
+      'ICD (izobár ellendiffúzió)';
+
+  @override
+  String get info_term_isobaricCounterdiffusion_body =>
+      'Gázváltás mélységváltozás nélkül is növelheti a szövetek teljes inertgáz-tartalmát, ha a nitrogén gyorsabban nő, mint ahogy a hélium csökken. A szokásos ellenőrzés, az ötödszabály, a nitrogén növekedését a héliumcsökkenés egyötödére korlátozza.';
+
+  @override
+  String get info_term_hypercapnia_label => 'Hiperkapnia';
+
+  @override
+  String get info_term_hypercapnia_body =>
+      'Szén-dioxid felhalmozódása a szervezetben. Sűrű gáz és nehéz munka valószínűbbé teszi.';
+
+  @override
+  String get info_term_turnPressure_label => 'Visszafordulási nyomás';
+
+  @override
+  String get info_term_turnPressure_body =>
+      'Az a palacknyomás, amelynél a terv a merülést a kijárat felé fordítja.';
+
+  @override
+  String get info_term_minGas_label => 'Minimális gáz';
+
+  @override
+  String get info_term_minGas_body =>
+      'Visszatartott gáz, hogy két búvár a legmélyebb ponttól a felszínig egy forráson osztozhasson, megállókkal együtt.';
+
+  @override
+  String get info_term_rockBottom_label => 'Rock bottom';
+
+  @override
+  String get info_term_rockBottom_body =>
+      'Az a palacknyomás, amely a minimális gázt tartalmazza. Benne van egy rövid idő a mélyben a probléma kezelésére az emelkedés előtt.';
+
+  @override
+  String get info_term_thirds_label => 'Harmadszabály';
+
+  @override
+  String get info_term_thirds_body =>
+      'Gázterv, amely egyharmadot befelé, egyharmadot kifelé használ, és egyharmadot tartalékban tart. Barlangi és zárt terű képzésen tanítják.';
+
+  @override
+  String get info_term_airBreaks_label => 'Levegőszünetek';
+
+  @override
+  String get info_term_airBreaks_body =>
+      'Rövid szakaszok alacsonyabb oxigéntartalmú gázzal hosszú oxigénes megállók közben. Csökkentik a CNS-terhelést.';
+
+  @override
+  String get info_term_rollingAverage_label => 'Mozgóátlag';
+
+  @override
+  String get info_term_rollingAverage_body =>
+      'Az utolsó néhány merülés átlaga minden pontban, amely kisimítja a merülések közti ingadozást, hogy látszódjon a trend.';
+
+  @override
+  String get info_term_overallTrend_label => 'Általános trend';
+
+  @override
+  String get info_term_overallTrend_body =>
+      'A tartomány összes merülésére illesztett egyenes, amely az értékek általános irányát mutatja.';
+
+  @override
+  String get info_term_rangeBand_label => 'Tartománysáv';
+
+  @override
+  String get info_term_rangeBand_body =>
+      'Az árnyékolt sáv minden időszakban a legkisebb értéktől a legnagyobbig terjed.';
+
+  @override
+  String get info_term_collapseGaps_label => 'Szünetek összecsukása';
+
+  @override
+  String get info_term_collapseGaps_body =>
+      'Eltávolítja az időtengelyről a merülések közti hosszú szüneteket, így a merülések egymás mellé kerülnek.';
+
+  @override
+  String get info_term_degreeHeatingWeeks_label =>
+      'DHW (felmelegedési fokhetek)';
+
+  @override
+  String get info_term_degreeHeatingWeeks_body =>
+      'Az elmúlt 12 hétben felhalmozódott hőstressz a NOAA Coral Reef Watch adatai szerint. A NOAA 4-től jelentős, 8-tól súlyos korallfehéredést vár.';
+
+  @override
+  String get info_term_sstAnomaly_label =>
+      'Tengerfelszín-hőmérsékleti anomália';
+
+  @override
+  String get info_term_sstAnomaly_body =>
+      'Mennyivel van a tengerfelszín hőmérséklete az adott napra vonatkozó hosszú távú átlag felett vagy alatt.';
+
+  @override
+  String get info_term_bleachingAlert_label => 'Fehéredési riasztás';
+
+  @override
+  String get info_term_bleachingAlert_body =>
+      'A NOAA Coral Reef Watch hőstressz-szintje a területre, a figyeléstől a riasztási szintekig.';
+
+  @override
+  String get info_term_sourceDcCalc_label => 'Búvárkomputer vagy számított';
+
+  @override
+  String get info_term_sourceDcCalc_body =>
+      'A búvárkomputer értékei azok, amelyeket a merülés közben rögzített. A számított értékek az alkalmazás saját modelljéből jönnek a profil alapján, így a kettő eltérhet.';
+
+  @override
+  String get info_term_scrubber_label => 'Mésztartály';
+
+  @override
+  String get info_term_scrubber_body =>
+      'A rebreather tartálya, amely eltávolítja a szén-dioxidot a hurokból. Az elnyelőanyag meghatározott óraszámra van méretezve.';
+
+  @override
+  String get info_term_cellOutput_label => 'Cellafeszültség';
+
+  @override
+  String get info_term_cellOutput_body =>
+      'Az egyes oxigéncellák millivoltos jele, amelyet a rebreather ppO2-vé alakít.';
+
+  @override
+  String get info_term_highO2Hours_label => 'Magas oxigéntartalmú órák';
+
+  @override
+  String get info_term_highO2Hours_body =>
+      'Megnövelt oxigénarányú gáz belélegzésével töltött idő, amely gyorsabban koptatja az oxigénkompatibilis alkatrészeket.';
+
+  @override
+  String get info_term_decoStatus_label => 'DEKÓ és DEKÓMENTES';
+
+  @override
+  String get info_term_decoStatus_body =>
+      'A DEKÓMENTES azt jelenti, hogy abban a pillanatban a közvetlen emelkedés belefér a modellbe. A DEKÓ azt jelenti, hogy a felszínre érés előtt legalább egy megálló kell.';
+
+  @override
+  String get info_term_cnsStartAdded_label => 'Kezdet és ez a merülés';
+
+  @override
+  String get info_term_cnsStartAdded_body =>
+      'A kezdet a korábbi merülésekből áthozott CNS%, az azóta eltelt idővel már csökkentve. Ez a merülés az, amit maga a merülés hozzáadott.';
+
+  @override
+  String get info_term_otuWindows_label => 'Napi és heti OTU';
+
+  @override
+  String get info_term_otuWindows_body =>
+      'A napi OTU az éjfél óta tett merüléseket számolja, a heti OTU az utolsó hét nap gördülő összege. Mindkettő az alkalmazás adott időszakra vonatkozó határa mellett látható.';
+
+  @override
+  String get info_term_maxPpO2_label => 'Max. ppO2';
+
+  @override
+  String get info_term_maxPpO2_body =>
+      'A merülés során belélegzett legnagyobb oxigén parciális nyomás.';
+
+  @override
+  String get info_term_timeAboveLimit_label => 'ppO2-határ fölötti idő';
+
+  @override
+  String get info_term_timeAboveLimit_body =>
+      'Mennyi ideig volt a ppO2 a beállításokban megadott határok fölött ezen a merülésen.';
+
+  @override
+  String get info_term_idealSwitchDepth_label => 'Ideális váltási mélység';
+
+  @override
+  String get info_term_idealSwitchDepth_body =>
+      'Az emelkedés legmélyebb pontja, ahol a következő gáz a ppO2-határán belül van, vagyis a MOD-ja. A kártya ezt veti össze azzal a mélységgel, ahol a váltás naplózva lett.';
+
+  @override
+  String get info_term_extraDeco_label => 'Többlet dekó';
+
+  @override
+  String get info_term_extraDeco_body =>
+      'Dekompressziós idő, amelyet a modell azért ad hozzá, mert a váltás sekélyebben vagy később történt az ideális pontnál.';
+
+  @override
+  String get info_term_stackedArea_label => 'Halmozott terület';
+
+  @override
+  String get info_term_stackedArea_body =>
+      'Minden sáv egy kompartment terhelése az időben, a többire halmozva, így a teljes magasság az összes kompartment terhelését mutatja.';
+
+  @override
+  String get info_term_nitrogenHelium_label => 'N2 és He';
+
+  @override
+  String get info_term_nitrogenHelium_body =>
+      'Minden kompartment terhelése nitrogénre és héliumra oszlik. A hélium gyorsabban jut be és távozik, mint a nitrogén.';
+
+  @override
+  String get info_term_missedDecoStop_label => 'Kihagyott dekómegálló';
+
+  @override
+  String get info_term_missedDecoStop_body =>
+      'Kötelező megálló, amely rövidebb volt vagy kimaradt, a profil és a modell megállóinak összevetéséből.';
+
+  @override
+  String get info_term_sawtooth_label => 'Fűrészfog profil';
+
+  @override
+  String get info_term_sawtooth_body =>
+      'Ismételt emelkedések és süllyedések merülés közben. A dekompressziós kutatás több buborékképződéssel hozza összefüggésbe.';
+
+  @override
+  String get info_term_lateGasSwitch_label => 'Késői gázváltás';
+
+  @override
+  String get info_term_lateGasSwitch_body =>
+      'Dekógázra váltás jóval sekélyebben vagy később annál a pontnál, ahol a gáz használhatóvá vált.';
+
+  @override
+  String get info_term_avgVerticalSpeed_label => 'Átlagos függőleges sebesség';
+
+  @override
+  String get info_term_avgVerticalSpeed_body =>
+      'A mélységváltozás átlagos üteme a kijelölt tartományban.';
+
+  @override
+  String get info_term_computedEvents_label => 'Számított események';
+
+  @override
+  String get info_term_computedEvents_body =>
+      'Jelölések, amelyeket az alkalmazás a profilból olvas ki, például gyors emelkedések, szemben a búvárkomputer által naplózott eseményekkel.';
+
+  @override
+  String get info_term_gasSwitchMarkers_label => 'Gázváltás-jelölők';
+
+  @override
+  String get info_term_gasSwitchMarkers_body =>
+      'Pontok, ahol a légzőgáz egyik palackról a másikra váltott.';
+
+  @override
+  String get info_term_diveModes_label => 'Merülési mód';
+
+  @override
+  String get info_term_diveModes_body =>
+      'Nyitott rendszerben (OC) minden kilégzés a vízbe távozik. A zárt (CCR) és félig zárt (SCR) rebreatherek hurokban újrahasznosítják a gázt.';
+
+  @override
+  String get info_term_netBuoyancy_label => 'Nettó felhajtóerő';
+
+  @override
+  String get info_term_netBuoyancy_body =>
+      'Minden tag összeadva, a felhajtóerő pozitív, a súly negatív. A nulla a semleges.';
+
+  @override
+  String get info_term_buoyancySwing_label => 'Felhajtóerő-ingadozás';
+
+  @override
+  String get info_term_buoyancySwing_body =>
+      'Mennyit változott a nettó felhajtóerő a merülés eleje és vége között, főleg a belélegzett gáz súlya miatt.';
+
+  @override
+  String get info_term_peakLift_label => 'Szükséges legnagyobb felhajtóerő';
+
+  @override
+  String get info_term_peakLift_body =>
+      'A legnagyobb felhajtóerő, amelyet a wingnek vagy a szárazruhának a merülés bármely pontján hozzá kellett adnia a semlegességhez.';
+
+  @override
+  String get info_term_minDitchable_label => 'Minimális ledobható súly';
+
+  @override
+  String info_term_minDitchable_body(String weight) {
+    return 'Az a súly, amelyet a merülés legnehezebb pontján le kellene dobni, hogy nagyjából $weight pozitív felhajtóerő legyen.';
+  }
+
+  @override
+  String get info_term_drysuitGas_label => 'Szárazruhába adott gáz';
+
+  @override
+  String get info_term_drysuitGas_body =>
+      'A szárazruhába lefelé menet adott gáz a szorítás kiegyenlítésére, felhajtóerőként számolva.';
+
+  @override
+  String get info_term_noFlyTime_label => 'Repülési tilalom ideje';
+
+  @override
+  String get info_term_noFlyTime_body =>
+      'Az utolsó merüléstől addig eltelt idő, amíg a DAN és UHMS repülésre vonatkozó irányelve szerinti intervallum le nem telik. Az intervallum attól függ, hogy egyszeri, ismételt vagy dekompressziós merülések voltak-e, és a beállításokban választott előbeállítástól.';
+
+  @override
+  String get info_term_perYearRate_label => 'Éves ütem';
+
+  @override
+  String get info_term_perYearRate_body =>
+      'Az általános trendvonal meredeksége egy évre vetített változásként.';
+
+  @override
+  String get info_term_loggedBeforeMeasurement_label => 'Mérés előtt rögzítve';
+
+  @override
+  String get info_term_loggedBeforeMeasurement_body =>
+      'Szóval rögzített látótávolság, például jó vagy gyenge, mielőtt az alkalmazás távolságként mentette volna. Ezek a merülések megtartják az eredeti szót.';
+
+  @override
+  String get info_term_spansBands_label => 'Több sávon át';
+
+  @override
+  String get info_term_spansBands_body =>
+      'Tartományként rögzített látótávolság, amely egynél több sávot fed le, ezért külön számít.';
+
+  @override
+  String get info_term_dawnDusk_label => 'Hajnal és alkony';
+
+  @override
+  String get info_term_dawnDusk_body =>
+      'A hajnali merülés napkelte előtt kezdődik és utána ér véget, az alkonyi ugyanígy a napnyugta körül. Az éjszaka azt jelenti, hogy az egész merülés sötétben zajlott.';
+
+  @override
+  String get info_term_calendarShading_label => 'Árnyalás';
+
+  @override
+  String get info_term_calendarShading_body =>
+      'Minden négyzet az év egy napja, a sötétebb négyzet több merülést jelent azon a napon a tartomány összes évében.';
+
+  @override
+  String get info_term_saltWaterHours_label => 'Sós vízi órák';
+
+  @override
+  String get info_term_saltWaterHours_body =>
+      'Sós vagy brakkvízben töltött idő, amely gyorsabban koptatja a fémalkatrészeket és tömítéseket, mint az édesvíz.';
+
+  @override
+  String get info_term_coldDives_label => 'Hideg merülések';
+
+  @override
+  String get info_term_coldDives_body =>
+      'Merülések, ahol a legalacsonyabb vízhőmérséklet a felszerelésállapot-beállítások hidegvízi küszöbe alatt volt.';
+
+  @override
+  String get info_term_deepCycles_label => 'Mély merülések';
+
+  @override
+  String get info_term_deepCycles_body =>
+      'Merülések, amelyek elérték a felszerelésállapot-beállítások mélymerülési küszöbét, mindegyik teljes nyomásciklus a felszerelésnek.';
+
+  @override
+  String get info_term_conditionRules_label => 'Állapotszabályok';
+
+  @override
+  String get info_term_conditionRules_body =>
+      'Ellenőrzések, amelyeket az alkalmazás a naplózott merüléseken és problémákon futtat, például idővel gyengülő oxigéncellák vagy visszatérő hiba. Mindegyik kikapcsolható a beállításokban.';
+
+  @override
+  String get info_term_standout_label => 'Kiemelkedik';
+
+  @override
+  String get info_term_standout_body =>
+      'Olyan tényező, amelynek aránya a fókuszmerülések között jól láthatóan eltér a többi merülésétől. A táblázatban pont jelöli.';
+
+  @override
+  String get info_term_avgMaxDepth_label => 'Átl. mélység';
+
+  @override
+  String get info_term_avgMaxDepth_body =>
+      'A merülések legnagyobb mélységének átlaga, nem a merüléseken belüli átlagmélység.';
+
+  @override
+  String get info_term_diveTypeCounting_label => 'Merüléstípusok';
+
+  @override
+  String get info_term_diveTypeCounting_body =>
+      'A több típusú merülés mindegyik alatt egyszer számít, ezért az oszlopok összege több lehet a merülések számánál.';
+
+  @override
+  String get info_term_gasMixCounting_label => 'Több keverék';
+
+  @override
+  String get info_term_gasMixCounting_body =>
+      'Az egynél több keveréket használó merülés mindegyik alatt egyszer számít, ezért az oszlopok összege több lehet a merülések számánál.';
+
+  @override
+  String get info_term_cylinderRole_label => 'Palack szerepe';
+
+  @override
+  String get info_term_cylinderRole_body =>
+      'Mire szolgált a palack a merülésen: fenékgáz, stage, dekó, pony vagy bailout. A fogyasztás e szerint csoportosul.';
+
+  @override
+  String get info_term_colourBy_label => 'Színezés';
+
+  @override
+  String get info_term_colourBy_body =>
+      'A típus minden pontot aszerint színez, mi az, a csoportok az együtt merülő csoportokat, a frissesség pedig halványítja a régóta nem használt kapcsolatokat.';
+
+  @override
+  String get info_term_weightedEdges_label => 'Súlyozott kapcsolatok';
+
+  @override
+  String get info_term_weightedEdges_body =>
+      'A vastagabb vonal több közös merülést jelent az általa összekötött két pont között.';
+
+  @override
+  String get info_term_hops_label => 'Lépések';
+
+  @override
+  String get info_term_hops_body =>
+      'Hány kapcsolatnyira terjed a nézet a kiválasztott ponttól. Egy lépés csak a közvetlen kapcsolatait mutatja.';
+
+  @override
+  String get info_term_lastStop_label => 'Utolsó megálló';
+
+  @override
+  String get info_term_lastStop_body =>
+      'A legsekélyebb dekómegálló mélysége. A mélyebb utolsó megálló hullámzásban könnyebben tartható, de tovább tart.';
+
+  @override
+  String get info_term_ascentStages_label => 'Emelkedési szakaszok';
+
+  @override
+  String get info_term_ascentStages_body =>
+      'A terv az emelkedés minden részéhez más sebességet használhat: az első megállóig, a megállók között és a felszín közelében.';
+
+  @override
+  String get info_term_reserveGas_label => 'Tartalék';
+
+  @override
+  String get info_term_reserveGas_body =>
+      'Gáz, amelyet a terv minden palackban visszatart, és sosem számít felhasználhatónak.';
+
+  @override
+  String get info_term_setpointSwitchDepth_label => 'Setpoint-váltási mélység';
+
+  @override
+  String get info_term_setpointSwitchDepth_body =>
+      'Az a mélység, ahol a terv lefelé az alacsony setpointról a magasra vált, felfelé pedig vissza.';
+
+  @override
+  String get info_term_pscrRatio_label => 'pSCR-arány';
+
+  @override
+  String get info_term_pscrRatio_body =>
+      'Az egyes kilégzések azon része, amelyet a passzív félig zárt rebreather kienged. Ez szabja meg, mennyivel marad a hurok oxigénje a táplálógáz alatt.';
+
+  @override
+  String get info_term_turnFraction_label => 'Visszafordulási hányad';
+
+  @override
+  String get info_term_turnFraction_body =>
+      'A kezdeti gáz azon része, amelyet a terv a visszafordulás előtt felhasznál. Az egyharmad a szokásos szabály barlangban és más zárt terekben.';
+
+  @override
+  String get info_term_dpv_label => 'DPV (robogó)';
+
+  @override
+  String get info_term_dpv_body =>
+      'Búvárrobogó. A küldetésterv számol az akkumulátorral, a megtett távval és a visszaúszással, ha egy robogó meghibásodik.';
+
+  @override
+  String get info_term_ceilingViolation_label => 'Plafonsértések';
+
+  @override
+  String get info_term_ceilingViolation_body =>
+      'Milyen gyakran és mennyivel ment a merülés egy változata a modell plafonja fölé.';
+
+  @override
+  String get info_term_deepestStop_label => 'Legmélyebb megálló';
+
+  @override
+  String get info_term_deepestStop_body =>
+      'Az első kötelező dekómegálló mélysége.';
+
+  @override
+  String get info_term_minGasMargin_label => 'Minimális gáz tartaléka';
+
+  @override
+  String get info_term_minGasMargin_body =>
+      'Mennyi gáz maradt a minimális gáz fölött abban a pontban, ahol a változás történt.';
+
+  @override
+  String get info_term_gasOutTime_label => 'Gázkifogyás ideje';
+
+  @override
+  String get info_term_gasOutTime_body =>
+      'Mikor ürülne ki egy palack az újrajátszás légzési ütemével.';
+
+  @override
+  String get info_term_whatIf_label => 'Tényleges és mi lenne, ha';
+
+  @override
+  String get info_term_whatIf_body =>
+      'A tényleges a naplózott merülést játssza újra a modellel, a mi lenne, ha pedig a Merülési laborban hozzáadott változásokkal.';
+
+  @override
+  String get info_term_cellGain_label => 'Cellajel (mV/bar)';
+
+  @override
+  String get info_term_cellGain_body =>
+      'Az egyes oxigéncellák millivoltos jele osztva a mért ppO2-vel. Ép cellánál stabil marad, és a cella öregedésével csökken.';
+
+  @override
+  String get info_term_transmitterDropouts_label => 'Jeladó-kiesések';
+
+  @override
+  String get info_term_transmitterDropouts_body =>
+      'Az egyes merülések azon része, amikor nem jött nyomásadat a jeladótól.';
+
+  @override
+  String get info_term_o2Narcotic_label => 'Oxigén narkotikusként számolva';
+
+  @override
+  String get info_term_o2Narcotic_body =>
+      'Bekapcsolva az oxigén a nitrogénhez hasonlóan narkotikusnak számít az END-ben és MND-ben. Így az END mélyebb, az MND sekélyebb lesz.';
+
+  @override
+  String get info_term_ascentGasSet_label => 'Gázok az emelkedéshez';
+
+  @override
+  String get info_term_ascentGasSet_body =>
+      'Mely vitt palackokra válthat a szimulált emelkedés: minden vitt gázra, vagy csak a stage- és dekópalackokra.';
+
+  @override
+  String get info_diveLog_profile_summary =>
+      'A mélység az idő függvényében az egész merülésre, minden bekapcsolt réteggel ugyanazon az időtengelyen.';
+
+  @override
+  String get info_diveLog_profile_background =>
+      'A dekó- és oxigénrétegek a Buhlmann ZHL-16C modellből származnak a beállításokban megadott gradiensfaktorokkal, valamint a NOAA oxigéntáblázataiból.';
+
+  @override
+  String get info_diveLog_profile_howToUse =>
+      'A grafikonon végighaladva egy pillanat minden értéke leolvasható. A jelmagyarázat ki- és bekapcsolja a rétegeket, a tartomány gomb a merülés egy részét jelöli ki a statisztikájához.';
+
+  @override
+  String get info_diveLog_rangeStats_summary =>
+      'Statisztika a merülés grafikonon kijelölt részére.';
+
+  @override
+  String get info_diveLog_decoStatus_summary =>
+      'Amit a dekompressziós modell a kurzor időpontjában jelez: kellenek-e megállók, és mennyi idő vagy mélység maradt.';
+
+  @override
+  String get info_diveLog_decoStatus_background =>
+      'Az alkalmazás a Buhlmann ZHL-16C modellt futtatja a GF-címkén látható gradiensfaktorokkal. Más modellt vagy beállítást használó búvárkomputer eltérő számokat mutathat.';
+
+  @override
+  String get info_diveLog_o2Toxicity_summary =>
+      'Mennyi oxigénterhelést adott a merülés a rövid távú CNS-órán és a lassabb OTU-dózisban.';
+
+  @override
+  String get info_diveLog_o2Toxicity_background =>
+      'A CNS% a NOAA ppO2-terhelési határait követi, és a merülés után 90 perces felezési idővel csökken. A napi OTU éjfélkor nullázódik, a heti OTU az utolsó hét napot fedi le.';
+
+  @override
+  String get info_diveLog_gasSwitches_summary =>
+      'Hogyan viszonyul minden gázváltás ahhoz a legmélyebb ponthoz, ahol a gáz a ppO2-határán belül volt.';
+
+  @override
+  String get info_diveLog_tissueLoading_summary =>
+      'Mennyire terhelt inert gázzal a modell 16 kompartmentje a kurzor időpontjában.';
+
+  @override
+  String get info_diveLog_tissueLoading_background =>
+      'A modell a Buhlmann ZHL-16C, amely minden kompartmentben külön követi a nitrogént és a héliumot. A terhelés csak a felszíni szint fölötti részt számolja, így a teljesen deszaturált oszlopok sem mutatnak nullát.';
+
+  @override
+  String get info_diveLog_safetyReview_summary =>
+      'A merülés azon pillanatai, amelyek átléptek egy biztonsági ellenőrzési szabályt, a profil merülés utáni vizsgálatából.';
+
+  @override
+  String get info_diveLog_safetyReview_background =>
+      'A szabályok és küszöbeik a Beállítások, Biztonsági ellenőrzés részben adhatók meg.';
+
+  @override
+  String get info_diveLog_safetyReview_howToUse =>
+      'Egy megállapításra koppintva látszik, hol történt a profilon. Az elvetett megállapítás ennél a merülésnél rejtve marad.';
+
+  @override
+  String get info_diveLog_cylinders_summary =>
+      'A merülés minden palackja a gázával, a felhasznált nyomással és a gáz mélységhatáraival.';
+
+  @override
+  String get info_diveLog_sacSegments_summary =>
+      'A gázfogyasztás a merülés szakaszaira vagy időszeletekre bontva, hogy az egyes részek terhelése összevethető legyen.';
+
+  @override
+  String get info_diveLog_sacSegments_howToUse =>
+      'A grafikon fölötti kapcsoló vált a SAC és az RMV között.';
+
+  @override
+  String get info_diveLog_details_summary =>
+      'A merülés naplózott adatai, ahol semmit nem adtak meg, ott a profilból számított értékekkel.';
+
+  @override
+  String get info_diveLog_altitude_summary =>
+      'Ez a merülés magaslaton volt, ahol a felszín alacsonyabb légnyomása óvatosabbá teszi a dekompressziós modellt.';
+
+  @override
+  String get info_diveLog_buoyancy_summary =>
+      'A nettó felhajtóerő modellje a merülés során, a profilból, a belélegzett gázból és a merüléshez naplózott felszerelésből.';
+
+  @override
+  String get info_diveLog_buoyancy_howToUse =>
+      'A Módosítás egy lapot nyit, amely más ólommennyiséget vagy ruhafelhajtóerőt próbál ki erre a merülésre.';
+
+  @override
+  String get info_diveLog_waterConditions_summary =>
+      'Tengerhőmérséklet és korallok hőstressze a hely közelében a merülés napja körül, a NOAA Coral Reef Watch műholdas adataiból.';
+
+  @override
+  String get info_diveLab_compare_summary =>
+      'Hogyan viszonyul ez a merülés a kapcsolt tervéhez vagy a mentett forgatókönyvekhez a dekompresszió szempontjából fontos számokban.';
+
+  @override
+  String get info_diveLab_compare_howToUse =>
+      'A kártyára koppintva megnyílik a Merülési labor, ahol más döntések próbálhatók ki erre a merülésre.';
+
+  @override
+  String get info_safety_noFly_summary =>
+      'Mikor ér véget a repülésre vonatkozó irányelv szerinti intervallum a legutóbbi merülések után.';
+
+  @override
+  String get info_insights_trendControls_howToUse =>
+      'A tartomány gomb választja az időszakot, a csoportosítás gomb merülésenként, hetente vagy havonta mutat. A mozgóátlag és az általános trend ki- és bekapcsolja a vonalát, a hosszú szünetek a menüből összecsukhatók.';
+
+  @override
+  String get info_insights_sacTrend_summary =>
+      'Merülésenkénti gázfogyasztás az időben, merülésenként vagy csoportonként egy pont, a fent választott sávon.';
+
+  @override
+  String get info_insights_roleUse_summary =>
+      'Gázfogyasztás az időben palacktípusonként, hogy a fenékgáz és a stage ne keveredjen.';
+
+  @override
+  String get info_insights_ccrUse_summary =>
+      'Rebreatheres merülésenként felhasznált oxigén és hígítógáz, percenkénti térfogatként felszíni nyomáson.';
+
+  @override
+  String get info_insights_depthTrend_summary =>
+      'Az egyes merülések legnagyobb mélysége az időben.';
+
+  @override
+  String get info_insights_runtimeTrend_summary =>
+      'Mennyi ideig tartott az egyes merülések a lemerüléstől a felszínre érkezésig, az időben.';
+
+  @override
+  String get info_insights_bottomTimeTrend_summary =>
+      'Az egyes merülések fenékideje az időben, az utolsó emelkedés és a megállók nélkül, amelyeket a teljes idő tartalmaz.';
+
+  @override
+  String get info_insights_waterTempTrend_summary =>
+      'Az egyes merüléseken rögzített vízhőmérséklet az időben.';
+
+  @override
+  String get info_insights_airTempTrend_summary =>
+      'Az egyes merüléseken rögzített léghőmérséklet az időben.';
+
+  @override
+  String get info_insights_weightTrend_summary =>
+      'Az egyes merüléseken vitt ólom az időben.';
+
+  @override
+  String get info_insights_gasMix_summary =>
+      'Hány merülésen használták az egyes gázkeverékeket.';
+
+  @override
+  String get info_insights_tankConfig_summary =>
+      'Hogyan voltak a palackok összeállítva az egyes merüléseken, a naplózott szerepeik alapján.';
+
+  @override
+  String get info_insights_sacRecords_summary =>
+      'A tartomány legkisebb és legnagyobb gázfogyasztású merülései.';
+
+  @override
+  String get info_insights_ascentDescent_summary =>
+      'Átlagsebesség lefelé és felfelé, a profilokból számítva.';
+
+  @override
+  String get info_insights_timeAtDepth_summary =>
+      'Hogyan oszlik meg a víz alatt töltött teljes idő a mélységsávok között.';
+
+  @override
+  String get info_insights_decoObligation_summary =>
+      'Hány merüléshez kellett dekómegálló, a modell profilonkénti értékelése szerint.';
+
+  @override
+  String get info_insights_cumulative_summary =>
+      'A naplózott merülések göngyölített összege az időben.';
+
+  @override
+  String get info_insights_visibility_summary =>
+      'Merülések a rögzített látótávolság szerint csoportosítva, a beállítások látótávolság-skálájának sávjaiban.';
+
+  @override
+  String get info_insights_waterType_summary =>
+      'Merülések sós, édes és brakkvízben.';
+
+  @override
+  String get info_insights_seasonalTemp_summary =>
+      'Az év egyes hónapjaiban rögzített legalacsonyabb, átlagos és legmagasabb vízhőmérséklet.';
+
+  @override
+  String get info_insights_waterTempBands_summary =>
+      'Merülések vízhőmérséklet szerint csoportosítva, sávonkénti átlagos gázfogyasztással és mélységgel.';
+
+  @override
+  String get info_insights_siteType_summary =>
+      'Merülések a rögzített helytípus szerint, például zátony, roncs vagy barlang.';
+
+  @override
+  String get info_insights_altitude_summary =>
+      'Merülések a hely magassága szerint csoportosítva.';
+
+  @override
+  String get info_insights_surfacePressure_summary =>
+      'Merülések a felszínen mért légnyomás szerint csoportosítva.';
+
+  @override
+  String get info_insights_timeOfDay_summary =>
+      'Mikor történtek a merülések a helyi napkeltéhez és napnyugtához képest.';
+
+  @override
+  String get info_insights_calendarDays_summary =>
+      'Az év mely napjain volt merülés, a tartomány összes évében.';
+
+  @override
+  String get info_insights_surfaceIntervals_summary =>
+      'Az átlagos, legrövidebb és leghosszabb felszíni idő egy merülés és az azt megelőző között.';
+
+  @override
+  String get info_insights_exposure_summary =>
+      'A felszerelés használat és kopás szerint rangsorolva, a menüben választott egységben.';
+
+  @override
+  String get info_insights_conditionFindings_summary =>
+      'Minták a naplózott merülésekben és problémákban, amelyek figyelmet igénylő felszerelésre utalnak.';
+
+  @override
+  String get info_insights_reportedIssues_summary =>
+      'A merülésekhez naplózott problémák címke szerint csoportosítva és megszámolva.';
+
+  @override
+  String get info_insights_focus_summary =>
+      'A fenti mondattal kiválasztott merülések összevetve a tartomány összes többi merülésével.';
+
+  @override
+  String get info_insights_focus_howToUse =>
+      'A mondat aláhúzott szavaira koppintva módosítható a mérték, az irány és a merülések száma. Küszöb módban minden, egy érték fölötti vagy alatti merülés kerül összevetésre.';
+
+  @override
+  String get info_insights_standouts_summary =>
+      'Azok a tényezők, amelyek a fókuszmerüléseknél jól láthatóan gyakoribbak vagy ritkábbak, mint a többinél.';
+
+  @override
+  String get info_insights_comparison_summary =>
+      'Minden tényező egymás mellett: aránya a fókuszmerüléseknél és a többinél.';
+
+  @override
+  String get info_insights_overviewStats_summary =>
+      'Összesítések és átlagok a tartomány összes merülésére.';
+
+  @override
+  String get info_insights_distributions_summary =>
+      'Hogyan oszlanak meg a merülések a mélységsávok és merüléstípusok között.';
+
+  @override
+  String get info_insights_observations_summary =>
+      'Rövid megjegyzések, amelyeket az alkalmazás a naplóban talált, például új legmélyebb merülés vagy változó gázfogyasztás.';
+
+  @override
+  String get info_connections_display_summary =>
+      'Minden pont egy társ, hely, túra vagy felszerelés, minden vonal két közös merülésű elemet köt össze.';
+
+  @override
+  String get info_connections_display_howToUse =>
+      'Egy pontra koppintva az kerül fókuszba a kapcsolataival. A panelen választhatók a színek, a vonalstílus és a nézet hatóköre.';
+
+  @override
+  String get info_planner_results_summary =>
+      'A terv fő számai a jelenlegi állapotában, a terv módosításakor frissülve.';
+
+  @override
+  String get info_planner_decoSchedule_summary =>
+      'A modell által tervezett emelkedés, megállónként vagy gázváltásonként egy sor, mélységgel, idővel, futóidővel és gázzal.';
+
+  @override
+  String get info_planner_gas_summary =>
+      'Mennyit használ a terv az egyes palackokból, visszafordulási nyomással és minimális gázzal, ahol a kezdőnyomás ismert.';
+
+  @override
+  String get info_planner_bailout_summary =>
+      'A nyitott rendszerű emelkedés a merülés legrosszabb pontjáról, ha a hurok kiesik, és hogy elég-e hozzá a vitt bailout-gáz.';
+
+  @override
+  String get info_planner_contingencies_summary =>
+      'A terv újraszámolva eltérésekre: mélyebb vagy hosszabb merülés, vagy egy gáz elvesztése.';
+
+  @override
+  String get info_planner_range_summary =>
+      'Hogyan változik a menetrend, ha a merülés mélyebb vagy hosszabb a tervezettnél.';
+
+  @override
+  String get info_planner_mission_summary =>
+      'A csapat robogóterve: akkumulátor-használat, táv és visszaúszás, ha egy robogó meghibásodik.';
+
+  @override
+  String get info_planner_carry_summary =>
+      'Mit hagy ez a merülés a következőre: a felszíni időt, a még meglévő CNS-t és az OTU-t.';
+
+  @override
+  String get info_plannerSetup_deco_summary =>
+      'Mennyire óvatos a menetrend, és hol van az utolsó megálló.';
+
+  @override
+  String get info_plannerSetup_deco_howToUse =>
+      'Alacsonyabb GF Low mélyebbre teszi az első megállót, alacsonyabb GF High hosszabbá teszi a sekély megállókat. Az eredmények minden változtatáskor frissülnek.';
+
+  @override
+  String get info_plannerSetup_rates_summary =>
+      'Milyen gyorsan süllyed és emelkedik a terv a merülés egyes részeiben.';
+
+  @override
+  String get info_plannerSetup_rates_howToUse =>
+      'Minden sebesség a merülés saját részére vonatkozik. Az eredmények érték változásakor frissülnek.';
+
+  @override
+  String get info_plannerSetup_gas_summary =>
+      'A légzési ütem és a tartalék, amellyel a terv a gázt méretezi.';
+
+  @override
+  String get info_plannerSetup_gas_howToUse =>
+      'Adja meg a fenéken mért légzési ütemet, vagy vegye át a naplózott merülésekből, és a palackonként megtartandó tartalékot.';
+
+  @override
+  String get info_plannerSetup_environment_summary =>
+      'A víz típusa és a magasság, amelyek a modell kiinduló felszíni nyomását adják.';
+
+  @override
+  String get info_plannerSetup_environment_howToUse =>
+      'Válassza ki a víz típusát, és adja meg a hely magasságát.';
+
+  @override
+  String get info_plannerSetup_ccr_summary =>
+      'A setpointok, amelyeket a zárt rendszerű rebreather a terv során tart.';
+
+  @override
+  String get info_plannerSetup_ccr_howToUse =>
+      'Adja meg az alacsony és a magas setpointot, valamint a mélységet, ahol a terv vált köztük.';
+
+  @override
+  String get info_plannerSetup_pscr_summary =>
+      'Hogyan modellezi a terv a passzív félig zárt rebreathert.';
+
+  @override
+  String get info_plannerSetup_pscr_howToUse =>
+      'Adja meg a rebreather gyártója által megadott kibocsátási arányt.';
+
+  @override
+  String get info_plannerSetup_contingencies_summary =>
+      'Meddig terjednek a vészhelyzeti tervek, és milyen szabály szerint fordul vissza a gázterv.';
+
+  @override
+  String get info_plannerSetup_contingencies_howToUse =>
+      'Adja meg, mennyivel mélyebbre és hosszabbra mennek a vészhelyzeti tervek, majd válasszon visszafordulási szabályt és hányadot.';
+
+  @override
+  String get info_plannerSetup_dpvTeam_summary =>
+      'A küldetésterv mögötti csapat, robogók és körülmények.';
+
+  @override
+  String get info_plannerSetup_dpvTeam_howToUse =>
+      'Adja meg a búvárokat és robogókat, az akkumulátortartalékot, az áramlást és az úszási sebességet.';
+
+  @override
+  String get info_plannerSetup_gear_summary =>
+      'A terv felszerelése és súlyai, amelyekből a felhajtóerő előre jelezhető a merülés során.';
+
+  @override
+  String get info_plannerSetup_gear_howToUse =>
+      'Adja hozzá a ruhát, a palackokat és a súlyokat az előre jelzett felhajtóerőhöz.';
+
+  @override
+  String get info_diveLab_tiles_summary =>
+      'A mi lenne, ha újrajátszás fő eredményei, színezve aszerint, hogy jobbak vagy rosszabbak a tényleges merülésnél.';
+
+  @override
+  String get info_diveLab_delta_summary =>
+      'Minden mérték a tényleges merülésre és a mi lenne, ha változatra egymás mellett, a különbséggel.';
+
+  @override
+  String get info_diveLab_tissues_summary =>
+      'A kompartmentek terhelése, amikor az egyes változatok a felszínre érnek, tényleges és mi lenne, ha.';
+
+  @override
+  String get info_diveLab_buoyancy_summary =>
+      'A felhajtóerő az utolsó megállónál a merülés minden változatára.';
+
+  @override
+  String get info_diveLab_interventions_summary =>
+      'Kipróbálható változtatások erre a merülésre, mindegyik ugyanazzal a modellel újrajátszva attól a ponttól, ahol érvényes.';
+
+  @override
+  String get info_calculators_mod_summary =>
+      'Az a legnagyobb mélység, ahol a választott keverék a ppO2-határán belül marad, az ottani EAD-vel és END-del.';
+
+  @override
+  String get info_calculators_mod_howToUse =>
+      'Válasszon módot, majd adja meg az oxigént és a munka-ppO2-t. Célmélység is felvehető, hogy egy tervezett mélységet a keverékhez mérjen. Az END-határ és az oxigén narkotikus volta a búvárprofilból jön.';
+
+  @override
+  String get info_calculators_bestMix_summary =>
+      'A leggazdagabb keverék egy célmélységhez, amely a ppO2-t a határán, az END-et a narkózishatáron belül tartja.';
+
+  @override
+  String get info_calculators_bestMix_howToUse =>
+      'Adja meg a célmélységet és a módot. CCR-nél válassza ki, hogy a keverék hígítógáz vagy bailout-gáz.';
+
+  @override
+  String get info_calculators_consumption_summary =>
+      'Mennyi gázt használ egy tervezett merülés adott mélységben, időtartammal és légzési ütemmel.';
+
+  @override
+  String get info_calculators_consumption_howToUse =>
+      'Adja meg a mélységet, az időt, a légzési ütemet és a palackot.';
+
+  @override
+  String get info_calculators_rockBottom_summary =>
+      'A minimális gáztartalék ahhoz, hogy két búvár egy forrásról együtt emelkedjen fel a legmélyebb pontról.';
+
+  @override
+  String get info_calculators_rockBottom_background =>
+      'Stresszes légzési ütemmel számol, általában a normál két-háromszorosával, és mindkét búvárt egy palackra veszi. A biztonsági megálló benne van, ha az opció be van kapcsolva.';
+
+  @override
+  String get info_calculators_rockBottom_howToUse =>
+      'Adja meg a mélységet, a stresszes légzési ütemet, az emelkedési sebességet és a palackot.';
+
+  @override
+  String get info_calculators_mnd_summary =>
+      'Az a legnagyobb mélység, ahol egy gáz az END-határon belül marad, és egy gáz END-je adott mélységben.';
+
+  @override
+  String get info_calculators_mnd_howToUse =>
+      'Adja meg a gázt, az END-határt, és hogy az oxigén narkotikusnak számít-e.';
+
+  @override
+  String get info_calculators_icd_summary =>
+      'Megfelel-e két gáz közötti váltás az ellendiffúzió ötödszabályának.';
+
+  @override
+  String get info_calculators_icd_background =>
+      'A hélium gyorsabban diffundál, mint a nitrogén, így egy nitrogénben gazdagabb gázra váltás növelheti a szövetek teljes inertgáz-tartalmát. A szervezetek nem értenek egyet abban, mennyire számít ez szabványos gázoknál.';
+
+  @override
+  String get info_calculators_icd_howToUse =>
+      'Adja meg a jelenlegi gázt és azt, amelyre vált.';
+
+  @override
+  String get info_calculators_density_summary =>
+      'Milyen sűrű egy gáz a mélyben, és milyen mélységben lenne ugyanilyen sűrű a levegő.';
+
+  @override
+  String get info_calculators_density_background =>
+      'CCR-nél a hurokgáz sűrűsége: oxigén a setpointon, a többi a hígítógáz arányában. A hidegebb gáz sűrűbb, a számítás ideális gázt feltételez.';
+
+  @override
+  String get info_calculators_density_howToUse =>
+      'Adja meg a keveréket, a mélységet és a vízhőmérsékletet, és váltson OC és CCR között.';
+
+  @override
+  String get info_calculators_blender_summary =>
+      'Parciális nyomásos keverés: a töltőgázok, amelyeket sorban hozzá kell adni a célkeverékhez.';
+
+  @override
+  String get info_calculators_blender_background =>
+      'Minden gázt a kijelzett nyomásig kell tölteni, és a palack a következő előtt pihen. A töltőgázok és sorrendjük beállítható, így az utolsó gáz lehet EAN32 a levegő helyett.';
+
+  @override
+  String get info_calculators_blender_howToUse =>
+      'Adja meg, mi van már a palackban, és a célkeveréket. Minden keverés utolsó lépése a kész keverék elemzése.';
+
+  @override
+  String get info_decoCalculator_summary =>
+      'Egyszintű merülés a Buhlmann ZHL-16C modellel számolva, gázhatárokkal, megállókkal és szöveti terheléssel.';
+
+  @override
+  String get info_decoCalculator_howToUse =>
+      'Adja meg a mélységet, az időt, a gázt és a vízviszonyokat. A gázhatárok, a megállók és a szövetdiagram minden változáskor frissülnek.';
+
+  @override
+  String get info_surfaceIntervalTool_summary =>
+      'Belefér-e egy második merülés a dekompressziómentes határba egy felszíni idő után, az első merülésből áthozott szöveti terhelés alapján.';
+
+  @override
+  String get info_surfaceIntervalTool_background =>
+      'A modell 16 kompartmentje a szünetben gázt ad le, a gyorsak percek, a lassúak órák alatt. A vezető kompartment a legterheltebb, és általában ez szabja meg az NDL-t.';
+
+  @override
+  String get info_surfaceIntervalTool_howToUse =>
+      'Adja meg az első és a második merülést és a felszíni időt. Az eredmény mutatja a minimális szünetet és a második merülés NDL-jét.';
+
+  @override
+  String get info_equipment_trend_summary =>
+      'Merülésenként egy pont, így a tétel lassú változása trendként látszik az élettartama során.';
+
+  @override
+  String get info_equipment_findings_summary =>
+      'Minták a tétel merüléseiben és jelentett problémáiban, amelyeket az állapotszabályok jeleztek.';
+
+  @override
+  String get info_equipment_exposure_summary =>
+      'Mennyit használták ezt a tételt, a szervizórái által használt minden egységben számolva.';
+
+  @override
+  String get info_site_altitude_summary =>
+      'A hely tengerszint feletti magassága és az ottani légnyomás, amelyből a dekompressziós modell indul.';
+
+  @override
+  String get info_trips_scrubberMargin_summary =>
+      'Mennyi névleges mészidő marad az út tervezett rebreatheres merüléseire.';
+
+  @override
+  String get info_settings_gradientFactors_summary =>
+      'Mennyire óvatos az alkalmazás dekompressziós modellje.';
+
+  @override
+  String get info_settings_gradientFactors_background =>
+      'A gradiensfaktorok szűkítik a Buhlmann ZHL-16C M-értékeit, ezt a módszert Erik Baker írta le. Az alkalmazás minden számított dekóadata ezeket használja.';
+
+  @override
+  String get info_settings_oxygenToxicity_summary =>
+      'A ppO2-határok és a CNS-módszer, amelyet az alkalmazás minden oxigénadata használ.';
+
+  @override
+  String get info_settings_dataSources_summary =>
+      'Hogy az NDL, a dekómegállók, a TTS, a GTR és a CNS a búvárkomputertől vagy az alkalmazás saját számításából jön-e.';
+
+  @override
+  String get info_settings_narcosis_summary =>
+      'Az END-határ, és ahogy az alkalmazás az END-et és az MND-t számolja.';
+
+  @override
+  String get info_settings_icd_summary =>
+      'Az ellenőrzés, amelyet az alkalmazás a gázváltásokon végez a hélium és a nitrogén ellendiffúziójára.';
+
+  @override
+  String get info_settings_ascent_summary =>
+      'Mely gázokra válthat a szimulált emelkedés, amikor az alkalmazás a TTS-t, a plafont és a megállókat számolja.';
+
+  @override
+  String get info_settings_safetyRules_summary =>
+      'A szabályok, amelyekkel minden merülést rögzítés után ellenőriz az alkalmazás. A kikapcsolt szabály soha nem jelez.';
+
+  @override
+  String get info_settings_conditionThresholds_summary =>
+      'A határok, amelyek alapján egy merülés hidegnek, mélynek vagy magas oxigéntartalmúnak számít a szervizórák szerint.';
+
+  @override
+  String get info_settings_sensorSummaries_summary =>
+      'A merülésenkénti adatok, amelyeket az alkalmazás az oxigéncellákhoz, jeladókhoz és mésztartályokhoz tárol.';
+
+  @override
+  String get info_settings_conditionRules_summary =>
+      'A felszerelésállapot-megállapítások mögötti ellenőrzések. A kikapcsolt szabály soha nem jelez.';
+
+  @override
+  String get info_settings_notifications_summary =>
+      'Az emlékeztetők az alkalmazás megnyitásakor ütemeződnek, és a háttérben frissülnek. Minden felszerelés saját emlékeztetőket kaphat a szerkesztőképernyőjén.';
+
+  @override
+  String get info_settings_ascentRate_summary =>
+      'Azok a sebességek, amelyeknél a profil kiszínezi a feljövetelt, és feljövetelsebesség-eseményeket rögzít.';
+
+  @override
+  String get gasCalculators_blender_analyseNote =>
+      'A kész keveréket mindig elemezd, mielőtt lemerülnél vele.';
+
+  @override
+  String info_calculators_mod_background(String depth) {
+    return 'A MOD-ot mindig lefelé kerekítjük, soha nem felfelé. A Rec minden $depth mélységre 1 bárt számol, mint a napló. Az OC Tec és a CCR Tec a víz típusából számolja a nyomást a mélységben, így ugyanaz a keverék ott kissé sekélyebb MOD-ot mutathat.';
+  }
 }

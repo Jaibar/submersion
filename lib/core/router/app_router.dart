@@ -132,6 +132,7 @@ import 'package:submersion/features/settings/presentation/pages/connected_accoun
 import 'package:submersion/features/settings/presentation/pages/account_detail_page.dart';
 import 'package:submersion/features/settings/presentation/pages/lightroom_settings_page.dart';
 import 'package:submersion/features/settings/presentation/pages/fix_dive_times_page.dart';
+import 'package:submersion/features/settings/presentation/pages/reparse_dives_page.dart';
 import 'package:submersion/features/settings/presentation/pages/link_buddy_names_page.dart';
 import 'package:submersion/features/settings/presentation/pages/retype_other_gear_page.dart';
 import 'package:submersion/features/settings/presentation/pages/settings_page.dart';
@@ -200,6 +201,7 @@ import 'package:submersion/features/marine_life/presentation/pages/species_page.
 import 'package:submersion/features/tags/presentation/pages/tag_manage_page.dart';
 import 'package:submersion/features/marine_life/presentation/pages/species_edit_page.dart';
 import 'package:submersion/features/marine_life/presentation/pages/species_detail_page.dart';
+import 'package:submersion/features/marine_life/presentation/pages/species_map_page.dart';
 import 'package:submersion/features/planner/presentation/pages/plan_chart_fullscreen_page.dart';
 import 'package:submersion/features/planning/presentation/pages/planning_page.dart';
 import 'package:submersion/features/planning/presentation/widgets/planning_disclaimer_gate.dart';
@@ -231,7 +233,7 @@ import 'package:submersion/features/dive_computer/presentation/providers/dive_co
 import 'package:submersion/features/dive_computer/presentation/pages/device_list_page.dart';
 import 'package:submersion/features/dive_computer/presentation/pages/dive_computer_item_redirect.dart';
 import 'package:submersion/features/dive_computer/presentation/providers/download_providers.dart'
-    show diveImportServiceProvider;
+    show diveImportServiceProvider, importTripResolverProvider;
 import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
 import 'package:submersion/features/import_wizard/data/adapters/dive_computer_adapter.dart';
 import 'package:submersion/features/import_wizard/data/adapters/divelogs_import_adapter.dart';
@@ -1861,6 +1863,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 builder: (context, state) => const FixDiveTimesPage(),
               ),
               GoRoute(
+                path: 'reparse-dives',
+                name: 'reparseDives',
+                builder: (context, state) => const ReparseDivesPage(),
+              ),
+              GoRoute(
                 path: 'link-buddy-names',
                 name: 'linkBuddyNames',
                 builder: (context, state) => const LinkBuddyNamesPage(),
@@ -2190,8 +2197,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           ),
 
           // Species: the seen-species page, with the catalog manager, the
-          // editor and the detail page nested under it. `manage` and `new`
-          // are declared before `:speciesId` so the static segments win.
+          // species map, the editor and the detail page nested under it.
+          // `manage`, `map` and `new` are declared before `:speciesId` so the
+          // static segments win.
           GoRoute(
             path: '/species',
             name: 'species',
@@ -2206,6 +2214,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                 path: 'manage',
                 name: 'speciesManage',
                 builder: (context, state) => const SpeciesManagePage(),
+              ),
+              GoRoute(
+                path: 'map',
+                name: 'speciesMap',
+                builder: (context, state) => SpeciesMapPage(
+                  initialSpeciesId: state.uri.queryParameters['species'],
+                ),
               ),
               GoRoute(
                 path: 'new',
@@ -2315,6 +2330,7 @@ class _HealthKitImportWizardRoute extends ConsumerWidget {
         diverId: diverId,
         ref: ref,
         settings: settings,
+        tripForImports: ref.watch(importTripResolverProvider),
       ),
     );
   }

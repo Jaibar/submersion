@@ -1046,6 +1046,18 @@ abstract class AppLocalizations {
   /// **'Owner'**
   String get enum_equipmentField_owner_short;
 
+  /// Table column header for the place an item is kept (issue #3625)
+  ///
+  /// In en, this message translates to:
+  /// **'Location'**
+  String get enum_equipmentField_location;
+
+  /// Short table column label for the place an item is kept
+  ///
+  /// In en, this message translates to:
+  /// **'Location'**
+  String get enum_equipmentField_location_short;
+
   /// No description provided for @equipment_set_noLongerShared.
   ///
   /// In en, this message translates to:
@@ -2192,6 +2204,18 @@ abstract class AppLocalizations {
   /// **'Show diver figure'**
   String get equipment_setEdit_figureSwitch_title;
 
+  /// No description provided for @equipment_setEdit_historyAsk.
+  ///
+  /// In en, this message translates to:
+  /// **'Apply the changes to those dives as well, or only from now on?'**
+  String get equipment_setEdit_historyAsk;
+
+  /// No description provided for @equipment_setEdit_historyOnDives.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{This set is on 1 logged dive.} other{This set is on {count} logged dives.}}'**
+  String equipment_setEdit_historyOnDives(num count);
+
   /// No description provided for @equipment_color_red.
   ///
   /// In en, this message translates to:
@@ -2923,6 +2947,27 @@ abstract class AppLocalizations {
   /// **'Dive times during this day'**
   String get trips_story_rhythm_semantics;
 
+  /// No description provided for @trips_story_rhythm_semanticsSunriseSunset.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive times during this day. Sunrise {sunrise}, sunset {sunset}.'**
+  String trips_story_rhythm_semanticsSunriseSunset(
+    String sunrise,
+    String sunset,
+  );
+
+  /// No description provided for @trips_story_rhythm_semanticsSunrise.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive times during this day. Sunrise {sunrise}.'**
+  String trips_story_rhythm_semanticsSunrise(String sunrise);
+
+  /// No description provided for @trips_story_rhythm_semanticsSunset.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive times during this day. Sunset {sunset}.'**
+  String trips_story_rhythm_semanticsSunset(String sunset);
+
   /// No description provided for @trips_story_dayMap_semantics.
   ///
   /// In en, this message translates to:
@@ -3090,6 +3135,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Choose which attributes to overwrite on the tanks these dives already have. Start and end pressures are never changed.'**
   String get diveLog_bulkEdit_tankSpecsHint;
+
+  /// No description provided for @diveLog_bulkEdit_tankSpecsTemplateTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'All tanks'**
+  String get diveLog_bulkEdit_tankSpecsTemplateTitle;
 
   /// No description provided for @diveLog_bulkEdit_tankSpecsNoFields.
   ///
@@ -7160,6 +7211,12 @@ abstract class AppLocalizations {
   /// **'Expiring Soon'**
   String get certifications_list_section_expiringSoon;
 
+  /// Header of the certification list section holding one agency's professional ratings (divemaster, instructor and up) when grouped by agency.
+  ///
+  /// In en, this message translates to:
+  /// **'{agency} Professional'**
+  String certifications_list_section_professional(String agency);
+
   /// No description provided for @certifications_list_section_valid.
   ///
   /// In en, this message translates to:
@@ -8432,6 +8489,90 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Set'**
   String get diveLog_gear_unknownSet;
+
+  /// No description provided for @diveLog_health_after15.
+  ///
+  /// In en, this message translates to:
+  /// **'After 15 min'**
+  String get diveLog_health_after15;
+
+  /// No description provided for @diveLog_health_after5.
+  ///
+  /// In en, this message translates to:
+  /// **'After 5 min'**
+  String get diveLog_health_after5;
+
+  /// No description provided for @diveLog_health_atSurfacing.
+  ///
+  /// In en, this message translates to:
+  /// **'At surfacing'**
+  String get diveLog_health_atSurfacing;
+
+  /// No description provided for @diveLog_health_average.
+  ///
+  /// In en, this message translates to:
+  /// **'Average'**
+  String get diveLog_health_average;
+
+  /// No description provided for @diveLog_health_bpm.
+  ///
+  /// In en, this message translates to:
+  /// **'{value} bpm'**
+  String diveLog_health_bpm(int value);
+
+  /// No description provided for @diveLog_health_maximum.
+  ///
+  /// In en, this message translates to:
+  /// **'Maximum'**
+  String get diveLog_health_maximum;
+
+  /// No description provided for @diveLog_health_ms.
+  ///
+  /// In en, this message translates to:
+  /// **'{value} ms'**
+  String diveLog_health_ms(int value);
+
+  /// No description provided for @diveLog_health_noneFound.
+  ///
+  /// In en, this message translates to:
+  /// **'Apple Health has no readings for this dive'**
+  String get diveLog_health_noneFound;
+
+  /// No description provided for @diveLog_health_overnightHrv.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate variability the night after'**
+  String get diveLog_health_overnightHrv;
+
+  /// No description provided for @diveLog_health_readFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not read Apple Health'**
+  String get diveLog_health_readFailed;
+
+  /// No description provided for @diveLog_health_recovery.
+  ///
+  /// In en, this message translates to:
+  /// **'Recovery'**
+  String get diveLog_health_recovery;
+
+  /// No description provided for @diveLog_health_recoveryExplain.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate at surfacing and 5 and 15 minutes later, from Apple Health.'**
+  String get diveLog_health_recoveryExplain;
+
+  /// No description provided for @diveLog_health_sleepBefore.
+  ///
+  /// In en, this message translates to:
+  /// **'Slept {hours} h {minutes} min the night before'**
+  String diveLog_health_sleepBefore(int hours, int minutes);
+
+  /// No description provided for @diveLog_health_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate and recovery'**
+  String get diveLog_health_title;
 
   /// No description provided for @diveLog_listPage_bottomSheet_preDiveChecklist.
   ///
@@ -9909,6 +10050,12 @@ abstract class AppLocalizations {
   /// **'Recent sites map'**
   String get settings_homeCards_card_recentSitesMap;
 
+  /// No description provided for @settings_homeCards_card_waitingForDownload.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for download'**
+  String get settings_homeCards_card_waitingForDownload;
+
   /// No description provided for @dashboard_allHidden_message.
   ///
   /// In en, this message translates to:
@@ -10244,6 +10391,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Dashboard greeting banner'**
   String get dashboard_semantics_greetingBanner;
+
+  /// No description provided for @dashboard_waitingForDownload_download.
+  ///
+  /// In en, this message translates to:
+  /// **'Download now'**
+  String get dashboard_waitingForDownload_download;
+
+  /// No description provided for @dashboard_waitingForDownload_title.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 dive waiting for your dive computer} other{{count} dives waiting for your dive computer}}'**
+  String dashboard_waitingForDownload_title(int count);
 
   /// No description provided for @decoCalculator_addToPlanner.
   ///
@@ -11646,6 +11805,12 @@ abstract class AppLocalizations {
   /// **'These records don\'t overlap in time, so one computer\'s clock is probably off. The dive keeps the primary computer\'s time.'**
   String get diveLog_consolidate_clockNote;
 
+  /// No description provided for @diveLog_consolidate_clockNoteOverlap.
+  ///
+  /// In en, this message translates to:
+  /// **'These depth profiles match at a different time than the computers\' clocks say, so one computer\'s clock is probably off. The dive keeps the primary computer\'s time.'**
+  String get diveLog_consolidate_clockNoteOverlap;
+
   /// No description provided for @diveLog_consolidate_clockNoteShort.
   ///
   /// In en, this message translates to:
@@ -11829,6 +11994,114 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Decompression required'**
   String get diveLog_deco_semantics_required;
+
+  /// No description provided for @diveLog_deco_compartmentLeading.
+  ///
+  /// In en, this message translates to:
+  /// **'Leading: #{number}'**
+  String diveLog_deco_compartmentLeading(int number);
+
+  /// No description provided for @diveLog_deco_compartmentOther.
+  ///
+  /// In en, this message translates to:
+  /// **'Compartment: #{number}'**
+  String diveLog_deco_compartmentOther(int number);
+
+  /// No description provided for @diveLog_deco_metricLoad.
+  ///
+  /// In en, this message translates to:
+  /// **'Load'**
+  String get diveLog_deco_metricLoad;
+
+  /// No description provided for @diveLog_deco_gasOngassing.
+  ///
+  /// In en, this message translates to:
+  /// **'Ongassing'**
+  String get diveLog_deco_gasOngassing;
+
+  /// No description provided for @diveLog_deco_gasOffgassing.
+  ///
+  /// In en, this message translates to:
+  /// **'Offgassing'**
+  String get diveLog_deco_gasOffgassing;
+
+  /// No description provided for @diveLog_deco_gasEquilibrium.
+  ///
+  /// In en, this message translates to:
+  /// **'Equilibrium'**
+  String get diveLog_deco_gasEquilibrium;
+
+  /// No description provided for @diveLog_deco_heatMapRows.
+  ///
+  /// In en, this message translates to:
+  /// **'Rows: fast (top) to slow (bottom)'**
+  String get diveLog_deco_heatMapRows;
+
+  /// No description provided for @diveLog_deco_surfaceLevel.
+  ///
+  /// In en, this message translates to:
+  /// **'Surface level'**
+  String get diveLog_deco_surfaceLevel;
+
+  /// No description provided for @diveLog_deco_mValue.
+  ///
+  /// In en, this message translates to:
+  /// **'M-value'**
+  String get diveLog_deco_mValue;
+
+  /// No description provided for @diveLog_deco_tooltipCompartment.
+  ///
+  /// In en, this message translates to:
+  /// **'Compartment {number}'**
+  String diveLog_deco_tooltipCompartment(int number);
+
+  /// No description provided for @diveLog_deco_tooltipLoaded.
+  ///
+  /// In en, this message translates to:
+  /// **'{percent}% loaded'**
+  String diveLog_deco_tooltipLoaded(String percent);
+
+  /// No description provided for @diveLog_deco_tooltipHalfTime.
+  ///
+  /// In en, this message translates to:
+  /// **'Half-time: {minutes} min'**
+  String diveLog_deco_tooltipHalfTime(String minutes);
+
+  /// No description provided for @diveLog_deco_tooltipSurfaceLevel.
+  ///
+  /// In en, this message translates to:
+  /// **'Surface level: {percent}%'**
+  String diveLog_deco_tooltipSurfaceLevel(String percent);
+
+  /// No description provided for @diveLog_deco_barChartSemantics.
+  ///
+  /// In en, this message translates to:
+  /// **'Tissue loading chart. {count} compartments, loading relative to the M-value; leading compartment {number} at {percent}%.'**
+  String diveLog_deco_barChartSemantics(int count, int number, String percent);
+
+  /// No description provided for @diveLog_deco_heatMapUndersaturated.
+  ///
+  /// In en, this message translates to:
+  /// **'Undersaturated'**
+  String get diveLog_deco_heatMapUndersaturated;
+
+  /// No description provided for @diveLog_deco_heatMapSupersaturated.
+  ///
+  /// In en, this message translates to:
+  /// **'Supersaturated'**
+  String get diveLog_deco_heatMapSupersaturated;
+
+  /// No description provided for @diveLog_deco_percentValue.
+  ///
+  /// In en, this message translates to:
+  /// **'{value}%'**
+  String diveLog_deco_percentValue(String value);
+
+  /// No description provided for @diveLog_deco_minutesValue.
+  ///
+  /// In en, this message translates to:
+  /// **'{value} min'**
+  String diveLog_deco_minutesValue(String value);
 
   /// No description provided for @diveLog_deco_tissueFast.
   ///
@@ -12556,12 +12829,6 @@ abstract class AppLocalizations {
   /// **'Dive Mode'**
   String get diveLog_diveMode_title;
 
-  /// No description provided for @diveLog_editSighting_count.
-  ///
-  /// In en, this message translates to:
-  /// **'Count'**
-  String get diveLog_editSighting_count;
-
   /// No description provided for @diveLog_editSighting_notes.
   ///
   /// In en, this message translates to:
@@ -12783,6 +13050,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{count, plural, one{{count} gas switch removed with its tank} other{{count} gas switches removed with their tank}}'**
   String diveLog_edit_gasSwitches_removedWithTank(int count);
+
+  /// Gas switch editor: action that adds the switches the recorded cylinder pressures show, and re-points a starting switch on the same gas to the cylinder breathed first. count is how many rows it adds or changes
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{Fill in 1 switch from the cylinder pressures} other{Fill in {count} switches from the cylinder pressures}}'**
+  String diveLog_edit_gasSwitches_fillDetected(int count);
 
   /// No description provided for @diveLog_edit_gettingLocation.
   ///
@@ -13029,6 +13302,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'No species logged'**
   String get diveLog_edit_noMarineLife;
+
+  /// Heading over the one-tap species chips in the dive editor, offered because other dives at the dive's site logged them or the site's expected list names them
+  ///
+  /// In en, this message translates to:
+  /// **'Suggested for {siteName}'**
+  String diveLog_edit_suggestions_title(String siteName);
+
+  /// Screen reader label of a suggested species chip in the dive editor; tapping it adds the species to the dive
+  ///
+  /// In en, this message translates to:
+  /// **'Add {species}'**
+  String diveLog_edit_suggestions_add(String species);
+
+  /// Tooltip of a suggested species chip: how many other dives at this site logged the species
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{Seen on {count} other dive here} other{Seen on {count} other dives here}}'**
+  String diveLog_edit_suggestions_seenOnDives(int count);
+
+  /// Tooltip of a suggested species chip for a species named on the site's expected species list but never logged there
+  ///
+  /// In en, this message translates to:
+  /// **'On this site\'s expected species list'**
+  String get diveLog_edit_suggestions_expected;
+
+  /// Chip that expands the suggested species list to show every suggestion; count is the total
+  ///
+  /// In en, this message translates to:
+  /// **'Show all ({count})'**
+  String diveLog_edit_suggestions_showAll(int count);
+
+  /// Chip that collapses the expanded suggested species list back to the first few
+  ///
+  /// In en, this message translates to:
+  /// **'Show fewer'**
+  String get diveLog_edit_suggestions_showFewer;
 
   /// No description provided for @diveLog_edit_notSpecified.
   ///
@@ -13590,6 +13899,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Use Set'**
   String get diveLog_edit_useSet;
+
+  /// Bulk edit: button that stages an equipment set to remove from every selected dive
+  ///
+  /// In en, this message translates to:
+  /// **'Remove Set'**
+  String get diveLog_edit_removeSet;
+
+  /// Bulk edit: heading over the equipment sets staged for removal
+  ///
+  /// In en, this message translates to:
+  /// **'Sets to remove'**
+  String get diveLog_bulkEdit_setsToRemove;
+
+  /// Bulk edit: title of the sheet that picks an equipment set to remove from every selected dive
+  ///
+  /// In en, this message translates to:
+  /// **'Remove Equipment Set'**
+  String get diveLog_bulkEdit_removeSetTitle;
+
+  /// Bulk edit confirmation: section title for equipment sets
+  ///
+  /// In en, this message translates to:
+  /// **'Equipment sets'**
+  String get diveLog_bulkEdit_equipmentSets;
 
   /// No description provided for @diveLog_edit_weightPreset_use.
   ///
@@ -14377,6 +14710,12 @@ abstract class AppLocalizations {
   /// **'Annotations'**
   String get diveLog_legend_label_annotations;
 
+  /// No description provided for @diveLog_legend_label_plan.
+  ///
+  /// In en, this message translates to:
+  /// **'Plan'**
+  String get diveLog_legend_label_plan;
+
   /// No description provided for @diveLog_legend_label_computedEvents.
   ///
   /// In en, this message translates to:
@@ -14772,6 +15111,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{count, plural, =1{1 dive had nothing to fill} other{{count} dives had nothing to fill}}'**
   String diveLog_fetchConditions_summaryUnchanged(int count);
+
+  /// Confirm text for fetching conditions on selected dives (issue #4329): how many of the checked dives can be filled
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{{count} of {total} selected dives is missing conditions.} other{{count} of {total} selected dives are missing conditions.}} Only empty fields are filled, so nothing you have already entered will change.'**
+  String diveLog_fetchConditions_confirmBodySelected(int count, int total);
+
+  /// Added to the confirm text when some checked dives have no location to fetch conditions for (issue #4329)
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{{count} dive has no site location or GPS fix and will be skipped.} other{{count} dives have no site location or GPS fix and will be skipped.}}'**
+  String diveLog_fetchConditions_skippedNoLocation(int count);
+
+  /// Snackbar when no checked dive is missing conditions (issue #4329)
+  ///
+  /// In en, this message translates to:
+  /// **'None of the selected dives are missing conditions.'**
+  String get diveLog_fetchConditions_noneNeededSelected;
+
+  /// Snackbar when the checked dives missing conditions all lack a location (issue #4329)
+  ///
+  /// In en, this message translates to:
+  /// **'The selected dives that are missing conditions have no site location or GPS fix.'**
+  String get diveLog_fetchConditions_noneLocatedSelected;
 
   /// No description provided for @diveLog_fetchConditions_summaryCancelled.
   ///
@@ -15546,6 +15909,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Location from dive computer'**
   String get siteSuggestion_titleDiveComputer;
+
+  /// No description provided for @siteSuggestion_titleDraft.
+  ///
+  /// In en, this message translates to:
+  /// **'Location where you went in'**
+  String get siteSuggestion_titleDraft;
 
   /// No description provided for @siteSuggestion_assignButton.
   ///
@@ -17131,6 +17500,24 @@ abstract class AppLocalizations {
   /// **'End Pressure'**
   String get diveLog_tank_label_endPressure;
 
+  /// No description provided for @diveLog_tank_label_surfaceBreathing.
+  ///
+  /// In en, this message translates to:
+  /// **'Breathed at the surface'**
+  String get diveLog_tank_label_surfaceBreathing;
+
+  /// No description provided for @diveLog_tank_surfaceBreathing_helper.
+  ///
+  /// In en, this message translates to:
+  /// **'Minutes on this cylinder after the computer stopped logging, such as oxygen on the boat'**
+  String get diveLog_tank_surfaceBreathing_helper;
+
+  /// No description provided for @diveLog_tank_surfaceBreathing_unit.
+  ///
+  /// In en, this message translates to:
+  /// **'min'**
+  String get diveLog_tank_surfaceBreathing_unit;
+
   /// No description provided for @diveLog_tank_label_he.
   ///
   /// In en, this message translates to:
@@ -17220,6 +17607,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Used {pressure}'**
   String diveLog_cylinders_figureUsed(String pressure);
+
+  /// Cylinders card tank figure label: the tank's pressure at the moment the profile chart's cursor is on, beside a line across the tank figure at that level, e.g. "Now 130 bar". Shown only while hovering or dragging on the profile or tissue charts. pressure is the value with its unit.
+  ///
+  /// In en, this message translates to:
+  /// **'Now {pressure}'**
+  String diveLog_cylinders_figureNow(String pressure);
+
+  /// Cylinders card tank figure label: as diveLog_cylinders_figureNow, for a tank with no transmitter whose pressure is estimated as a straight line from its start and end pressures, e.g. "Now 130 bar (est.)". Use the same estimate marker as diveLog_pressure_estimatedSuffix. pressure is the value with its unit.
+  ///
+  /// In en, this message translates to:
+  /// **'Now {pressure} (est.)'**
+  String diveLog_cylinders_figureNowEstimated(String pressure);
 
   /// Cylinders card: what a screen reader says for a cylinder's gas pill, e.g. "Gas EAN32". mix is the gas mix name.
   ///
@@ -18042,6 +18441,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'min'**
   String get divePlanner_label_minutesUnit;
+
+  /// Unit suffix for a planner field entered in seconds, such as the gas switch stop
+  ///
+  /// In en, this message translates to:
+  /// **'s'**
+  String get divePlanner_label_secondsUnit;
 
   /// No description provided for @divePlanner_label_ndl.
   ///
@@ -22915,6 +23320,12 @@ abstract class AppLocalizations {
   /// **'Stage'**
   String get enum_tankRole_stage;
 
+  /// No description provided for @enum_tankRole_suitInflation.
+  ///
+  /// In en, this message translates to:
+  /// **'Suit Inflation'**
+  String get enum_tankRole_suitInflation;
+
   /// No description provided for @enum_tankRole_twinSet.
   ///
   /// In en, this message translates to:
@@ -23376,6 +23787,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Delete this fill record?'**
   String get passport_history_deleteConfirm;
+
+  /// No description provided for @passport_history_deleteFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not delete the fill. Try again.'**
+  String get passport_history_deleteFailed;
 
   /// No description provided for @passport_tag_title.
   ///
@@ -26794,17 +27211,59 @@ abstract class AppLocalizations {
   /// **'Move to location'**
   String get equipment_location_bulkAction;
 
-  /// Item count beside a location heading and on the Locations page
+  /// Item count beside a group heading on gear lists and pickers (a location, a type, or another diver's shared gear) and on the Locations page
   ///
   /// In en, this message translates to:
   /// **'{count, plural, one{{count} item} other{{count} items}}'**
   String equipment_location_groupCount(int count);
+
+  /// One type and its item count in a folded location heading's summary, e.g. BCD 2
+  ///
+  /// In en, this message translates to:
+  /// **'{type} {count}'**
+  String equipment_group_foldedTypeCount(int count, String type);
+
+  /// Second line of a folded type heading on the Equipment list: how many items inside need service
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{{count} service due} other{{count} service due}}'**
+  String equipment_group_foldedServiceDue(int count);
+
+  /// Ends a folded location heading's summary when it lists only the first three types
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{and {count} more} other{and {count} more}}'**
+  String equipment_group_foldedMoreTypes(int count);
+
+  /// Second line of a folded group heading in selection mode: ticked items inside it of all its items
+  ///
+  /// In en, this message translates to:
+  /// **'{selected} of {total} selected'**
+  String equipment_group_foldedSelected(int selected, int total);
+
+  /// Equipment list overflow menu: open every folded group
+  ///
+  /// In en, this message translates to:
+  /// **'Expand all'**
+  String get equipment_list_expandAllGroups;
+
+  /// Equipment list overflow menu: fold every outermost group
+  ///
+  /// In en, this message translates to:
+  /// **'Collapse all'**
+  String get equipment_list_collapseAllGroups;
 
   /// Chip in the active filters bar when the list is filtered by location
   ///
   /// In en, this message translates to:
   /// **'Location'**
   String get equipment_location_activeFilter;
+
+  /// Screen reader label for the place line on an equipment list card
+  ///
+  /// In en, this message translates to:
+  /// **'Location: {name}'**
+  String equipment_location_tileSemantics(String name);
 
   /// Heading of the location section in the equipment filter
   ///
@@ -28629,12 +29088,6 @@ abstract class AppLocalizations {
   /// **'Volume'**
   String get gasCalculators_consumption_volume;
 
-  /// No description provided for @gasCalculators_mod_aboutMod.
-  ///
-  /// In en, this message translates to:
-  /// **'About MOD'**
-  String get gasCalculators_mod_aboutMod;
-
   /// No description provided for @gasCalculators_mod_mode.
   ///
   /// In en, this message translates to:
@@ -28937,12 +29390,6 @@ abstract class AppLocalizations {
   /// **'Within your ppO₂, END and density limits at the depths checked.'**
   String get gasCalculators_mod_allClear;
 
-  /// No description provided for @gasCalculators_mod_aboutModesBody.
-  ///
-  /// In en, this message translates to:
-  /// **'The MOD is the depth at which the mix reaches the ppO₂ limit. It is always rounded down, never up.\n\nRec uses 1 bar per 10 m, like the dive log. OC Tec and CCR Tec take the ambient pressure from the water type, like the gas density calculator, so the same mix can show a slightly shallower MOD there.\n\nEAD counts nitrogen as narcotic, END nitrogen and oxygen. Your END limit, whether oxygen counts as narcotic and the default ppO₂ limits come from your diver profile.'**
-  String get gasCalculators_mod_aboutModesBody;
-
   /// No description provided for @gasCalculators_mod_modeRec.
   ///
   /// In en, this message translates to:
@@ -29031,18 +29478,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'He %'**
   String get gasCalculators_mnd_hePercent;
-
-  /// No description provided for @gasCalculators_mnd_infoContent.
-  ///
-  /// In en, this message translates to:
-  /// **'Maximum Narcotic Depth (MND) is the deepest you can go before narcosis exceeds your END limit. Equivalent Narcotic Depth (END) tells you the narcotic effect of your gas at a given depth.\n\nWhen \'O2 is narcotic\' is enabled, both oxygen and nitrogen contribute to narcosis (more conservative). When disabled, only nitrogen is considered narcotic.'**
-  String get gasCalculators_mnd_infoContent;
-
-  /// No description provided for @gasCalculators_mnd_infoTitle.
-  ///
-  /// In en, this message translates to:
-  /// **'About MND/END'**
-  String get gasCalculators_mnd_infoTitle;
 
   /// No description provided for @gasCalculators_mnd_unlimited.
   ///
@@ -29157,18 +29592,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Apply'**
   String get gasCalculators_icd_applyButton;
-
-  /// No description provided for @gasCalculators_icd_infoTitle.
-  ///
-  /// In en, this message translates to:
-  /// **'About Isobaric Counterdiffusion'**
-  String get gasCalculators_icd_infoTitle;
-
-  /// No description provided for @gasCalculators_icd_infoContent.
-  ///
-  /// In en, this message translates to:
-  /// **'Isobaric counterdiffusion (ICD) is the risk that switching from a more helium-rich to a more nitrogen-rich gas increases total inert gas tension in tissue, because helium diffuses faster than nitrogen. The rule of fifths is a common rule of thumb: the nitrogen fraction should not rise by more than a fifth of how much the helium fraction falls.\n\nAgencies disagree on how much this matters in practice for a well-planned dive with standard gases. This calculator applies the rule of thumb to whichever two gases you enter; it is not a substitute for training or professional advice.'**
-  String get gasCalculators_icd_infoContent;
 
   /// No description provided for @gasCalculators_ppO2Limit.
   ///
@@ -29403,18 +29826,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'The cylinder is holding pressure but no oxygen and no helium, which would be pure nitrogen. Check the mix already in the cylinder.'**
   String get gasCalculators_blender_error_implausibleStartMix;
-
-  /// No description provided for @gasCalculators_blender_about.
-  ///
-  /// In en, this message translates to:
-  /// **'About blending'**
-  String get gasCalculators_blender_about;
-
-  /// No description provided for @gasCalculators_blender_aboutBody.
-  ///
-  /// In en, this message translates to:
-  /// **'Partial-pressure blend for the target mix. Add each fill gas in order, up to the pressure shown, then let the cylinder settle. Fill gases and their order are configurable, so setting the last gas to 32/0 tops off with EAN32 instead of air. Always analyse the finished mix before diving it.'**
-  String get gasCalculators_blender_aboutBody;
 
   /// No description provided for @gasCalculators_blender_conditions.
   ///
@@ -30130,12 +30541,6 @@ abstract class AppLocalizations {
   /// **'Equivalent air density depth (EADD)'**
   String get gasCalculators_density_eaddLabel;
 
-  /// No description provided for @gasCalculators_density_eaddInfo.
-  ///
-  /// In en, this message translates to:
-  /// **'EADD is the depth at which air would be as dense as this gas. Unlike the density in g/L, it does not depend on the temperature.'**
-  String get gasCalculators_density_eaddInfo;
-
   /// No description provided for @gasCalculators_density_loopGasTitle.
   ///
   /// In en, this message translates to:
@@ -30163,18 +30568,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'The diluent alone gives ppO2 {ppO2} here, above the setpoint. The density uses the diluent\'s ppO2.'**
   String gasCalculators_density_diluentAboveSetpoint(Object ppO2);
-
-  /// No description provided for @gasCalculators_density_infoTitle.
-  ///
-  /// In en, this message translates to:
-  /// **'About Gas Density'**
-  String get gasCalculators_density_infoTitle;
-
-  /// No description provided for @gasCalculators_density_infoContent.
-  ///
-  /// In en, this message translates to:
-  /// **'Dense gas is harder to breathe and raises the risk of CO2 retention. Keep the density at or below {warn} g/L; {critical} g/L is the hard ceiling.\n\nOn CCR the density is that of the loop gas: oxygen at the setpoint, the rest split between nitrogen and helium in the diluent\'s ratio.\n\nColder gas is denser, so the colder temperature option is the conservative one. The calculation assumes an ideal gas.'**
-  String gasCalculators_density_infoContent(Object warn, Object critical);
 
   /// No description provided for @gasCalculators_desc_blender.
   ///
@@ -30334,12 +30727,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Top Sites'**
   String get marineLife_speciesDetail_topSitesTitle;
-
-  /// No description provided for @marineLife_speciesDetail_totalSightingsLabel.
-  ///
-  /// In en, this message translates to:
-  /// **'Total Sightings'**
-  String get marineLife_speciesDetail_totalSightingsLabel;
 
   /// No description provided for @marineLife_speciesEdit_addTitle.
   ///
@@ -30779,11 +31166,59 @@ abstract class AppLocalizations {
   /// **'Sort'**
   String get marineLife_speciesPage_sortTooltip;
 
-  /// No description provided for @marineLife_speciesPage_sort_mostSightings.
+  /// No description provided for @marineLife_speciesPage_sort_mostDives.
   ///
   /// In en, this message translates to:
-  /// **'Most sightings'**
-  String get marineLife_speciesPage_sort_mostSightings;
+  /// **'Most dives'**
+  String get marineLife_speciesPage_sort_mostDives;
+
+  /// Label above the sighting abundance choices
+  ///
+  /// In en, this message translates to:
+  /// **'How many'**
+  String get marineLife_abundance_label;
+
+  /// Sighting abundance: the species was seen, with no number given
+  ///
+  /// In en, this message translates to:
+  /// **'Seen'**
+  String get marineLife_abundance_seen;
+
+  /// Sighting abundance, REEF survey group: one animal
+  ///
+  /// In en, this message translates to:
+  /// **'Single'**
+  String get marineLife_abundance_single;
+
+  /// Sighting abundance, REEF survey group: 2 to 10 animals
+  ///
+  /// In en, this message translates to:
+  /// **'Few'**
+  String get marineLife_abundance_few;
+
+  /// Sighting abundance, REEF survey group: 11 to 100 animals
+  ///
+  /// In en, this message translates to:
+  /// **'Many'**
+  String get marineLife_abundance_many;
+
+  /// Sighting abundance, REEF survey group: more than 100 animals
+  ///
+  /// In en, this message translates to:
+  /// **'Abundant'**
+  String get marineLife_abundance_abundant;
+
+  /// Sighting abundance: an exact number of animals, entered with a stepper
+  ///
+  /// In en, this message translates to:
+  /// **'Exact'**
+  String get marineLife_abundance_exact;
+
+  /// Helper line under the sighting abundance choices giving each REEF group's range
+  ///
+  /// In en, this message translates to:
+  /// **'Few 2 to 10, Many 11 to 100, Abundant over 100'**
+  String get marineLife_abundance_ranges;
 
   /// No description provided for @marineLife_speciesPage_sort_recentlySeen.
   ///
@@ -30856,6 +31291,252 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Retry'**
   String get marineLife_speciesPage_retry;
+
+  /// No description provided for @speciesMap_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Species Map'**
+  String get speciesMap_title;
+
+  /// No description provided for @speciesMap_openTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Species map'**
+  String get speciesMap_openTooltip;
+
+  /// No description provided for @speciesMap_pickSpeciesTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick a species'**
+  String get speciesMap_pickSpeciesTooltip;
+
+  /// No description provided for @speciesMap_list_searchHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Search all species'**
+  String get speciesMap_list_searchHint;
+
+  /// No description provided for @speciesMap_list_allSites.
+  ///
+  /// In en, this message translates to:
+  /// **'All sites'**
+  String get speciesMap_list_allSites;
+
+  /// No description provided for @speciesMap_list_allSitesSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'What you have logged where'**
+  String get speciesMap_list_allSitesSubtitle;
+
+  /// No description provided for @speciesMap_list_notSeen.
+  ///
+  /// In en, this message translates to:
+  /// **'Not seen yet'**
+  String get speciesMap_list_notSeen;
+
+  /// No description provided for @speciesMap_list_counts.
+  ///
+  /// In en, this message translates to:
+  /// **'{sightings, plural, one{{sightings} sighting} other{{sightings} sightings}}, {sites, plural, one{{sites} site} other{{sites} sites}}'**
+  String speciesMap_list_counts(int sightings, int sites);
+
+  /// No description provided for @speciesMap_legend_mySightings.
+  ///
+  /// In en, this message translates to:
+  /// **'My sightings'**
+  String get speciesMap_legend_mySightings;
+
+  /// No description provided for @speciesMap_legend_expected.
+  ///
+  /// In en, this message translates to:
+  /// **'Expected, not logged'**
+  String get speciesMap_legend_expected;
+
+  /// No description provided for @speciesMap_legend_publicRecords.
+  ///
+  /// In en, this message translates to:
+  /// **'Public records'**
+  String get speciesMap_legend_publicRecords;
+
+  /// No description provided for @speciesMap_legend_speciesLogged.
+  ///
+  /// In en, this message translates to:
+  /// **'Species logged at a site'**
+  String get speciesMap_legend_speciesLogged;
+
+  /// No description provided for @speciesMap_layers_tooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Map layers'**
+  String get speciesMap_layers_tooltip;
+
+  /// No description provided for @speciesMap_layers_public.
+  ///
+  /// In en, this message translates to:
+  /// **'Public records (GBIF)'**
+  String get speciesMap_layers_public;
+
+  /// No description provided for @speciesMap_layers_publicHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Sends the picked species, or the tapped site\'s location, to GBIF.'**
+  String get speciesMap_layers_publicHint;
+
+  /// No description provided for @speciesMap_layers_expectedHeading.
+  ///
+  /// In en, this message translates to:
+  /// **'Expected species from'**
+  String get speciesMap_layers_expectedHeading;
+
+  /// No description provided for @speciesMap_layers_scopeMine.
+  ///
+  /// In en, this message translates to:
+  /// **'My sites'**
+  String get speciesMap_layers_scopeMine;
+
+  /// No description provided for @speciesMap_layers_scopeAllVisible.
+  ///
+  /// In en, this message translates to:
+  /// **'All sites I can see'**
+  String get speciesMap_layers_scopeAllVisible;
+
+  /// No description provided for @speciesMap_card_loggedHere.
+  ///
+  /// In en, this message translates to:
+  /// **'Logged here'**
+  String get speciesMap_card_loggedHere;
+
+  /// No description provided for @speciesMap_card_expectedNotLogged.
+  ///
+  /// In en, this message translates to:
+  /// **'Expected, not logged yet'**
+  String get speciesMap_card_expectedNotLogged;
+
+  /// No description provided for @speciesMap_card_expectedPin.
+  ///
+  /// In en, this message translates to:
+  /// **'Expected here, not logged yet'**
+  String get speciesMap_card_expectedPin;
+
+  /// No description provided for @speciesMap_card_nothingLogged.
+  ///
+  /// In en, this message translates to:
+  /// **'Nothing logged here yet'**
+  String get speciesMap_card_nothingLogged;
+
+  /// No description provided for @speciesMap_card_close.
+  ///
+  /// In en, this message translates to:
+  /// **'Close'**
+  String get speciesMap_card_close;
+
+  /// No description provided for @speciesMap_card_openSite.
+  ///
+  /// In en, this message translates to:
+  /// **'Open site'**
+  String get speciesMap_card_openSite;
+
+  /// No description provided for @speciesMap_card_speciesCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{{count} species} other{{count} species}}'**
+  String speciesMap_card_speciesCount(int count);
+
+  /// No description provided for @speciesMap_card_sightingRow.
+  ///
+  /// In en, this message translates to:
+  /// **'{date}, dive {number}, ×{count}'**
+  String speciesMap_card_sightingRow(String date, String number, int count);
+
+  /// No description provided for @speciesMap_card_speciesWithCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{species} ×{count}'**
+  String speciesMap_card_speciesWithCount(String species, int count);
+
+  /// No description provided for @speciesMap_unplaced.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{{count} sighting is on a dive without a mapped site} other{{count} sightings are on dives without a mapped site}}'**
+  String speciesMap_unplaced(int count);
+
+  /// No description provided for @speciesMap_noPublicRecords.
+  ///
+  /// In en, this message translates to:
+  /// **'No public records can be shown for this species: it needs a scientific name GBIF recognises.'**
+  String get speciesMap_noPublicRecords;
+
+  /// No description provided for @speciesMap_publicUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Public records could not be loaded.'**
+  String get speciesMap_publicUnavailable;
+
+  /// No description provided for @speciesMap_error_loading.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not load the species map.'**
+  String get speciesMap_error_loading;
+
+  /// No description provided for @speciesMap_suggestPublic.
+  ///
+  /// In en, this message translates to:
+  /// **'You have not logged this species at a mapped site. Turn on public records to see where others have.'**
+  String get speciesMap_suggestPublic;
+
+  /// No description provided for @speciesMap_attribution.
+  ///
+  /// In en, this message translates to:
+  /// **'Records: GBIF.org'**
+  String get speciesMap_attribution;
+
+  /// No description provided for @speciesMap_semantics_sitePin.
+  ///
+  /// In en, this message translates to:
+  /// **'{site}, {count, plural, one{{count} species} other{{count} species}}'**
+  String speciesMap_semantics_sitePin(String site, int count);
+
+  /// No description provided for @speciesMap_semantics_loggedPin.
+  ///
+  /// In en, this message translates to:
+  /// **'{site}, {count, plural, one{{count} sighting} other{{count} sightings}}'**
+  String speciesMap_semantics_loggedPin(String site, int count);
+
+  /// No description provided for @speciesMap_semantics_expectedPin.
+  ///
+  /// In en, this message translates to:
+  /// **'{site}, expected'**
+  String speciesMap_semantics_expectedPin(String site);
+
+  /// Screen-reader label for a cluster of pins on the species map
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{{count} site} other{{count} sites}}'**
+  String speciesMap_semantics_cluster(int count);
+
+  /// No description provided for @speciesMap_whereSeen_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Where seen'**
+  String get speciesMap_whereSeen_title;
+
+  /// No description provided for @speciesMap_whereSeen_openFullMap.
+  ///
+  /// In en, this message translates to:
+  /// **'Open full map'**
+  String get speciesMap_whereSeen_openFullMap;
+
+  /// No description provided for @speciesMap_whereSeen_empty.
+  ///
+  /// In en, this message translates to:
+  /// **'Not logged at a mapped site yet.'**
+  String get speciesMap_whereSeen_empty;
+
+  /// No description provided for @speciesMap_whereSeen_siteWithCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{site} ({count})'**
+  String speciesMap_whereSeen_siteWithCount(String site, int count);
 
   /// No description provided for @marineLife_speciesDetail_sightingsTitle.
   ///
@@ -31528,6 +32209,24 @@ abstract class AppLocalizations {
   /// **'Select All'**
   String get media_photoPicker_selectAllButton;
 
+  /// No description provided for @media_photoPicker_albumFilter_all.
+  ///
+  /// In en, this message translates to:
+  /// **'All albums'**
+  String get media_photoPicker_albumFilter_all;
+
+  /// No description provided for @media_photoPicker_albumFilter_chip.
+  ///
+  /// In en, this message translates to:
+  /// **'{album} ({count})'**
+  String media_photoPicker_albumFilter_chip(String album, int count);
+
+  /// No description provided for @media_photoPicker_albumFilter_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Filter by album'**
+  String get media_photoPicker_albumFilter_label;
+
   /// No description provided for @media_photoPicker_selectedCount.
   ///
   /// In en, this message translates to:
@@ -32135,6 +32834,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Video file not found'**
   String get media_photoViewer_videoFileNotFound;
+
+  /// Media viewer, in a browser with no service workers (a private window): a Google Drive or WebDAV video cannot stream.
+  ///
+  /// In en, this message translates to:
+  /// **'Playing this video needs a normal browser window. Private windows cannot stream from Google Drive or WebDAV.'**
+  String get media_photoViewer_videoNeedsNormalWindow;
 
   /// No description provided for @media_photoViewer_videoNotLinked.
   ///
@@ -32820,6 +33525,12 @@ abstract class AppLocalizations {
   /// **'No media yet'**
   String get media_library_empty;
 
+  /// Empty state for the media library while a filter is on and nothing matches it
+  ///
+  /// In en, this message translates to:
+  /// **'No media matches these filters'**
+  String get media_library_emptyFiltered;
+
   /// Library filter chip: no type filter
   ///
   /// In en, this message translates to:
@@ -32879,6 +33590,54 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Missing files ({count})'**
   String media_library_filter_missingCount(int count);
+
+  /// Library filter People choice, pinned first in the People picker and shown as the People row's value: items with no buddy or Me tag at all
+  ///
+  /// In en, this message translates to:
+  /// **'No one tagged'**
+  String get media_library_filter_noPeople;
+
+  /// People row in the library filter: two people picked, e.g. Me, Alex
+  ///
+  /// In en, this message translates to:
+  /// **'{first}, {second}'**
+  String media_library_filter_peopleTwo(String first, String second);
+
+  /// People row in the library filter: the first names picked, then how many more, e.g. Me, Alex +3
+  ///
+  /// In en, this message translates to:
+  /// **'{names} +{count}'**
+  String media_library_filter_peopleAndMore(String names, int count);
+
+  /// People row in the library filter while buddy names are still loading: how many people are picked
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{{count} person} other{{count} people}}'**
+  String media_library_filter_peopleCount(int count);
+
+  /// Search field hint in the library filter's People picker
+  ///
+  /// In en, this message translates to:
+  /// **'Search people'**
+  String get media_library_filter_peopleSearchHint;
+
+  /// People picker in the library filter: nothing matches the search
+  ///
+  /// In en, this message translates to:
+  /// **'No people match'**
+  String get media_library_filter_peopleNoMatch;
+
+  /// Tooltip on the button that clears the people picked in the library filter
+  ///
+  /// In en, this message translates to:
+  /// **'Clear people'**
+  String get media_library_filter_peopleClear;
+
+  /// Library filter switch: dive items with no time in the dive profile, so the profile chart draws no marker for them
+  ///
+  /// In en, this message translates to:
+  /// **'Not placed in the dive'**
+  String get media_library_filter_notPlacedInDive;
 
   /// Library filter chip: reset every filter
   ///
@@ -32951,6 +33710,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Unlinked'**
   String get media_library_unlinkedHeader;
+
+  /// By-dive view section heading above the groups of media attached to a site but to no dive
+  ///
+  /// In en, this message translates to:
+  /// **'Site pictures'**
+  String get media_library_sectionSitePictures;
+
+  /// By-dive view section heading above the groups of media attached to an equipment item but to no dive or site
+  ///
+  /// In en, this message translates to:
+  /// **'Equipment pictures'**
+  String get media_library_sectionEquipmentPictures;
 
   /// Accessibility hint for the by-dive group header, which opens the dive
   ///
@@ -35193,12 +35964,6 @@ abstract class AppLocalizations {
   /// **'Buoyancy through the dive, swing, ditchable weight'**
   String get diveDetailSection_buoyancy_description;
 
-  /// No description provided for @buoyancy_tooltip.
-  ///
-  /// In en, this message translates to:
-  /// **'Modeled net buoyancy through the dive from your profile, gas use, and gear.'**
-  String get buoyancy_tooltip;
-
   /// No description provided for @buoyancy_verdictBuoyant.
   ///
   /// In en, this message translates to:
@@ -35444,6 +36209,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Equipment'**
   String get diveDetailSection_equipment_name;
+
+  /// No description provided for @diveDetailSection_health_description.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate, recovery and sleep from Apple Health'**
+  String get diveDetailSection_health_description;
 
   /// No description provided for @diveDetailSection_equipment_description.
   ///
@@ -35696,6 +36467,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Show dive site map as background on dive cards (requires site location)'**
   String get settings_appearance_mapBackgroundDiveCards_subtitleWithNote;
+
+  /// No description provided for @settings_appearance_photoBackgroundDiveCards.
+  ///
+  /// In en, this message translates to:
+  /// **'Photo background on dive cards'**
+  String get settings_appearance_photoBackgroundDiveCards;
+
+  /// No description provided for @settings_appearance_photoBackgroundDiveCards_subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Show one of the dive\'s photos as background on dive cards (falls back to the map or colour when a dive has no photos)'**
+  String get settings_appearance_photoBackgroundDiveCards_subtitle;
+
+  /// No description provided for @settings_appearance_photoOverlayDark.
+  ///
+  /// In en, this message translates to:
+  /// **'Photo overlay opacity, dark theme'**
+  String get settings_appearance_photoOverlayDark;
+
+  /// No description provided for @settings_appearance_photoOverlayLight.
+  ///
+  /// In en, this message translates to:
+  /// **'Photo overlay opacity, light theme'**
+  String get settings_appearance_photoOverlayLight;
+
+  /// No description provided for @settings_appearance_photoOverlay_subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Higher keeps the text readable, lower shows more of the photo'**
+  String get settings_appearance_photoOverlay_subtitle;
 
   /// No description provided for @settings_appearance_mapBackgroundSiteCards.
   ///
@@ -38358,6 +39159,12 @@ abstract class AppLocalizations {
   /// **'Tag imported dives'**
   String get settings_conflict_field_autoTagImports;
 
+  /// No description provided for @settings_conflict_field_avgHeartRate.
+  ///
+  /// In en, this message translates to:
+  /// **'Average heart rate'**
+  String get settings_conflict_field_avgHeartRate;
+
   /// Label for the downloads-follow-computer-owner setting in a sync conflict
   ///
   /// In en, this message translates to:
@@ -38447,6 +39254,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Equipment grouped by location'**
   String get settings_conflict_field_equipmentGroupByLocation;
+
+  /// Label for the Equipment page's saved folded groups in a sync conflict
+  ///
+  /// In en, this message translates to:
+  /// **'Equipment folded groups'**
+  String get settings_conflict_field_equipmentCollapsedGroups;
 
   /// Label for a saved list arrangement in a sync conflict
   ///
@@ -39918,6 +40731,30 @@ abstract class AppLocalizations {
   /// **'Heading correction in degrees'**
   String get settings_conflict_field_headingOffsetDeg;
 
+  /// No description provided for @settings_conflict_field_heartRateAtExit.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate at surfacing'**
+  String get settings_conflict_field_heartRateAtExit;
+
+  /// No description provided for @settings_conflict_field_heartRateExitPlus15.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate 15 min after surfacing'**
+  String get settings_conflict_field_heartRateExitPlus15;
+
+  /// No description provided for @settings_conflict_field_heartRateExitPlus5.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate 5 min after surfacing'**
+  String get settings_conflict_field_heartRateExitPlus5;
+
+  /// No description provided for @settings_conflict_field_heartRateSamples.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate from Apple Health'**
+  String get settings_conflict_field_heartRateSamples;
+
   /// No description provided for @settings_conflict_field_scaleFactor.
   ///
   /// In en, this message translates to:
@@ -40097,6 +40934,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Done'**
   String get settings_conflict_field_isDone;
+
+  /// No description provided for @settings_conflict_field_isDraft.
+  ///
+  /// In en, this message translates to:
+  /// **'Draft dive'**
+  String get settings_conflict_field_isDraft;
+
+  /// No description provided for @settings_conflict_field_isEdit.
+  ///
+  /// In en, this message translates to:
+  /// **'Profile edited by hand'**
+  String get settings_conflict_field_isEdit;
 
   /// No description provided for @settings_conflict_field_isOrphaned.
   ///
@@ -40374,6 +41223,12 @@ abstract class AppLocalizations {
   /// **'Maximum descent rate'**
   String get settings_conflict_field_maxDescentRate;
 
+  /// No description provided for @settings_conflict_field_maxHeartRate.
+  ///
+  /// In en, this message translates to:
+  /// **'Maximum heart rate'**
+  String get settings_conflict_field_maxHeartRate;
+
   /// No description provided for @settings_conflict_field_maxSpeed.
   ///
   /// In en, this message translates to:
@@ -40505,6 +41360,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Overdue services'**
   String get settings_conflict_field_overdueServices;
+
+  /// No description provided for @settings_conflict_field_overnightHrvMs.
+  ///
+  /// In en, this message translates to:
+  /// **'Overnight heart rate variability'**
+  String get settings_conflict_field_overnightHrvMs;
 
   /// No description provided for @settings_conflict_field_params.
   ///
@@ -41346,6 +42207,24 @@ abstract class AppLocalizations {
   /// **'Map behind dive cards'**
   String get settings_conflict_field_showMapBackgroundOnDiveCards;
 
+  /// No description provided for @settings_conflict_field_showPhotoBackgroundOnDiveCards.
+  ///
+  /// In en, this message translates to:
+  /// **'Photo behind dive cards'**
+  String get settings_conflict_field_showPhotoBackgroundOnDiveCards;
+
+  /// No description provided for @settings_conflict_field_cardPhotoOverlayDark.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive card photo overlay (dark theme)'**
+  String get settings_conflict_field_cardPhotoOverlayDark;
+
+  /// No description provided for @settings_conflict_field_cardPhotoOverlayLight.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive card photo overlay (light theme)'**
+  String get settings_conflict_field_cardPhotoOverlayLight;
+
   /// No description provided for @settings_conflict_field_showMapBackgroundOnSiteCards.
   ///
   /// In en, this message translates to:
@@ -41429,6 +42308,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Size'**
   String get settings_conflict_field_size;
+
+  /// No description provided for @settings_conflict_field_sleepBeforeMinutes.
+  ///
+  /// In en, this message translates to:
+  /// **'Sleep the night before'**
+  String get settings_conflict_field_sleepBeforeMinutes;
 
   /// No description provided for @settings_conflict_field_sortOrder.
   ///
@@ -41562,6 +42447,12 @@ abstract class AppLocalizations {
   /// **'Settings for this dive only'**
   String get settings_conflict_field_settingOverrides;
 
+  /// No description provided for @settings_conflict_field_settled.
+  ///
+  /// In en, this message translates to:
+  /// **'Apple Health readings complete'**
+  String get settings_conflict_field_settled;
+
   /// No description provided for @settings_conflict_field_startTime.
   ///
   /// In en, this message translates to:
@@ -41639,6 +42530,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Replaces built-in rule'**
   String get settings_conflict_field_supersedesRuleId;
+
+  /// No description provided for @settings_conflict_field_surfaceBreathingDuration.
+  ///
+  /// In en, this message translates to:
+  /// **'Time breathed at the surface'**
+  String get settings_conflict_field_surfaceBreathingDuration;
 
   /// No description provided for @settings_conflict_field_surfaceConditions.
   ///
@@ -42942,6 +43839,18 @@ abstract class AppLocalizations {
   /// **'{title} expires today'**
   String notifications_document_expiresToday_title(String title);
 
+  /// No description provided for @notifications_draftReminder_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Download your dive computer to fill in the draft.'**
+  String get notifications_draftReminder_body;
+
+  /// No description provided for @notifications_draftReminder_title.
+  ///
+  /// In en, this message translates to:
+  /// **'A dive is waiting for your dive computer'**
+  String get notifications_draftReminder_title;
+
   /// No description provided for @notifications_document_expiresToday_body.
   ///
   /// In en, this message translates to:
@@ -43884,6 +44793,12 @@ abstract class AppLocalizations {
   /// **'Last backup did not reach the cloud'**
   String get dataHealth_backup_cloudCopyMissing;
 
+  /// No description provided for @dataHealth_backup_extraCopyMissing.
+  ///
+  /// In en, this message translates to:
+  /// **'Last backup did not reach every account'**
+  String get dataHealth_backup_extraCopyMissing;
+
   /// No description provided for @dataHealth_backup_noOffDeviceCopy.
   ///
   /// In en, this message translates to:
@@ -43989,7 +44904,7 @@ abstract class AppLocalizations {
   /// No description provided for @settings_data_dataTools_subtitle.
   ///
   /// In en, this message translates to:
-  /// **'Fix dive times, link buddies, retype gear, data quality, table editor'**
+  /// **'Fix dive times, link buddies, retype gear, data quality, table editor, re-parse dives'**
   String get settings_data_dataTools_subtitle;
 
   /// No description provided for @settings_agentAccess_title.
@@ -44459,18 +45374,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{count, plural, one{{count} photo or video} other{{count} photos and videos}}'**
   String dataHealth_facts_media(int count);
-
-  /// No description provided for @settings_decompression_aboutContent.
-  ///
-  /// In en, this message translates to:
-  /// **'Gradient Factors (GF) control how conservative your decompression calculations are. GF Low affects deep stops, while GF High affects shallow stops.  Lower values = more conservative = longer deco stops Higher values = less conservative = shorter deco stops'**
-  String get settings_decompression_aboutContent;
-
-  /// No description provided for @settings_decompression_aboutTitle.
-  ///
-  /// In en, this message translates to:
-  /// **'About Gradient Factors'**
-  String get settings_decompression_aboutTitle;
 
   /// No description provided for @settings_decompression_currentSettings.
   ///
@@ -45836,6 +46739,18 @@ abstract class AppLocalizations {
   /// **'Notifications Disabled'**
   String get settings_notifications_disabled_title;
 
+  /// No description provided for @settings_notifications_draftReminder.
+  ///
+  /// In en, this message translates to:
+  /// **'Remind me about draft dives'**
+  String get settings_notifications_draftReminder;
+
+  /// No description provided for @settings_notifications_draftReminder_subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Three days after a draft dive\'s exit, if it is still waiting for a download'**
+  String get settings_notifications_draftReminder_subtitle;
+
   /// No description provided for @settings_notifications_enableServiceReminders.
   ///
   /// In en, this message translates to:
@@ -45859,18 +46774,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Service Reminders'**
   String get settings_notifications_header_serviceReminders;
-
-  /// No description provided for @settings_notifications_howItWorks_content.
-  ///
-  /// In en, this message translates to:
-  /// **'Notifications are scheduled when the app launches and refresh periodically in the background. You can customize reminders for individual equipment items in their edit screen.'**
-  String get settings_notifications_howItWorks_content;
-
-  /// No description provided for @settings_notifications_howItWorks_title.
-  ///
-  /// In en, this message translates to:
-  /// **'How it works'**
-  String get settings_notifications_howItWorks_title;
 
   /// No description provided for @settings_notifications_permissionRequired.
   ///
@@ -48963,29 +49866,41 @@ abstract class AppLocalizations {
   /// **'Gas Mix Distribution'**
   String get insights_gas_gasMix_title;
 
-  /// No description provided for @insights_gas_sacByRole_empty.
+  /// No description provided for @insights_gas_roleUse_title.
   ///
   /// In en, this message translates to:
-  /// **'No multi-tank data available'**
-  String get insights_gas_sacByRole_empty;
+  /// **'Consumption by cylinder role'**
+  String get insights_gas_roleUse_title;
 
-  /// No description provided for @insights_gas_sacByRole_error.
+  /// No description provided for @insights_gas_roleUse_subtitle.
   ///
   /// In en, this message translates to:
-  /// **'Failed to load consumption by role'**
-  String get insights_gas_sacByRole_error;
+  /// **'Each role over the time it was breathed'**
+  String get insights_gas_roleUse_subtitle;
 
-  /// No description provided for @insights_gas_sacByRole_subtitle.
+  /// No description provided for @insights_gas_roleUse_empty.
   ///
   /// In en, this message translates to:
-  /// **'Average consumption by tank type'**
-  String get insights_gas_sacByRole_subtitle;
+  /// **'No cylinder role rates yet'**
+  String get insights_gas_roleUse_empty;
 
-  /// No description provided for @insights_gas_sacByRole_title.
+  /// No description provided for @insights_gas_roleUse_error.
   ///
   /// In en, this message translates to:
-  /// **'Gas consumption by tank role'**
-  String get insights_gas_sacByRole_title;
+  /// **'Failed to load consumption by cylinder role'**
+  String get insights_gas_roleUse_error;
+
+  /// No description provided for @insights_gas_roleGroup_bottomGas.
+  ///
+  /// In en, this message translates to:
+  /// **'Bottom gas'**
+  String get insights_gas_roleGroup_bottomGas;
+
+  /// No description provided for @insights_gas_roleUse_leftOut.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{{count} dive is left out: a stage, deco, pony or bailout cylinder lost gas with no gas switch onto it} other{{count} dives are left out: a stage, deco, pony or bailout cylinder lost gas with no gas switch onto it}}'**
+  String insights_gas_roleUse_leftOut(int count);
 
   /// No description provided for @insights_gas_ccrUse_title.
   ///
@@ -49908,12 +50823,6 @@ abstract class AppLocalizations {
   /// **'Trimix'**
   String get insights_focus_gas_trimix;
 
-  /// No description provided for @insights_gas_tankRole_backGas.
-  ///
-  /// In en, this message translates to:
-  /// **'Back Gas'**
-  String get insights_gas_tankRole_backGas;
-
   /// No description provided for @insights_gas_tankRole_bailout.
   ///
   /// In en, this message translates to:
@@ -49932,41 +50841,17 @@ abstract class AppLocalizations {
   /// **'Diluent'**
   String get insights_gas_tankRole_diluent;
 
-  /// No description provided for @insights_gas_tankRole_oxygenSupply.
-  ///
-  /// In en, this message translates to:
-  /// **'O₂ Supply'**
-  String get insights_gas_tankRole_oxygenSupply;
-
   /// No description provided for @insights_gas_tankRole_pony.
   ///
   /// In en, this message translates to:
   /// **'Pony'**
   String get insights_gas_tankRole_pony;
 
-  /// No description provided for @insights_gas_tankRole_sidemountLeft.
-  ///
-  /// In en, this message translates to:
-  /// **'Sidemount L'**
-  String get insights_gas_tankRole_sidemountLeft;
-
-  /// No description provided for @insights_gas_tankRole_sidemountRight.
-  ///
-  /// In en, this message translates to:
-  /// **'Sidemount R'**
-  String get insights_gas_tankRole_sidemountRight;
-
   /// No description provided for @insights_gas_tankRole_stage.
   ///
   /// In en, this message translates to:
   /// **'Stage'**
   String get insights_gas_tankRole_stage;
-
-  /// No description provided for @insights_gas_tankRole_twinSet.
-  ///
-  /// In en, this message translates to:
-  /// **'Twin Set'**
-  String get insights_gas_tankRole_twinSet;
 
   /// No description provided for @insights_geographic_appBar_title.
   ///
@@ -51438,18 +52323,6 @@ abstract class AppLocalizations {
   /// **'{label}: {value}'**
   String insights_valueCard_semanticLabel(Object label, Object value);
 
-  /// Educational text explaining tissue compartments and nitrogen loading
-  ///
-  /// In en, this message translates to:
-  /// **'Your body has 16 tissue compartments that absorb and release nitrogen at different rates. Fast tissues (like blood) saturate quickly but also off-gas quickly. Slow tissues (like bone and fat) take longer to both load and unload.  The \"leading compartment\" is whichever tissue is most saturated and typically controls your no-decompression limit (NDL). During a surface interval, all tissues off-gas toward surface saturation levels (~40% loading).'**
-  String get surfaceInterval_aboutTissueLoading_body;
-
-  /// Title for the tissue loading info card
-  ///
-  /// In en, this message translates to:
-  /// **'About Tissue Loading'**
-  String get surfaceInterval_aboutTissueLoading_title;
-
   /// Tooltip for the reset button on the surface interval tool
   ///
   /// In en, this message translates to:
@@ -52005,6 +52878,60 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Color'**
   String get tags_manage_colorLabel;
+
+  /// The light shade of a tag colour, read by screen readers. {color} is the hue name.
+  ///
+  /// In en, this message translates to:
+  /// **'{color}, light'**
+  String tags_color_shadeLight(String color);
+
+  /// The dark shade of a tag colour, read by screen readers. {color} is the hue name.
+  ///
+  /// In en, this message translates to:
+  /// **'{color}, dark'**
+  String tags_color_shadeDark(String color);
+
+  /// The tag colour picker's dot for a colour off the palette. {code} is the stored colour code.
+  ///
+  /// In en, this message translates to:
+  /// **'Current color, {code}'**
+  String tags_color_current(String code);
+
+  /// No description provided for @tags_color_custom.
+  ///
+  /// In en, this message translates to:
+  /// **'Custom color'**
+  String get tags_color_custom;
+
+  /// No description provided for @tags_color_hexLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Hex code'**
+  String get tags_color_hexLabel;
+
+  /// No description provided for @tags_color_hexError.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter six digits 0-9 or A-F, like #2E8B57'**
+  String get tags_color_hexError;
+
+  /// No description provided for @tags_color_use.
+  ///
+  /// In en, this message translates to:
+  /// **'Use'**
+  String get tags_color_use;
+
+  /// No description provided for @tags_color_hueLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Hue'**
+  String get tags_color_hueLabel;
+
+  /// No description provided for @tags_color_squareLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Saturation and brightness'**
+  String get tags_color_squareLabel;
 
   /// No description provided for @tags_manage_narrowDialog_confirm.
   ///
@@ -56071,6 +56998,18 @@ abstract class AppLocalizations {
   /// **'This format is not yet supported. Please export as UDDF or CSV.'**
   String get universalImport_error_unsupportedFormat;
 
+  /// No description provided for @universalImport_fillDraft_ambiguous.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{Another dive fits this draft too. Choose the draft it fills.} other{Fits {count} drafts. Choose the one it fills.}}'**
+  String universalImport_fillDraft_ambiguous(int count);
+
+  /// No description provided for @universalImport_fillDraft_choose.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose draft'**
+  String get universalImport_fillDraft_choose;
+
   /// Warning on the review step when duplicate detection failed and the incoming rows were left unmarked
   ///
   /// In en, this message translates to:
@@ -56280,6 +57219,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Attach this download to the dive you planned'**
   String get universalImport_compare_fillPlannedSubtitle;
+
+  /// Import action: attach the download to a draft dive marked at the site
+  ///
+  /// In en, this message translates to:
+  /// **'Fill draft'**
+  String get universalImport_label_fillDraft;
+
+  /// No description provided for @universalImport_compare_fillDraftSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Attach this download to the dive you marked at the site'**
+  String get universalImport_compare_fillDraftSubtitle;
+
+  /// No description provided for @universalImport_fillDraft_target.
+  ///
+  /// In en, this message translates to:
+  /// **'Fills draft: {label}'**
+  String universalImport_fillDraft_target(String label);
+
+  /// No description provided for @universalImport_fillDraft_window.
+  ///
+  /// In en, this message translates to:
+  /// **'Draft from {start} to {end}'**
+  String universalImport_fillDraft_window(String start, String end);
+
+  /// No description provided for @universalImport_fillDraft_windowOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Draft from {start}'**
+  String universalImport_fillDraft_windowOpen(String start);
 
   /// No description provided for @universalImport_label_filledPlanned.
   ///
@@ -57870,18 +58839,6 @@ abstract class AppLocalizations {
   /// **'Undo'**
   String get divePlanner_undo;
 
-  /// No description provided for @gasCalculators_rockBottom_aboutDescription.
-  ///
-  /// In en, this message translates to:
-  /// **'Rock bottom is the minimum gas reserve for an emergency ascent while sharing air with your buddy.\n\n• Uses a stressed RMV (2-3x normal)\n• Assumes both divers on one tank\n• Includes safety stop when enabled\n\nAlways turn the dive BEFORE reaching rock bottom!'**
-  String get gasCalculators_rockBottom_aboutDescription;
-
-  /// No description provided for @gasCalculators_rockBottom_aboutTitle.
-  ///
-  /// In en, this message translates to:
-  /// **'About Rock Bottom'**
-  String get gasCalculators_rockBottom_aboutTitle;
-
   /// No description provided for @gasCalculators_rockBottom_ascentGasRequired.
   ///
   /// In en, this message translates to:
@@ -58108,6 +59065,60 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Stop logging'**
   String get gpsLogger_stopButton;
+
+  /// Button while recording a GPS track: marks the moment the diver goes into the water, starting a draft dive
+  ///
+  /// In en, this message translates to:
+  /// **'Entered water'**
+  String get gpsLogger_enteredWater;
+
+  /// Button while a draft dive is open: marks the moment the diver surfaces
+  ///
+  /// In en, this message translates to:
+  /// **'Surfaced'**
+  String get gpsLogger_surfaced;
+
+  /// No description provided for @gpsLogger_surfaceOnStop_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Still in the water?'**
+  String get gpsLogger_surfaceOnStop_title;
+
+  /// No description provided for @gpsLogger_surfaceOnStop_body.
+  ///
+  /// In en, this message translates to:
+  /// **'You entered the water at {time}. Mark the dive surfaced now, or leave it open and tap Surfaced later.'**
+  String gpsLogger_surfaceOnStop_body(String time);
+
+  /// No description provided for @gpsLogger_surfaceOnStop_surfaceNow.
+  ///
+  /// In en, this message translates to:
+  /// **'Surface now'**
+  String get gpsLogger_surfaceOnStop_surfaceNow;
+
+  /// No description provided for @gpsLogger_surfaceOnStop_leaveOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Leave open'**
+  String get gpsLogger_surfaceOnStop_leaveOpen;
+
+  /// No description provided for @gpsLogger_markNotification_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording your GPS track'**
+  String get gpsLogger_markNotification_title;
+
+  /// No description provided for @gpsLogger_markNotification_bodyEnter.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap Entered water when you go in.'**
+  String get gpsLogger_markNotification_bodyEnter;
+
+  /// No description provided for @gpsLogger_markNotification_bodySurface.
+  ///
+  /// In en, this message translates to:
+  /// **'In the water. Tap Surfaced when you are out.'**
+  String get gpsLogger_markNotification_bodySurface;
 
   /// No description provided for @gpsLogger_stripStatus.
   ///
@@ -59280,6 +60291,84 @@ abstract class AppLocalizations {
   /// **'Import Dives from Apple Watch via HealthKit'**
   String get settings_dataSources_appleHealth_importAction;
 
+  /// No description provided for @healthAutoImport_newDive_title.
+  ///
+  /// In en, this message translates to:
+  /// **'New dive from your Apple Watch'**
+  String get healthAutoImport_newDive_title;
+
+  /// No description provided for @healthAutoImport_newDives_title.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} new dives from your Apple Watch'**
+  String healthAutoImport_newDives_title(int count);
+
+  /// No description provided for @healthAutoImport_newDive_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Add details?'**
+  String get healthAutoImport_newDive_body;
+
+  /// No description provided for @healthAutoImport_addDetails.
+  ///
+  /// In en, this message translates to:
+  /// **'Add details'**
+  String get healthAutoImport_addDetails;
+
+  /// No description provided for @healthAutoImport_review_title.
+  ///
+  /// In en, this message translates to:
+  /// **'An Apple Watch dive needs a look'**
+  String get healthAutoImport_review_title;
+
+  /// No description provided for @healthAutoImport_review_body.
+  ///
+  /// In en, this message translates to:
+  /// **'It could belong to more than one dive. Choose in the Apple Health import.'**
+  String get healthAutoImport_review_body;
+
+  /// No description provided for @healthAutoImport_planReview_body.
+  ///
+  /// In en, this message translates to:
+  /// **'This dive may be one you planned. Review it to fill the plan.'**
+  String get healthAutoImport_planReview_body;
+
+  /// No description provided for @healthAutoImport_review.
+  ///
+  /// In en, this message translates to:
+  /// **'Review'**
+  String get healthAutoImport_review;
+
+  /// No description provided for @settings_appleHealth_autoImport_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Import Apple Watch dives automatically'**
+  String get settings_appleHealth_autoImport_title;
+
+  /// No description provided for @settings_appleHealth_autoImport_subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'New dives from your watch appear when you open the app.'**
+  String get settings_appleHealth_autoImport_subtitle;
+
+  /// No description provided for @settings_appleHealth_metrics_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Heart rate, recovery and sleep'**
+  String get settings_appleHealth_metrics_title;
+
+  /// No description provided for @settings_appleHealth_metrics_subtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Adds heart rate during and after each dive, overnight HRV and the sleep before it.'**
+  String get settings_appleHealth_metrics_subtitle;
+
+  /// Under an Apple Health switch: the diver whose dives it writes to
+  ///
+  /// In en, this message translates to:
+  /// **'For: {name}'**
+  String settings_appleHealth_boundDiver(String name);
+
   /// No description provided for @settings_dataSources_appleHealth_privacy.
   ///
   /// In en, this message translates to:
@@ -60084,28 +61173,6 @@ abstract class AppLocalizations {
   /// **'Re-run the dive parser on {count} dives that have stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.'**
   String diveComputer_detail_reparseAllMessage(int count);
 
-  /// No description provided for @diveComputer_detail_reparseAllProgress.
-  ///
-  /// In en, this message translates to:
-  /// **'Re-parsing {count} dives...'**
-  String diveComputer_detail_reparseAllProgress(int count);
-
-  /// No description provided for @diveComputer_detail_reparseAllSuccess.
-  ///
-  /// In en, this message translates to:
-  /// **'Re-parsed {count} dives successfully'**
-  String diveComputer_detail_reparseAllSuccess(int count);
-
-  /// No description provided for @diveComputer_detail_reparseAllPartial.
-  ///
-  /// In en, this message translates to:
-  /// **'Re-parsed {succeeded} of {total} dives. {failed} failed.'**
-  String diveComputer_detail_reparseAllPartial(
-    int succeeded,
-    int total,
-    int failed,
-  );
-
   /// No description provided for @diveComputer_detail_reparseRawDataCount.
   ///
   /// In en, this message translates to:
@@ -60117,6 +61184,192 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{count} dives with raw data ({without} without)'**
   String diveComputer_detail_reparseRawDataCountWithout(int count, int without);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parsing dives'**
+  String get reparseBatch_progressTitle;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parsing {done} of {total} dives'**
+  String reparseBatch_progressCount(int done, int total);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Cancelling...'**
+  String get reparseBatch_cancelling;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse finished'**
+  String get reparseBatch_resultTitle;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse cancelled'**
+  String get reparseBatch_resultCancelledTitle;
+
+  /// Bulk re-parse (issue #224): the run stopped on an error
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse stopped by an error'**
+  String get reparseBatch_resultErrorTitle;
+
+  /// Bulk re-parse (issue #224): dives a run error left unprocessed
+  ///
+  /// In en, this message translates to:
+  /// **'Not processed: {count}'**
+  String reparseBatch_resultNotReached(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parsed {succeeded} of {total} dives.'**
+  String reparseBatch_resultSummary(int succeeded, int total);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Failed: {count}'**
+  String reparseBatch_resultFailed(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Not processed (cancelled): {count}'**
+  String reparseBatch_resultNotProcessed(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Skipped, no raw data: {count}'**
+  String reparseBatch_resultSkipped(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Combined dives that kept their profile: {count}'**
+  String reparseBatch_resultProfilesPreserved(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Failed dives'**
+  String get reparseBatch_failedListHeader;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Dive #{number}'**
+  String reparseBatch_failedDiveTitle(int number);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Unnumbered dive'**
+  String get reparseBatch_failedDiveUnnumbered;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Missing dive computer details'**
+  String get reparseBatch_missingDescriptors;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse dives'**
+  String get reparseBatch_confirmTitle;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-run the dive parser on {count} dives with stored raw data. This updates profile and sensor data but preserves your notes, sites, buddies, and other edits.'**
+  String reparseBatch_confirmMessage(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Selected dives without raw data (skipped): {count}'**
+  String reparseBatch_confirmSkipped(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'None of the selected dives have stored raw data to re-parse.'**
+  String get reparseBatch_noneWithRawData;
+
+  /// Selection bar action that fetches conditions for the checked dives (issue #4329)
+  ///
+  /// In en, this message translates to:
+  /// **'Fetch Conditions'**
+  String get diveLog_selection_tooltip_fetchConditions;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse'**
+  String get diveLog_selection_tooltip_reparse;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse dives'**
+  String get settings_reparseDives_title;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-run the dive parser on every dive with stored raw data'**
+  String get settings_reparseDives_subtitle;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Use this after an app update improves how dive computer data is read. Your notes, sites, buddies, and other edits are preserved.'**
+  String get settings_reparseDives_intro;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Dives with raw data: {count}'**
+  String settings_reparseDives_withRawData(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Dives without raw data (not re-parsed): {count}'**
+  String settings_reparseDives_withoutRawData(int count);
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'By dive computer'**
+  String get settings_reparseDives_byComputer;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Unknown computer'**
+  String get settings_reparseDives_unknownComputer;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'No dives have stored raw data to re-parse.'**
+  String get settings_reparseDives_none;
+
+  /// Bulk re-parse (issue #224)
+  ///
+  /// In en, this message translates to:
+  /// **'Re-parse all'**
+  String get settings_reparseDives_button;
 
   /// No description provided for @diveComputer_rawData_discardAction.
   ///
@@ -62850,6 +64103,12 @@ abstract class AppLocalizations {
   /// **'Valve'**
   String get attrLabel_valve_type;
 
+  /// No description provided for @attrLabel_cylinder_use.
+  ///
+  /// In en, this message translates to:
+  /// **'Cylinder use'**
+  String get attrLabel_cylinder_use;
+
   /// No description provided for @attrLabel_tank_identifier.
   ///
   /// In en, this message translates to:
@@ -63563,6 +64822,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Convertible'**
   String get attrChoice_valve_type_convertible;
+
+  /// No description provided for @attrChoice_cylinder_use_breathing_gas.
+  ///
+  /// In en, this message translates to:
+  /// **'Breathing gas'**
+  String get attrChoice_cylinder_use_breathing_gas;
+
+  /// No description provided for @attrChoice_cylinder_use_suit_inflation.
+  ///
+  /// In en, this message translates to:
+  /// **'Suit inflation'**
+  String get attrChoice_cylinder_use_suit_inflation;
 
   /// No description provided for @attrChoice_connection_din.
   ///
@@ -64482,29 +65753,29 @@ abstract class AppLocalizations {
   /// **'Its CNS% and OTU can\'t be calculated without depth samples. The totals below leave it out.'**
   String get safetyHub_cnsOtu_noProfile_body;
 
-  /// No description provided for @safetyHub_cnsOtu_about_title.
+  /// No description provided for @safetyHub_tissueLoading_clear_title.
   ///
   /// In en, this message translates to:
-  /// **'About CNS and OTU'**
-  String get safetyHub_cnsOtu_about_title;
+  /// **'No residual tissue load'**
+  String get safetyHub_tissueLoading_clear_title;
 
-  /// No description provided for @safetyHub_cnsOtu_about_body.
+  /// No description provided for @safetyHub_tissueLoading_clear_body.
   ///
   /// In en, this message translates to:
-  /// **'Your CNS% (oxygen clock) decays after a dive with a 90-minute half-life -- it\'s practically back to 0 after about a day.\n\nDaily OTU resets every night at midnight. Weekly OTU is a rolling total of the last 7 days: older dives automatically drop out of the calculation once they fall outside that window.'**
-  String get safetyHub_cnsOtu_about_body;
+  /// **'All compartments are back in equilibrium with the air at the surface. They stay at their normal level (the marker on each bar), not at 0%.'**
+  String get safetyHub_tissueLoading_clear_body;
 
-  /// No description provided for @safetyHub_tissueLoading_about_title.
+  /// No description provided for @safetyHub_tissueLoading_unavailable_title.
   ///
   /// In en, this message translates to:
-  /// **'About Tissue Loading'**
-  String get safetyHub_tissueLoading_about_title;
+  /// **'Tissue loading not available'**
+  String get safetyHub_tissueLoading_unavailable_title;
 
-  /// No description provided for @safetyHub_tissueLoading_about_body.
+  /// No description provided for @safetyHub_tissueLoading_unavailable_body.
   ///
   /// In en, this message translates to:
-  /// **'Your body has 16 tissue compartments that absorb and release nitrogen (and, on trimix or rebreather dives, helium too) at different speeds. Fast tissues saturate and desaturate quickly; slow tissues take much longer for both.\n\nAfter a dive with helium, nitrogen and helium in a single compartment can briefly move in opposite directions: while helium is still releasing, the same compartment can simultaneously be absorbing a little nitrogen, until both gases reach equilibrium with the air you\'re breathing. That\'s why a compartment can briefly show \"Ongassing\" even while its overall load keeps dropping.'**
-  String get safetyHub_tissueLoading_about_body;
+  /// **'The last dive has no data to calculate tissue loading from, for example a dive without a depth profile, in gauge mode or on a rebreather without a setpoint.'**
+  String get safetyHub_tissueLoading_unavailable_body;
 
   /// No description provided for @safetyHub_noFly_category_single.
   ///
@@ -65244,6 +66515,90 @@ abstract class AppLocalizations {
   /// **'Planned'**
   String get diveLog_planned_chip;
 
+  /// List marker for a draft dive: marked at the site, waiting for its dive computer readings
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for download'**
+  String get diveLog_draft_chip;
+
+  /// List marker for a draft dive whose diver has entered the water and not yet surfaced
+  ///
+  /// In en, this message translates to:
+  /// **'In the water'**
+  String get diveLog_draft_inWaterChip;
+
+  /// Title for a draft dive, which has no number yet
+  ///
+  /// In en, this message translates to:
+  /// **'Draft dive'**
+  String get diveLog_draft_title;
+
+  /// Banner body on a draft dive: the estimated length from the Entered water and Surfaced taps
+  ///
+  /// In en, this message translates to:
+  /// **'About {minutes} min from your taps. Download your dive computer to fill in depth and time.'**
+  String diveLog_draft_bannerBody(int minutes);
+
+  /// No description provided for @diveLog_draft_bannerBodyOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap Surfaced when you are out of the water.'**
+  String get diveLog_draft_bannerBodyOpen;
+
+  /// No description provided for @diveLog_draft_downloadNow.
+  ///
+  /// In en, this message translates to:
+  /// **'Download now'**
+  String get diveLog_draft_downloadNow;
+
+  /// Action on a draft dive that will never be downloaded: keep it as a hand-added dive
+  ///
+  /// In en, this message translates to:
+  /// **'Mark as complete'**
+  String get diveLog_draft_markComplete;
+
+  /// No description provided for @diveLog_draft_surfaced.
+  ///
+  /// In en, this message translates to:
+  /// **'Surfaced'**
+  String get diveLog_draft_surfaced;
+
+  /// No description provided for @diveLog_draft_markedComplete.
+  ///
+  /// In en, this message translates to:
+  /// **'Marked as complete'**
+  String get diveLog_draft_markedComplete;
+
+  /// No description provided for @diveLog_draft_markCompleteFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t mark the dive as complete.'**
+  String get diveLog_draft_markCompleteFailed;
+
+  /// No description provided for @diveLog_draft_stale_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Did you surface?'**
+  String get diveLog_draft_stale_title;
+
+  /// No description provided for @diveLog_draft_stale_body.
+  ///
+  /// In en, this message translates to:
+  /// **'You entered the water at {time} and the dive is still open.'**
+  String diveLog_draft_stale_body(String time);
+
+  /// No description provided for @diveLog_draft_stale_stillIn.
+  ///
+  /// In en, this message translates to:
+  /// **'Still in the water'**
+  String get diveLog_draft_stale_stillIn;
+
+  /// No description provided for @diveLog_draft_stale_setTime.
+  ///
+  /// In en, this message translates to:
+  /// **'Set surfacing time'**
+  String get diveLog_draft_stale_setTime;
+
   /// No description provided for @diveLog_planned_bannerTitle.
   ///
   /// In en, this message translates to:
@@ -65351,6 +66706,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'awaiting their dive computer'**
   String get diveLog_detail_loggedWithPlanned;
+
+  /// No description provided for @diveLog_detail_menu_addHeartRate.
+  ///
+  /// In en, this message translates to:
+  /// **'Add heart rate from Apple Health'**
+  String get diveLog_detail_menu_addHeartRate;
 
   /// No description provided for @diveLog_detail_linkedIncidents.
   ///
@@ -66832,6 +68193,12 @@ abstract class AppLocalizations {
   /// **'Wrong cylinder'**
   String get dataQuality_detector_tank_assignment;
 
+  /// No description provided for @dataQuality_detector_missing_gas_switch.
+  ///
+  /// In en, this message translates to:
+  /// **'Missing gas switch'**
+  String get dataQuality_detector_missing_gas_switch;
+
   /// No description provided for @dataQuality_detector_source_conflict.
   ///
   /// In en, this message translates to:
@@ -66873,6 +68240,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Overlaps another dive by {minutes} min'**
   String dataQuality_msg_clock_overlap(int minutes);
+
+  /// A consolidated source's samples sit this far along the timeline from where its depth trace fits the primary's.
+  ///
+  /// In en, this message translates to:
+  /// **'A source sits {minutes} min from where its profile matches the primary\'s'**
+  String dataQuality_msg_clock_profileFit(int minutes);
 
   /// Data quality finding: the same item is on two different profiles' dives at the same time (issue #2853).
   ///
@@ -67030,6 +68403,61 @@ abstract class AppLocalizations {
   /// **'This tank lost {drop} while the gas timeline says it was not in use'**
   String dataQuality_msg_tankInactive(String drop);
 
+  /// Missing gas switch finding: {switches} is a list of {count} dataQuality_msg_missingSwitchItem entries.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{No gas switch was recorded, but the cylinder pressures show this switch: {switches}.} other{No gas switch was recorded, but the cylinder pressures show these switches: {switches}.}}'**
+  String dataQuality_msg_missingSwitches(int count, String switches);
+
+  /// One switch in dataQuality_msg_missingSwitches; {time} is minutes:seconds from the start of the dive.
+  ///
+  /// In en, this message translates to:
+  /// **'cylinder {tankNumber} ({gas}) at {time}, {depth}'**
+  String dataQuality_msg_missingSwitchItem(
+    int tankNumber,
+    String gas,
+    String time,
+    String depth,
+  );
+
+  /// Joins the switches listed in dataQuality_msg_missingSwitches.
+  ///
+  /// In en, this message translates to:
+  /// **'; '**
+  String get dataQuality_msg_missingSwitchSeparator;
+
+  /// Missing gas switch finding when no switch can be offered: the pressures show the diver changing to cylinder {tankNumber} at {depth}, deeper than {mod}, the maximum operating depth (MOD) of its gas {gas}. The change is read from that cylinder starting to lose pressure, or from the other cylinder being left, so it may have no readings of its own.
+  ///
+  /// In en, this message translates to:
+  /// **'No gas switch was recorded. The cylinder pressures show a change to cylinder {tankNumber} ({gas}) at {depth}, deeper than its MOD of {mod}, so no switch to it is suggested.'**
+  String dataQuality_msg_missingSwitchDeep(
+    int tankNumber,
+    String gas,
+    String depth,
+    String mod,
+  );
+
+  /// A further sentence of the missing gas switch finding, after its switches or an earlier change: the pressures also show the diver changing to cylinder {tankNumber} at {depth}, deeper than {mod}, the maximum operating depth (MOD) of its gas {gas}.
+  ///
+  /// In en, this message translates to:
+  /// **'The cylinder pressures also show a change to cylinder {tankNumber} ({gas}) at {depth}, deeper than its MOD of {mod}, so no switch to it is suggested.'**
+  String dataQuality_msg_missingSwitchDeepAlso(
+    int tankNumber,
+    String gas,
+    String depth,
+    String mod,
+  );
+
+  /// Missing gas switch finding on a dive with more than two cylinders: cylinder {tankNumber} started being breathed again at {time} (minutes:seconds from the start of the dive) after a pause, so another cylinder was breathed in between and no switch is suggested.
+  ///
+  /// In en, this message translates to:
+  /// **'No gas switch was recorded. Cylinder {tankNumber} ({gas}) was breathed again from {time} after a pause, so another cylinder was breathed in between, and with more than two cylinders the pressures cannot show which. Add the switches in the dive editor.'**
+  String dataQuality_msg_missingSwitchUnplaced(
+    int tankNumber,
+    String gas,
+    String time,
+  );
+
   /// No description provided for @dataQuality_detector_transmitter_role.
   ///
   /// In en, this message translates to:
@@ -67114,6 +68542,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Also fix this computer on other dives with the same offset'**
   String get dataQuality_repairLabel_fixSourceClockAll;
+
+  /// No description provided for @dataQuality_repairLabel_alignSourceProfile.
+  ///
+  /// In en, this message translates to:
+  /// **'Line up this computer by its profile'**
+  String get dataQuality_repairLabel_alignSourceProfile;
+
+  /// Repair button naming the computer whose samples are lined up with the primary by profile.
+  ///
+  /// In en, this message translates to:
+  /// **'Line up {computer} by its profile'**
+  String dataQuality_repairLabel_alignSourceProfileNamed(String computer);
 
   /// No description provided for @dataQuality_repairLabel_consolidate.
   ///
@@ -67306,6 +68746,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Move series to another tank'**
   String get dataQuality_repairLabel_reassignSeries;
+
+  /// Repair button that writes the suggested gas switches to the dive.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, one{Add gas switch} other{Add {count} gas switches}}'**
+  String dataQuality_repairLabel_addGasSwitches(int count);
 
   /// No description provided for @dataQuality_repairLabel_setPrimary.
   ///
@@ -79893,6 +81339,12 @@ abstract class AppLocalizations {
   /// **'Dive {diveNumber} at {siteName}'**
   String diveLog_listPage_semanticsDiveAtSite(int diveNumber, String siteName);
 
+  /// No description provided for @diveLog_listPage_semanticsDraftDiveAtSite.
+  ///
+  /// In en, this message translates to:
+  /// **'Draft dive at {siteName}'**
+  String diveLog_listPage_semanticsDraftDiveAtSite(String siteName);
+
   /// No description provided for @diveLog_listPage_semanticsPlannedDiveAtSite.
   ///
   /// In en, this message translates to:
@@ -83340,6 +84792,12 @@ abstract class AppLocalizations {
   /// **'No profile data for this dive'**
   String get diveLog_profilePanel_noProfileData;
 
+  /// Caption under the dashed outline drawn for a dive with no recorded profile
+  ///
+  /// In en, this message translates to:
+  /// **'Estimated from max depth and time, not a recorded profile'**
+  String get diveLog_estimatedProfile_caption;
+
   /// No description provided for @settings_export_progress_divesCsv.
   ///
   /// In en, this message translates to:
@@ -84795,6 +86253,18 @@ abstract class AppLocalizations {
   /// **'A small glyph showing where each item is served from. Problem badges always show.'**
   String get settings_media_provenanceBadgesSubtitle;
 
+  /// No description provided for @settings_media_tagBadges.
+  ///
+  /// In en, this message translates to:
+  /// **'Show tag badges on thumbnails'**
+  String get settings_media_tagBadges;
+
+  /// No description provided for @settings_media_tagBadgesSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Small icons for photos with people tagged, species tagged, or a time in the dive.'**
+  String get settings_media_tagBadgesSubtitle;
+
   /// No description provided for @settings_media_autoColorCorrection.
   ///
   /// In en, this message translates to:
@@ -84884,6 +86354,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Not backed up'**
   String get media_status_notBackedUp;
+
+  /// No description provided for @media_tileMarker_people.
+  ///
+  /// In en, this message translates to:
+  /// **'People tagged'**
+  String get media_tileMarker_people;
+
+  /// No description provided for @media_tileMarker_species.
+  ///
+  /// In en, this message translates to:
+  /// **'Species tagged'**
+  String get media_tileMarker_species;
+
+  /// No description provided for @media_tileMarker_timeInDive.
+  ///
+  /// In en, this message translates to:
+  /// **'Placed on the dive profile'**
+  String get media_tileMarker_timeInDive;
 
   /// No description provided for @media_tile_infoMenuItem.
   ///
@@ -87652,7 +89140,7 @@ abstract class AppLocalizations {
   /// No description provided for @transmitters_apply_content.
   ///
   /// In en, this message translates to:
-  /// **'{tanks} cylinders on {dives} dives carry this transmitter. Empty size, material, name and gear fields will be filled, and a role still set to Back Gas or read from the transmitter\'s name will be replaced.'**
+  /// **'{tanks} cylinders on {dives} dives carrying this transmitter need its setup. Empty size, material, name and gear fields will be filled, and a role still set to Back Gas or read from the transmitter\'s name will be replaced.'**
   String transmitters_apply_content(int tanks, int dives);
 
   /// No description provided for @transmitters_apply_done.
@@ -87661,11 +89149,53 @@ abstract class AppLocalizations {
   /// **'Updated {tanks} cylinders on {dives} dives'**
   String transmitters_apply_done(int tanks, int dives);
 
-  /// No description provided for @transmitters_apply_nothing.
+  /// No description provided for @transmitters_apply_slot_label.
   ///
   /// In en, this message translates to:
-  /// **'No cylinders carry this transmitter'**
-  String get transmitters_apply_nothing;
+  /// **'Slot on {computer}'**
+  String transmitters_apply_slot_label(String computer);
+
+  /// No description provided for @transmitters_apply_slot_none.
+  ///
+  /// In en, this message translates to:
+  /// **'Don\'t match by slot'**
+  String get transmitters_apply_slot_none;
+
+  /// No description provided for @transmitters_apply_slot_option.
+  ///
+  /// In en, this message translates to:
+  /// **'T{slot}: {dives, plural, one{{dives} dive} other{{dives} dives}}'**
+  String transmitters_apply_slot_option(int slot, int dives);
+
+  /// No description provided for @transmitters_apply_slot_reading.
+  ///
+  /// In en, this message translates to:
+  /// **'Reading imported files'**
+  String get transmitters_apply_slot_reading;
+
+  /// No description provided for @transmitters_apply_slot_intro.
+  ///
+  /// In en, this message translates to:
+  /// **'Cylinders imported from a file carry no serial. They can be filled by the slot this transmitter sat in on the dive computer.'**
+  String get transmitters_apply_slot_intro;
+
+  /// No description provided for @transmitters_apply_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives filled by serial: {serialDives}, by slot: {slotDives}'**
+  String transmitters_apply_summary(int serialDives, int slotDives);
+
+  /// No description provided for @transmitters_apply_nothing_to_fill.
+  ///
+  /// In en, this message translates to:
+  /// **'No cylinder needs this transmitter\'s setup'**
+  String get transmitters_apply_nothing_to_fill;
+
+  /// No description provided for @transmitters_apply_slot_read_failed.
+  ///
+  /// In en, this message translates to:
+  /// **'The imported files could not be read, so cylinders cannot be matched by slot'**
+  String get transmitters_apply_slot_read_failed;
 
   /// No description provided for @transmitters_channel.
   ///
@@ -89854,6 +91384,12 @@ abstract class AppLocalizations {
   /// **'Operator'**
   String get query_dives_diveOperator;
 
+  /// Field label in the query builder: a dive marked at the site that waits for its dive computer readings
+  ///
+  /// In en, this message translates to:
+  /// **'Draft'**
+  String get query_dives_draft;
+
   /// Field label in the query builder
   ///
   /// In en, this message translates to:
@@ -91696,6 +93232,12 @@ abstract class AppLocalizations {
   /// **'(empty)'**
   String get rules_value_empty;
 
+  /// A gear item in a rule change list with the equipment set it came through, shown when only its set changed
+  ///
+  /// In en, this message translates to:
+  /// **'{item} ({set})'**
+  String rules_value_gearViaSet(String item, String set);
+
   /// Lower-case collection name in an action summary
   ///
   /// In en, this message translates to:
@@ -91725,6 +93267,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'courses'**
   String get rules_collection_courses;
+
+  /// Lower-case collection name in an action summary
+  ///
+  /// In en, this message translates to:
+  /// **'equipment sets'**
+  String get rules_collection_equipmentSets;
 
   /// Lower-case collection name in an action summary
   ///
@@ -92976,6 +94524,24 @@ abstract class AppLocalizations {
   /// **'The copy\'s account was removed'**
   String get settings_backups_copyAccountGone;
 
+  /// Backups page: an extra account each backup is also copied to, beside the main copy
+  ///
+  /// In en, this message translates to:
+  /// **'Also copy to {account}'**
+  String settings_backups_alsoCopyTo(String account);
+
+  /// Backups page: adds an extra account each backup is also copied to
+  ///
+  /// In en, this message translates to:
+  /// **'Copy to another account too'**
+  String get settings_backups_addCopyAccount;
+
+  /// Subtitle of an Also copy to row when the most recent backup's copy to that account failed
+  ///
+  /// In en, this message translates to:
+  /// **'The last backup did not reach this account'**
+  String get settings_backups_extraCopyMissed;
+
   /// Switch: run backups on a schedule
   ///
   /// In en, this message translates to:
@@ -93497,6 +95063,48 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Tags'**
   String get media_library_filter_tags;
+
+  /// Title of the library filter section that narrows media by what each item is attached to
+  ///
+  /// In en, this message translates to:
+  /// **'Attached to'**
+  String get media_library_filter_attachedTo;
+
+  /// Attached to filter choice: media attached to a dive
+  ///
+  /// In en, this message translates to:
+  /// **'Dive'**
+  String get media_library_filter_attachedDive;
+
+  /// Attached to filter choice: media attached to a dive site and to no dive, such as a site map
+  ///
+  /// In en, this message translates to:
+  /// **'Site'**
+  String get media_library_filter_attachedSite;
+
+  /// Attached to filter choice: media attached to an equipment item and to no dive or site
+  ///
+  /// In en, this message translates to:
+  /// **'Equipment'**
+  String get media_library_filter_attachedEquipment;
+
+  /// Attached to filter choice: media attached to nothing
+  ///
+  /// In en, this message translates to:
+  /// **'Unlinked'**
+  String get media_library_filter_attachedUnlinked;
+
+  /// Active filter chip for the Attached to facet; kinds is the picked choices joined by the list separator
+  ///
+  /// In en, this message translates to:
+  /// **'Attached to: {kinds}'**
+  String media_library_filter_attachedToChip(String kinds);
+
+  /// Joins several Attached to choices in the active filter chip, e.g. 'Site, Equipment'. Include any trailing space your language uses.
+  ///
+  /// In en, this message translates to:
+  /// **', '**
+  String get media_library_filter_listSeparator;
 
   /// No description provided for @media_bulkTags_confirmAdding.
   ///
@@ -95346,143 +96954,2666 @@ abstract class AppLocalizations {
     String distance,
   );
 
-  /// No description provided for @diveLog_gasGfWhatIf_tissueTitle.
+  /// No description provided for @twinSet_title.
   ///
   /// In en, this message translates to:
-  /// **'Tissue loading'**
-  String get diveLog_gasGfWhatIf_tissueTitle;
+  /// **'Twin set'**
+  String get twinSet_title;
 
-  /// No description provided for @diveLog_gasGfWhatIf_ceilingTitle.
+  /// No description provided for @twinSet_none.
   ///
   /// In en, this message translates to:
-  /// **'Depth and ceiling'**
-  String get diveLog_gasGfWhatIf_ceilingTitle;
+  /// **'Not part of a twin set'**
+  String get twinSet_none;
 
-  /// No description provided for @diveLog_gasGfWhatIf_maxPpO2.
+  /// No description provided for @twinSet_link.
   ///
   /// In en, this message translates to:
-  /// **'Max ppO2'**
-  String get diveLog_gasGfWhatIf_maxPpO2;
+  /// **'Link to a twin set partner'**
+  String get twinSet_link;
 
-  /// No description provided for @diveLog_gasGfWhatIf_cnsEnd.
+  /// No description provided for @twinSet_since.
   ///
   /// In en, this message translates to:
-  /// **'CNS at end'**
-  String get diveLog_gasGfWhatIf_cnsEnd;
+  /// **'Since {date}'**
+  String twinSet_since(String date);
 
-  /// No description provided for @diveLog_gasGfWhatIf_peakTissue.
+  /// No description provided for @twinSet_replace.
   ///
   /// In en, this message translates to:
-  /// **'Peak tissue loading'**
-  String get diveLog_gasGfWhatIf_peakTissue;
+  /// **'Replace partner'**
+  String get twinSet_replace;
 
-  /// No description provided for @diveLog_gasGfWhatIf_no.
+  /// No description provided for @twinSet_unlink.
   ///
   /// In en, this message translates to:
-  /// **'No'**
-  String get diveLog_gasGfWhatIf_no;
+  /// **'Unlink'**
+  String get twinSet_unlink;
 
-  /// No description provided for @diveLog_gasGfWhatIf_yes.
+  /// No description provided for @twinSet_history.
+  ///
+  /// In en, this message translates to:
+  /// **'History'**
+  String get twinSet_history;
+
+  /// No description provided for @twinSet_historyRange.
+  ///
+  /// In en, this message translates to:
+  /// **'{partner}, {from} to {to}'**
+  String twinSet_historyRange(String partner, String from, String to);
+
+  /// No description provided for @twinSet_deletePairing.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete pairing'**
+  String get twinSet_deletePairing;
+
+  /// No description provided for @twinSet_deletePairingConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete this pairing from the history? Fills and dives are not changed.'**
+  String get twinSet_deletePairingConfirm;
+
+  /// No description provided for @twinSet_pickerTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Twin set partner'**
+  String get twinSet_pickerTitle;
+
+  /// No description provided for @twinSet_pickerEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No other cylinders to pair with.'**
+  String get twinSet_pickerEmpty;
+
+  /// No description provided for @twinSet_pairedOnHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Paired since'**
+  String get twinSet_pairedOnHelp;
+
+  /// No description provided for @twinSet_unpairedOnHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Unlinked on'**
+  String get twinSet_unpairedOnHelp;
+
+  /// No description provided for @twinSet_pressureMismatchTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Different working pressures'**
+  String get twinSet_pressureMismatchTitle;
+
+  /// No description provided for @twinSet_pressureMismatchBody.
+  ///
+  /// In en, this message translates to:
+  /// **'{a} is rated {aPressure} and {b} {bPressure}. A manifolded pair fills to one pressure.'**
+  String twinSet_pressureMismatchBody(
+    String a,
+    String aPressure,
+    String b,
+    String bPressure,
+  );
+
+  /// No description provided for @twinSet_continue.
+  ///
+  /// In en, this message translates to:
+  /// **'Continue'**
+  String get twinSet_continue;
+
+  /// No description provided for @twinSet_replaceTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Replace partner?'**
+  String get twinSet_replaceTitle;
+
+  /// No description provided for @twinSet_replaceClash.
+  ///
+  /// In en, this message translates to:
+  /// **'{cylinder} is paired with {partner}.'**
+  String twinSet_replaceClash(String cylinder, String partner);
+
+  /// No description provided for @twinSet_replaceQuestion.
+  ///
+  /// In en, this message translates to:
+  /// **'Pair {a} with {b} instead?'**
+  String twinSet_replaceQuestion(String a, String b);
+
+  /// No description provided for @twinSet_leftAlone.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} will be left on its own.'**
+  String twinSet_leftAlone(String name);
+
+  /// No description provided for @twinSet_replaceConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Replace'**
+  String get twinSet_replaceConfirm;
+
+  /// No description provided for @twinSet_clashTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Overlapping pairing'**
+  String get twinSet_clashTitle;
+
+  /// No description provided for @twinSet_clashBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This overlaps the pairing of {pairs}. A cylinder can be in one twin set on any day.'**
+  String twinSet_clashBody(String pairs);
+
+  /// No description provided for @twinSet_pairNames.
+  ///
+  /// In en, this message translates to:
+  /// **'{a} and {b}'**
+  String twinSet_pairNames(String a, String b);
+
+  /// No description provided for @twinSet_endBeforeStart.
+  ///
+  /// In en, this message translates to:
+  /// **'The end date must be after {date}.'**
+  String twinSet_endBeforeStart(String date);
+
+  /// No description provided for @twinSet_saveFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not save the twin set change.'**
+  String get twinSet_saveFailed;
+
+  /// No description provided for @twinSet_with.
+  ///
+  /// In en, this message translates to:
+  /// **'Twin set with {partner}'**
+  String twinSet_with(String partner);
+
+  /// No description provided for @passport_logFill_twinSwitch.
+  ///
+  /// In en, this message translates to:
+  /// **'Both cylinders in the twin set ({partner})'**
+  String passport_logFill_twinSwitch(String partner);
+
+  /// No description provided for @twinSet_partnerStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'{partner}, {status}'**
+  String twinSet_partnerStatus(String partner, String status);
+
+  /// No description provided for @passport_logFill_editTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit fill'**
+  String get passport_logFill_editTitle;
+
+  /// No description provided for @passport_logFill_overPressureTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Above working pressure'**
+  String get passport_logFill_overPressureTitle;
+
+  /// No description provided for @passport_logFill_overPressureBody.
+  ///
+  /// In en, this message translates to:
+  /// **'{pressure} is above the working pressure of {name}, {workingPressure}.'**
+  String passport_logFill_overPressureBody(
+    String pressure,
+    String name,
+    String workingPressure,
+  );
+
+  /// No description provided for @passport_logFill_saveAnyway.
+  ///
+  /// In en, this message translates to:
+  /// **'Save anyway'**
+  String get passport_logFill_saveAnyway;
+
+  /// No description provided for @passport_logFill_back.
+  ///
+  /// In en, this message translates to:
+  /// **'Back'**
+  String get passport_logFill_back;
+
+  /// No description provided for @passport_logFill_applyToTied.
+  ///
+  /// In en, this message translates to:
+  /// **'Apply to the fill of {partner} too?'**
+  String passport_logFill_applyToTied(String partner);
+
+  /// No description provided for @passport_logFill_applyBoth.
   ///
   /// In en, this message translates to:
   /// **'Yes'**
-  String get diveLog_gasGfWhatIf_yes;
+  String get passport_logFill_applyBoth;
 
-  /// No description provided for @diveLog_gasGfWhatIf_decoObligation.
+  /// No description provided for @passport_logFill_onlyThisOne.
   ///
   /// In en, this message translates to:
-  /// **'Deco obligation'**
-  String get diveLog_gasGfWhatIf_decoObligation;
+  /// **'Only this one'**
+  String get passport_logFill_onlyThisOne;
 
-  /// No description provided for @diveLog_gasGfWhatIf_maxCeiling.
+  /// No description provided for @passport_history_anotherCylinder.
   ///
   /// In en, this message translates to:
-  /// **'Deepest ceiling'**
-  String get diveLog_gasGfWhatIf_maxCeiling;
+  /// **'another cylinder'**
+  String get passport_history_anotherCylinder;
 
-  /// No description provided for @diveLog_gasGfWhatIf_decoShort.
+  /// No description provided for @passport_history_filledWith.
   ///
   /// In en, this message translates to:
-  /// **'Deco'**
-  String get diveLog_gasGfWhatIf_decoShort;
+  /// **'Filled with {partner}'**
+  String passport_history_filledWith(String partner);
 
-  /// No description provided for @diveLog_gasGfWhatIf_minNdl.
+  /// No description provided for @passport_history_deleteTiedBody.
   ///
   /// In en, this message translates to:
-  /// **'Shortest NDL'**
-  String get diveLog_gasGfWhatIf_minNdl;
+  /// **'Delete this fill from both cylinders, or only this one?'**
+  String get passport_history_deleteTiedBody;
 
-  /// No description provided for @diveLog_gasGfWhatIf_metricsTitle.
+  /// No description provided for @passport_history_deleteBoth.
   ///
   /// In en, this message translates to:
-  /// **'How close to deco'**
-  String get diveLog_gasGfWhatIf_metricsTitle;
+  /// **'Both cylinders'**
+  String get passport_history_deleteBoth;
 
-  /// No description provided for @diveLog_gasGfWhatIf_reset.
+  /// No description provided for @passport_history_edit.
   ///
   /// In en, this message translates to:
-  /// **'Reset to logged'**
-  String get diveLog_gasGfWhatIf_reset;
+  /// **'Edit fill'**
+  String get passport_history_edit;
 
-  /// No description provided for @diveLog_gasGfWhatIf_firstCylinderNote.
+  /// No description provided for @twinSet_choiceTitle.
   ///
   /// In en, this message translates to:
-  /// **'Oxygen applies to the first cylinder.'**
-  String get diveLog_gasGfWhatIf_firstCylinderNote;
+  /// **'Use the twin set?'**
+  String get twinSet_choiceTitle;
 
-  /// No description provided for @diveLog_gasGfWhatIf_gfHighLabel.
+  /// No description provided for @twinSet_choicePair.
   ///
   /// In en, this message translates to:
-  /// **'GF high'**
-  String get diveLog_gasGfWhatIf_gfHighLabel;
+  /// **'Twin set ({a} + {b}, {volume})'**
+  String twinSet_choicePair(String a, String b, String volume);
 
-  /// No description provided for @diveLog_gasGfWhatIf_gfLowLabel.
+  /// No description provided for @twinSet_choiceSingle.
   ///
   /// In en, this message translates to:
-  /// **'GF low'**
-  String get diveLog_gasGfWhatIf_gfLowLabel;
+  /// **'Just {a}'**
+  String twinSet_choiceSingle(String a);
 
-  /// No description provided for @diveLog_gasGfWhatIf_o2Label.
+  /// No description provided for @settings_conflict_field_pairedOn.
   ///
   /// In en, this message translates to:
-  /// **'Oxygen'**
-  String get diveLog_gasGfWhatIf_o2Label;
+  /// **'Paired since'**
+  String get settings_conflict_field_pairedOn;
 
-  /// No description provided for @diveLog_gasGfWhatIf_whatIfLabel.
+  /// No description provided for @settings_conflict_field_unpairedOn.
   ///
   /// In en, this message translates to:
-  /// **'What if'**
-  String get diveLog_gasGfWhatIf_whatIfLabel;
+  /// **'Unlinked on'**
+  String get settings_conflict_field_unpairedOn;
 
-  /// No description provided for @diveLog_gasGfWhatIf_loggedLabel.
+  /// No description provided for @settings_conflict_field_filledTogetherId.
   ///
   /// In en, this message translates to:
-  /// **'Logged'**
-  String get diveLog_gasGfWhatIf_loggedLabel;
+  /// **'Twin set fill'**
+  String get settings_conflict_field_filledTogetherId;
 
-  /// No description provided for @diveLog_gasGfWhatIf_noProfile.
+  /// No description provided for @settings_conflict_field_twinPassportId.
   ///
   /// In en, this message translates to:
-  /// **'This dive has no profile to analyse.'**
-  String get diveLog_gasGfWhatIf_noProfile;
+  /// **'Twin set partner passport'**
+  String get settings_conflict_field_twinPassportId;
 
-  /// No description provided for @diveLog_gasGfWhatIf_title.
+  /// No description provided for @info_button_semantics.
   ///
   /// In en, this message translates to:
-  /// **'What if: gas and GF'**
-  String get diveLog_gasGfWhatIf_title;
+  /// **'About {title}'**
+  String info_button_semantics(String title);
 
-  /// No description provided for @diveLog_detail_menu_gasGfWhatIf.
+  /// No description provided for @info_sheet_background.
   ///
   /// In en, this message translates to:
-  /// **'What if: gas / GF'**
-  String get diveLog_detail_menu_gasGfWhatIf;
+  /// **'Background'**
+  String get info_sheet_background;
 
-  /// No description provided for @diveLog_whatIf_fullProfile.
+  /// No description provided for @info_sheet_howToUse.
   ///
   /// In en, this message translates to:
-  /// **'Include ascent (whole dive)'**
-  String get diveLog_whatIf_fullProfile;
+  /// **'How to use'**
+  String get info_sheet_howToUse;
+
+  /// No description provided for @info_sheet_close.
+  ///
+  /// In en, this message translates to:
+  /// **'Close'**
+  String get info_sheet_close;
+
+  /// No description provided for @info_term_ndl_label.
+  ///
+  /// In en, this message translates to:
+  /// **'NDL (no-decompression limit)'**
+  String get info_term_ndl_label;
+
+  /// No description provided for @info_term_ndl_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Minutes left at the current depth before the model calls for decompression stops. It counts down while the diver stays deep and grows again on the way up.'**
+  String get info_term_ndl_body;
+
+  /// No description provided for @info_term_ceiling_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Ceiling'**
+  String get info_term_ceiling_label;
+
+  /// No description provided for @info_term_ceiling_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The shallowest depth the decompression model allows at that moment. Zero means a direct ascent to the surface fits the model.'**
+  String get info_term_ceiling_body;
+
+  /// No description provided for @info_term_decoStops_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Deco stops'**
+  String get info_term_decoStops_label;
+
+  /// No description provided for @info_term_decoStops_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Planned pauses on the way up, each a depth and a time, that let dissolved gas leave the body. Stops are usually {step} apart.'**
+  String info_term_decoStops_body(String step);
+
+  /// No description provided for @info_term_tts_label.
+  ///
+  /// In en, this message translates to:
+  /// **'TTS (time to surface)'**
+  String get info_term_tts_label;
+
+  /// No description provided for @info_term_tts_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Minutes needed to reach the surface from here, counting the ascent and every required stop.'**
+  String get info_term_tts_body;
+
+  /// No description provided for @info_term_gtr_label.
+  ///
+  /// In en, this message translates to:
+  /// **'GTR (gas time remaining)'**
+  String get info_term_gtr_label;
+
+  /// No description provided for @info_term_gtr_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Minutes at the current depth and breathing rate until the cylinder falls to its reserve pressure. It assumes a direct ascent with no stops.'**
+  String get info_term_gtr_body;
+
+  /// No description provided for @info_term_gf99_label.
+  ///
+  /// In en, this message translates to:
+  /// **'GF99'**
+  String get info_term_gf99_label;
+
+  /// No description provided for @info_term_gf99_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How close the most loaded tissue is to its M-value right now, as a percent. At 100% it sits exactly on the raw Buhlmann limit.'**
+  String get info_term_gf99_body;
+
+  /// No description provided for @info_term_surfaceGf_label.
+  ///
+  /// In en, this message translates to:
+  /// **'SurfGF (surface gradient factor)'**
+  String get info_term_surfaceGf_label;
+
+  /// No description provided for @info_term_surfaceGf_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The GF99 the tissues would have if the diver surfaced instantly. Above 100% the raw Buhlmann limit would be exceeded at the surface.'**
+  String get info_term_surfaceGf_body;
+
+  /// No description provided for @info_term_gradientFactors_label.
+  ///
+  /// In en, this message translates to:
+  /// **'GF (gradient factors)'**
+  String get info_term_gradientFactors_label;
+
+  /// No description provided for @info_term_gradientFactors_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Two percentages that scale back the Buhlmann limits: GF Low sets where the first stop falls and GF High sets the limit on surfacing. Lower numbers give longer, more conservative schedules.'**
+  String get info_term_gradientFactors_body;
+
+  /// No description provided for @info_term_cns_label.
+  ///
+  /// In en, this message translates to:
+  /// **'CNS% (central nervous system oxygen)'**
+  String get info_term_cns_label;
+
+  /// No description provided for @info_term_cns_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Share of the single-dive oxygen limit for the brain and nerves, taken from the NOAA ppO2 table. It falls by about half every 90 minutes on the surface.'**
+  String get info_term_cns_body;
+
+  /// No description provided for @info_term_otu_label.
+  ///
+  /// In en, this message translates to:
+  /// **'OTU (oxygen tolerance units)'**
+  String get info_term_otu_label;
+
+  /// No description provided for @info_term_otu_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A slower, whole-body oxygen dose that adds up over several days of diving. One OTU is one minute of pure oxygen at 1 bar.'**
+  String get info_term_otu_body;
+
+  /// No description provided for @info_term_ppO2_label.
+  ///
+  /// In en, this message translates to:
+  /// **'ppO2 (oxygen partial pressure)'**
+  String get info_term_ppO2_label;
+
+  /// No description provided for @info_term_ppO2_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The pressure oxygen alone exerts in the breathing gas at this depth, in bar. Common limits are 1.4 bar while working and 1.6 bar during decompression.'**
+  String get info_term_ppO2_body;
+
+  /// No description provided for @info_term_ppN2_label.
+  ///
+  /// In en, this message translates to:
+  /// **'ppN2 (nitrogen partial pressure)'**
+  String get info_term_ppN2_label;
+
+  /// No description provided for @info_term_ppN2_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The pressure nitrogen exerts in the breathing gas at this depth, in bar. It drives nitrogen loading and narcosis.'**
+  String get info_term_ppN2_body;
+
+  /// No description provided for @info_term_ppHe_label.
+  ///
+  /// In en, this message translates to:
+  /// **'ppHe (helium partial pressure)'**
+  String get info_term_ppHe_label;
+
+  /// No description provided for @info_term_ppHe_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The pressure helium exerts in the breathing gas at this depth, in bar. Helium loads and unloads faster than nitrogen and is not narcotic.'**
+  String get info_term_ppHe_body;
+
+  /// No description provided for @info_term_o2Cells_label.
+  ///
+  /// In en, this message translates to:
+  /// **'O2 cells'**
+  String get info_term_o2Cells_label;
+
+  /// No description provided for @info_term_o2Cells_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Sensors in a rebreather loop that each measure ppO2. Readings that disagree point to a cell that is failing or wet.'**
+  String get info_term_o2Cells_body;
+
+  /// No description provided for @info_term_mod_label.
+  ///
+  /// In en, this message translates to:
+  /// **'MOD (maximum operating depth)'**
+  String get info_term_mod_label;
+
+  /// No description provided for @info_term_mod_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The depth at which a gas reaches its ppO2 limit. Deeper than this the oxygen exposure is above that limit.'**
+  String get info_term_mod_body;
+
+  /// No description provided for @info_term_mnd_label.
+  ///
+  /// In en, this message translates to:
+  /// **'MND (maximum narcotic depth)'**
+  String get info_term_mnd_label;
+
+  /// No description provided for @info_term_mnd_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The deepest point where a gas stays within the diver\'s END limit. Helium in the mix makes it deeper.'**
+  String get info_term_mnd_body;
+
+  /// No description provided for @info_term_end_label.
+  ///
+  /// In en, this message translates to:
+  /// **'END (equivalent narcotic depth)'**
+  String get info_term_end_label;
+
+  /// No description provided for @info_term_end_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The depth on air that would feel as narcotic as this gas at this depth. Helium lowers it because helium is not narcotic.'**
+  String get info_term_end_body;
+
+  /// No description provided for @info_term_ead_label.
+  ///
+  /// In en, this message translates to:
+  /// **'EAD (equivalent air depth)'**
+  String get info_term_ead_label;
+
+  /// No description provided for @info_term_ead_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The depth on air that would load nitrogen at the same rate as this nitrox at this depth. It is shallower than the real depth because nitrox carries less nitrogen.'**
+  String get info_term_ead_body;
+
+  /// No description provided for @info_term_eadd_label.
+  ///
+  /// In en, this message translates to:
+  /// **'EADD (equivalent air density depth)'**
+  String get info_term_eadd_label;
+
+  /// No description provided for @info_term_eadd_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The depth at which air would be as dense as this gas at this depth. Unlike the density in g/L, it does not depend on the temperature.'**
+  String get info_term_eadd_body;
+
+  /// No description provided for @info_term_gasDensity_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas density'**
+  String get info_term_gasDensity_label;
+
+  /// No description provided for @info_term_gasDensity_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How heavy the breathing gas is at depth, in grams per liter, which sets how hard it is to breathe. Published research names {warn} g/L as a recommended maximum and {critical} g/L as an upper limit.'**
+  String info_term_gasDensity_body(String warn, String critical);
+
+  /// No description provided for @info_term_sac_label.
+  ///
+  /// In en, this message translates to:
+  /// **'SAC (surface air consumption)'**
+  String get info_term_sac_label;
+
+  /// No description provided for @info_term_sac_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas use per minute converted to surface pressure, shown as pressure drop per minute. It depends on cylinder size, so it compares dives on the same cylinder.'**
+  String get info_term_sac_body;
+
+  /// No description provided for @info_term_rmv_label.
+  ///
+  /// In en, this message translates to:
+  /// **'RMV (respiratory minute volume)'**
+  String get info_term_rmv_label;
+
+  /// No description provided for @info_term_rmv_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas volume breathed per minute, converted to surface pressure. Unlike SAC it does not depend on cylinder size.'**
+  String get info_term_rmv_body;
+
+  /// No description provided for @info_term_ascentRate_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Ascent rate'**
+  String get info_term_ascentRate_label;
+
+  /// No description provided for @info_term_ascentRate_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How fast depth decreases, per minute. Common training uses {rate} as the maximum.'**
+  String info_term_ascentRate_body(String rate);
+
+  /// No description provided for @info_term_descentRate_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Descent rate'**
+  String get info_term_descentRate_label;
+
+  /// No description provided for @info_term_descentRate_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How fast depth increases, per minute.'**
+  String get info_term_descentRate_body;
+
+  /// No description provided for @info_term_meanDepth_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Mean depth'**
+  String get info_term_meanDepth_label;
+
+  /// No description provided for @info_term_meanDepth_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The time-weighted average depth across the dive. Gas use and decompression follow it more closely than maximum depth.'**
+  String get info_term_meanDepth_body;
+
+  /// No description provided for @info_term_bottomTime_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Bottom time'**
+  String get info_term_bottomTime_label;
+
+  /// No description provided for @info_term_bottomTime_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Time from leaving the surface to the start of the final ascent. It is worked out from the profile.'**
+  String get info_term_bottomTime_body;
+
+  /// No description provided for @info_term_runtime_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Runtime'**
+  String get info_term_runtime_label;
+
+  /// No description provided for @info_term_runtime_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Total time from leaving the surface to surfacing. Technical schedules are written against it.'**
+  String get info_term_runtime_body;
+
+  /// No description provided for @info_term_safetyStop_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Safety stop'**
+  String get info_term_safetyStop_label;
+
+  /// No description provided for @info_term_safetyStop_body.
+  ///
+  /// In en, this message translates to:
+  /// **'An optional pause near {depth}, usually three minutes, before surfacing. The model does not require it on a no-stop dive.'**
+  String info_term_safetyStop_body(String depth);
+
+  /// No description provided for @info_term_surfaceInterval_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Surface interval'**
+  String get info_term_surfaceInterval_label;
+
+  /// No description provided for @info_term_surfaceInterval_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Time on the surface between two dives. Tissues keep releasing gas during it, so a longer interval carries less into the next dive.'**
+  String get info_term_surfaceInterval_body;
+
+  /// No description provided for @info_term_tissueCompartment_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Tissue compartments'**
+  String get info_term_tissueCompartment_label;
+
+  /// No description provided for @info_term_tissueCompartment_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The model\'s 16 imaginary tissues, each taking up and releasing gas at its own speed. Fast ones stand for blood-rich tissue and slow ones for fat and bone.'**
+  String get info_term_tissueCompartment_body;
+
+  /// No description provided for @info_term_leadingCompartment_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Leading compartment'**
+  String get info_term_leadingCompartment_label;
+
+  /// No description provided for @info_term_leadingCompartment_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The compartment closest to its limit right now. It sets the ceiling and changes during the dive.'**
+  String get info_term_leadingCompartment_body;
+
+  /// No description provided for @info_term_tissueLoad_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Load'**
+  String get info_term_tissueLoad_label;
+
+  /// No description provided for @info_term_tissueLoad_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How much inert gas a compartment holds compared with its limit, as a percent. At 100% it sits on its M-value.'**
+  String get info_term_tissueLoad_body;
+
+  /// No description provided for @info_term_mValue_label.
+  ///
+  /// In en, this message translates to:
+  /// **'M-value'**
+  String get info_term_mValue_label;
+
+  /// No description provided for @info_term_mValue_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The most inert gas pressure a compartment can hold at a given depth under the Buhlmann model. Gradient factors set how much of it is used.'**
+  String get info_term_mValue_body;
+
+  /// No description provided for @info_term_surfaceLevel_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Surface level'**
+  String get info_term_surfaceLevel_label;
+
+  /// No description provided for @info_term_surfaceLevel_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The gas pressure a compartment holds when fully settled at the surface on air. Bars above this line are still carrying extra gas.'**
+  String get info_term_surfaceLevel_body;
+
+  /// No description provided for @info_term_halfTime_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Half-time'**
+  String get info_term_halfTime_label;
+
+  /// No description provided for @info_term_halfTime_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Minutes a compartment takes to move halfway toward the surrounding pressure. The range runs from a few minutes to over ten hours.'**
+  String get info_term_halfTime_body;
+
+  /// No description provided for @info_term_ongassing_label.
+  ///
+  /// In en, this message translates to:
+  /// **'On-gassing and off-gassing'**
+  String get info_term_ongassing_label;
+
+  /// No description provided for @info_term_ongassing_body.
+  ///
+  /// In en, this message translates to:
+  /// **'On-gassing means a compartment is taking up gas because the surrounding pressure is higher, and off-gassing means it is releasing gas. The color shows which way each compartment is going.'**
+  String get info_term_ongassing_body;
+
+  /// No description provided for @info_term_heatMap_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Heat map'**
+  String get info_term_heatMap_label;
+
+  /// No description provided for @info_term_heatMap_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Each row is one compartment, fast at the top and slow at the bottom, and time runs left to right. The color shows how loaded that compartment is at that moment.'**
+  String get info_term_heatMap_body;
+
+  /// No description provided for @info_term_nitrox_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Nitrox (EANx)'**
+  String get info_term_nitrox_label;
+
+  /// No description provided for @info_term_nitrox_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Air enriched with oxygen, named by its oxygen percent, as in EAN32. Less nitrogen lengthens no-stop times, and the extra oxygen makes the MOD shallower.'**
+  String get info_term_nitrox_body;
+
+  /// No description provided for @info_term_trimix_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Trimix'**
+  String get info_term_trimix_label;
+
+  /// No description provided for @info_term_trimix_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A mix of oxygen, helium and nitrogen, written as oxygen over helium, as in 18/45. Helium reduces narcosis and gas density at depth.'**
+  String get info_term_trimix_body;
+
+  /// No description provided for @info_term_diluent_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Diluent'**
+  String get info_term_diluent_label;
+
+  /// No description provided for @info_term_diluent_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The gas a rebreather adds to the loop to keep up its volume. The unit adds oxygen on top to hold the setpoint.'**
+  String get info_term_diluent_body;
+
+  /// No description provided for @info_term_setpoint_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Setpoint'**
+  String get info_term_setpoint_label;
+
+  /// No description provided for @info_term_setpoint_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The ppO2 a closed-circuit rebreather tries to hold in the loop. Units often switch between a low and a high setpoint during a dive.'**
+  String get info_term_setpoint_body;
+
+  /// No description provided for @info_term_bailout_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Bailout'**
+  String get info_term_bailout_label;
+
+  /// No description provided for @info_term_bailout_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Open-circuit gas carried on a rebreather dive for an ascent off the loop. Bailout plans assume the loop is lost.'**
+  String get info_term_bailout_body;
+
+  /// No description provided for @info_term_loop_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Loop'**
+  String get info_term_loop_label;
+
+  /// No description provided for @info_term_loop_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The rebreather\'s breathing circuit, where exhaled gas is cleared of carbon dioxide and breathed again.'**
+  String get info_term_loop_body;
+
+  /// No description provided for @info_term_stage_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Stage'**
+  String get info_term_stage_label;
+
+  /// No description provided for @info_term_stage_body.
+  ///
+  /// In en, this message translates to:
+  /// **'An extra cylinder clipped to the side, carried for one part of the dive and swapped to on the way.'**
+  String get info_term_stage_body;
+
+  /// No description provided for @info_term_decoGas_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Deco gas'**
+  String get info_term_decoGas_label;
+
+  /// No description provided for @info_term_decoGas_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A gas richer in oxygen breathed during decompression stops. It speeds up off-gassing at shallow depths.'**
+  String get info_term_decoGas_body;
+
+  /// No description provided for @info_term_pony_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Pony'**
+  String get info_term_pony_label;
+
+  /// No description provided for @info_term_pony_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A small independent cylinder with its own regulator, carried as a backup gas supply.'**
+  String get info_term_pony_body;
+
+  /// No description provided for @info_term_sidemount_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Sidemount'**
+  String get info_term_sidemount_label;
+
+  /// No description provided for @info_term_sidemount_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Cylinders worn along each side instead of on the back, each with its own regulator.'**
+  String get info_term_sidemount_body;
+
+  /// No description provided for @info_term_twinBackmount_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Twin backmount'**
+  String get info_term_twinBackmount_label;
+
+  /// No description provided for @info_term_twinBackmount_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Two cylinders joined on the back, usually by a manifold, and breathed as one supply.'**
+  String get info_term_twinBackmount_body;
+
+  /// No description provided for @info_term_altitudeGroup_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Altitude group'**
+  String get info_term_altitudeGroup_label;
+
+  /// No description provided for @info_term_altitudeGroup_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A band of altitudes that share one set of tables and model settings. Higher groups have lower air pressure at the surface.'**
+  String get info_term_altitudeGroup_body;
+
+  /// No description provided for @info_term_surfacePressure_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Surface pressure'**
+  String get info_term_surfacePressure_label;
+
+  /// No description provided for @info_term_surfacePressure_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The air pressure at the dive site\'s surface. At altitude it is lower, which makes the model more conservative.'**
+  String get info_term_surfacePressure_body;
+
+  /// No description provided for @info_term_salinity_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Water type'**
+  String get info_term_salinity_label;
+
+  /// No description provided for @info_term_salinity_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Salt water is denser than fresh water, so the same pressure reads as a slightly shallower depth in the sea. Computers use it to turn pressure into depth.'**
+  String get info_term_salinity_body;
+
+  /// No description provided for @info_term_isobaricCounterdiffusion_label.
+  ///
+  /// In en, this message translates to:
+  /// **'ICD (isobaric counterdiffusion)'**
+  String get info_term_isobaricCounterdiffusion_label;
+
+  /// No description provided for @info_term_isobaricCounterdiffusion_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A gas switch can raise total inert gas in tissues with no change in depth when nitrogen rises faster than helium falls. The common check, the rule of fifths, limits the nitrogen rise to one fifth of the helium drop.'**
+  String get info_term_isobaricCounterdiffusion_body;
+
+  /// No description provided for @info_term_hypercapnia_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Hypercapnia'**
+  String get info_term_hypercapnia_label;
+
+  /// No description provided for @info_term_hypercapnia_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A build-up of carbon dioxide in the body. Dense gas and hard work make it more likely.'**
+  String get info_term_hypercapnia_body;
+
+  /// No description provided for @info_term_turnPressure_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Turn pressure'**
+  String get info_term_turnPressure_label;
+
+  /// No description provided for @info_term_turnPressure_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The cylinder pressure at which the plan turns the dive back toward the exit.'**
+  String get info_term_turnPressure_body;
+
+  /// No description provided for @info_term_minGas_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Minimum gas'**
+  String get info_term_minGas_label;
+
+  /// No description provided for @info_term_minGas_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas held back so two divers can share one supply from the deepest point to the surface, including stops.'**
+  String get info_term_minGas_body;
+
+  /// No description provided for @info_term_rockBottom_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Rock bottom'**
+  String get info_term_rockBottom_label;
+
+  /// No description provided for @info_term_rockBottom_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The cylinder pressure that holds the minimum gas. It includes a short delay at depth to deal with the problem before the ascent.'**
+  String get info_term_rockBottom_body;
+
+  /// No description provided for @info_term_thirds_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Rule of thirds'**
+  String get info_term_thirds_label;
+
+  /// No description provided for @info_term_thirds_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A gas plan that uses one third going in, one third coming out and keeps one third in reserve. Cave and overhead training teaches it.'**
+  String get info_term_thirds_body;
+
+  /// No description provided for @info_term_airBreaks_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Air breaks'**
+  String get info_term_airBreaks_label;
+
+  /// No description provided for @info_term_airBreaks_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Short periods breathing a lower-oxygen gas during long oxygen stops. They reduce the CNS load.'**
+  String get info_term_airBreaks_body;
+
+  /// No description provided for @info_term_rollingAverage_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Rolling average'**
+  String get info_term_rollingAverage_label;
+
+  /// No description provided for @info_term_rollingAverage_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The mean of the last several dives at each point, which smooths dive-to-dive noise to show the trend.'**
+  String get info_term_rollingAverage_body;
+
+  /// No description provided for @info_term_overallTrend_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Overall trend'**
+  String get info_term_overallTrend_label;
+
+  /// No description provided for @info_term_overallTrend_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A straight line fitted through every dive in range, showing the general direction of the values.'**
+  String get info_term_overallTrend_body;
+
+  /// No description provided for @info_term_rangeBand_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Range band'**
+  String get info_term_rangeBand_label;
+
+  /// No description provided for @info_term_rangeBand_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The shaded band spans the lowest to the highest value in each period.'**
+  String get info_term_rangeBand_body;
+
+  /// No description provided for @info_term_collapseGaps_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Collapse gaps'**
+  String get info_term_collapseGaps_label;
+
+  /// No description provided for @info_term_collapseGaps_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Removes long breaks between dives from the time axis so dives sit side by side.'**
+  String get info_term_collapseGaps_body;
+
+  /// No description provided for @info_term_degreeHeatingWeeks_label.
+  ///
+  /// In en, this message translates to:
+  /// **'DHW (degree heating weeks)'**
+  String get info_term_degreeHeatingWeeks_label;
+
+  /// No description provided for @info_term_degreeHeatingWeeks_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Heat stress built up over the past 12 weeks, from NOAA Coral Reef Watch. NOAA expects significant bleaching from 4 and severe bleaching from 8.'**
+  String get info_term_degreeHeatingWeeks_body;
+
+  /// No description provided for @info_term_sstAnomaly_label.
+  ///
+  /// In en, this message translates to:
+  /// **'SST anomaly'**
+  String get info_term_sstAnomaly_label;
+
+  /// No description provided for @info_term_sstAnomaly_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How far the sea surface temperature sits above or below its long-term average for the date.'**
+  String get info_term_sstAnomaly_body;
+
+  /// No description provided for @info_term_bleachingAlert_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Bleaching alert'**
+  String get info_term_bleachingAlert_label;
+
+  /// No description provided for @info_term_bleachingAlert_body.
+  ///
+  /// In en, this message translates to:
+  /// **'NOAA Coral Reef Watch\'s heat-stress level for the area, from watch up to the alert levels.'**
+  String get info_term_bleachingAlert_body;
+
+  /// No description provided for @info_term_sourceDcCalc_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive computer or calculated'**
+  String get info_term_sourceDcCalc_label;
+
+  /// No description provided for @info_term_sourceDcCalc_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive computer values are what it recorded during the dive. Calculated values come from the app\'s own model run over the profile, so the two can differ.'**
+  String get info_term_sourceDcCalc_body;
+
+  /// No description provided for @info_term_scrubber_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Scrubber'**
+  String get info_term_scrubber_label;
+
+  /// No description provided for @info_term_scrubber_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The canister in a rebreather that removes carbon dioxide from the loop. Its absorbent is rated for a set number of hours.'**
+  String get info_term_scrubber_body;
+
+  /// No description provided for @info_term_cellOutput_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Cell output'**
+  String get info_term_cellOutput_label;
+
+  /// No description provided for @info_term_cellOutput_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Each oxygen cell\'s millivolt reading, which the rebreather turns into ppO2.'**
+  String get info_term_cellOutput_body;
+
+  /// No description provided for @info_term_highO2Hours_label.
+  ///
+  /// In en, this message translates to:
+  /// **'High-oxygen hours'**
+  String get info_term_highO2Hours_label;
+
+  /// No description provided for @info_term_highO2Hours_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Time spent breathing gas with a raised oxygen fraction, which wears oxygen-service parts faster.'**
+  String get info_term_highO2Hours_body;
+
+  /// No description provided for @info_term_decoStatus_label.
+  ///
+  /// In en, this message translates to:
+  /// **'DECO and NO DECO'**
+  String get info_term_decoStatus_label;
+
+  /// No description provided for @info_term_decoStatus_body.
+  ///
+  /// In en, this message translates to:
+  /// **'NO DECO means a direct ascent fits the model at that moment. DECO means at least one stop is required before surfacing.'**
+  String get info_term_decoStatus_body;
+
+  /// No description provided for @info_term_cnsStartAdded_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Start and this dive'**
+  String get info_term_cnsStartAdded_label;
+
+  /// No description provided for @info_term_cnsStartAdded_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Start is the CNS% carried in from earlier dives, already reduced by the time since. This dive is what the dive itself added on top.'**
+  String get info_term_cnsStartAdded_body;
+
+  /// No description provided for @info_term_otuWindows_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Daily and weekly OTU'**
+  String get info_term_otuWindows_label;
+
+  /// No description provided for @info_term_otuWindows_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Daily OTU counts every dive since midnight, and weekly OTU is a rolling total of the last seven days. Each is shown against the app\'s limit for that period.'**
+  String get info_term_otuWindows_body;
+
+  /// No description provided for @info_term_maxPpO2_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Max ppO2'**
+  String get info_term_maxPpO2_label;
+
+  /// No description provided for @info_term_maxPpO2_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The highest oxygen partial pressure breathed during the dive.'**
+  String get info_term_maxPpO2_body;
+
+  /// No description provided for @info_term_timeAboveLimit_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Time above the ppO2 limit'**
+  String get info_term_timeAboveLimit_label;
+
+  /// No description provided for @info_term_timeAboveLimit_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How long the ppO2 stayed above the limits set in settings during this dive.'**
+  String get info_term_timeAboveLimit_body;
+
+  /// No description provided for @info_term_idealSwitchDepth_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Ideal switch depth'**
+  String get info_term_idealSwitchDepth_label;
+
+  /// No description provided for @info_term_idealSwitchDepth_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The deepest point on the ascent where the next gas is within its ppO2 limit, which is its MOD. The card compares it with the depth where the switch was logged.'**
+  String get info_term_idealSwitchDepth_body;
+
+  /// No description provided for @info_term_extraDeco_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Extra deco'**
+  String get info_term_extraDeco_label;
+
+  /// No description provided for @info_term_extraDeco_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Decompression time the model adds because a switch happened shallower or later than the ideal point.'**
+  String get info_term_extraDeco_body;
+
+  /// No description provided for @info_term_stackedArea_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Stacked area'**
+  String get info_term_stackedArea_label;
+
+  /// No description provided for @info_term_stackedArea_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Each band is one compartment\'s load over time, stacked on the others, so the total height shows the load across all compartments.'**
+  String get info_term_stackedArea_body;
+
+  /// No description provided for @info_term_nitrogenHelium_label.
+  ///
+  /// In en, this message translates to:
+  /// **'N2 and He'**
+  String get info_term_nitrogenHelium_label;
+
+  /// No description provided for @info_term_nitrogenHelium_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Each compartment\'s load is split into nitrogen and helium. Helium enters and leaves faster than nitrogen.'**
+  String get info_term_nitrogenHelium_body;
+
+  /// No description provided for @info_term_missedDecoStop_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Missed deco stop'**
+  String get info_term_missedDecoStop_label;
+
+  /// No description provided for @info_term_missedDecoStop_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A required stop that was cut short or skipped, found by comparing the profile with the model\'s stops.'**
+  String get info_term_missedDecoStop_body;
+
+  /// No description provided for @info_term_sawtooth_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Sawtooth profile'**
+  String get info_term_sawtooth_label;
+
+  /// No description provided for @info_term_sawtooth_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Repeated ascents and descents during a dive. Decompression research links them to more bubble formation.'**
+  String get info_term_sawtooth_body;
+
+  /// No description provided for @info_term_lateGasSwitch_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Late gas switch'**
+  String get info_term_lateGasSwitch_label;
+
+  /// No description provided for @info_term_lateGasSwitch_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A switch to a deco gas made clearly shallower or later than the point where that gas became usable.'**
+  String get info_term_lateGasSwitch_body;
+
+  /// No description provided for @info_term_avgVerticalSpeed_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Average vertical speed'**
+  String get info_term_avgVerticalSpeed_label;
+
+  /// No description provided for @info_term_avgVerticalSpeed_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The average rate of depth change across the selected range.'**
+  String get info_term_avgVerticalSpeed_body;
+
+  /// No description provided for @info_term_computedEvents_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Computed events'**
+  String get info_term_computedEvents_label;
+
+  /// No description provided for @info_term_computedEvents_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Markers the app adds by reading the profile, such as fast ascents, as opposed to events the dive computer logged.'**
+  String get info_term_computedEvents_body;
+
+  /// No description provided for @info_term_gasSwitchMarkers_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas switch markers'**
+  String get info_term_gasSwitchMarkers_label;
+
+  /// No description provided for @info_term_gasSwitchMarkers_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Points where the breathing gas changed from one cylinder to another.'**
+  String get info_term_gasSwitchMarkers_body;
+
+  /// No description provided for @info_term_diveModes_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive mode'**
+  String get info_term_diveModes_label;
+
+  /// No description provided for @info_term_diveModes_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Open circuit (OC) breathes each breath out into the water. Closed-circuit (CCR) and semi-closed (SCR) rebreathers recycle the gas through a loop.'**
+  String get info_term_diveModes_body;
+
+  /// No description provided for @info_term_netBuoyancy_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Net buoyancy'**
+  String get info_term_netBuoyancy_label;
+
+  /// No description provided for @info_term_netBuoyancy_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Every term added together, with lift counted as positive and weight as negative. Zero is neutral.'**
+  String get info_term_netBuoyancy_body;
+
+  /// No description provided for @info_term_buoyancySwing_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Buoyancy swing'**
+  String get info_term_buoyancySwing_label;
+
+  /// No description provided for @info_term_buoyancySwing_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How much the net buoyancy changed between the start and the end of the dive, mostly from the weight of the gas breathed.'**
+  String get info_term_buoyancySwing_body;
+
+  /// No description provided for @info_term_peakLift_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Peak lift needed'**
+  String get info_term_peakLift_label;
+
+  /// No description provided for @info_term_peakLift_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The most lift the wing or drysuit had to add at any point in the dive to stay neutral.'**
+  String get info_term_peakLift_body;
+
+  /// No description provided for @info_term_minDitchable_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Min ditchable weight'**
+  String get info_term_minDitchable_label;
+
+  /// No description provided for @info_term_minDitchable_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The weight that would need to be dropped at the heaviest point of the dive to end up about {weight} buoyant.'**
+  String info_term_minDitchable_body(String weight);
+
+  /// No description provided for @info_term_drysuitGas_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Drysuit gas added'**
+  String get info_term_drysuitGas_label;
+
+  /// No description provided for @info_term_drysuitGas_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas added to the drysuit to offset its squeeze on the way down, which counts as lift.'**
+  String get info_term_drysuitGas_body;
+
+  /// No description provided for @info_term_noFlyTime_label.
+  ///
+  /// In en, this message translates to:
+  /// **'No-fly time'**
+  String get info_term_noFlyTime_label;
+
+  /// No description provided for @info_term_noFlyTime_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Time from the last dive until the DAN and UHMS guideline interval for flying has passed. The interval depends on whether the dives were single, repetitive or needed decompression, and on the preset in settings.'**
+  String get info_term_noFlyTime_body;
+
+  /// No description provided for @info_term_perYearRate_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Rate per year'**
+  String get info_term_perYearRate_label;
+
+  /// No description provided for @info_term_perYearRate_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The slope of the overall trend line, expressed as the change over one year.'**
+  String get info_term_perYearRate_body;
+
+  /// No description provided for @info_term_loggedBeforeMeasurement_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Logged before measurement'**
+  String get info_term_loggedBeforeMeasurement_label;
+
+  /// No description provided for @info_term_loggedBeforeMeasurement_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Visibility logged as a word, such as good or poor, before the app recorded it as a distance. Those dives keep their original word.'**
+  String get info_term_loggedBeforeMeasurement_body;
+
+  /// No description provided for @info_term_spansBands_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Spans bands'**
+  String get info_term_spansBands_label;
+
+  /// No description provided for @info_term_spansBands_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A visibility logged as a range that crosses more than one band, so it is counted on its own.'**
+  String get info_term_spansBands_body;
+
+  /// No description provided for @info_term_dawnDusk_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Dawn and dusk'**
+  String get info_term_dawnDusk_label;
+
+  /// No description provided for @info_term_dawnDusk_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A dawn dive starts before sunrise and ends after it, and a dusk dive does the same around sunset. Night means the whole dive was in darkness.'**
+  String get info_term_dawnDusk_body;
+
+  /// No description provided for @info_term_calendarShading_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Shading'**
+  String get info_term_calendarShading_label;
+
+  /// No description provided for @info_term_calendarShading_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Each square is one day of the year, and a darker square means more dives on that day across all the years in range.'**
+  String get info_term_calendarShading_body;
+
+  /// No description provided for @info_term_saltWaterHours_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Salt-water hours'**
+  String get info_term_saltWaterHours_label;
+
+  /// No description provided for @info_term_saltWaterHours_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Time underwater in salt or brackish water, which wears metal parts and seals faster than fresh water.'**
+  String get info_term_saltWaterHours_body;
+
+  /// No description provided for @info_term_coldDives_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Cold dives'**
+  String get info_term_coldDives_label;
+
+  /// No description provided for @info_term_coldDives_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives whose lowest water temperature was below the cold-water threshold in the equipment condition settings.'**
+  String get info_term_coldDives_body;
+
+  /// No description provided for @info_term_deepCycles_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Deep dives'**
+  String get info_term_deepCycles_label;
+
+  /// No description provided for @info_term_deepCycles_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives that reached the deep-dive threshold in the equipment condition settings, each one a full pressure cycle for the gear.'**
+  String get info_term_deepCycles_body;
+
+  /// No description provided for @info_term_conditionRules_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Condition rules'**
+  String get info_term_conditionRules_label;
+
+  /// No description provided for @info_term_conditionRules_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Checks the app runs over logged dives and issues, such as oxygen cells reading lower over time or a problem that keeps coming back. Each can be turned off in settings.'**
+  String get info_term_conditionRules_body;
+
+  /// No description provided for @info_term_standout_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Stands out'**
+  String get info_term_standout_label;
+
+  /// No description provided for @info_term_standout_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A factor whose share among the focus dives differs clearly from its share among the other dives. The dot in the table marks it.'**
+  String get info_term_standout_body;
+
+  /// No description provided for @info_term_avgMaxDepth_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Avg Depth'**
+  String get info_term_avgMaxDepth_label;
+
+  /// No description provided for @info_term_avgMaxDepth_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The average of each dive\'s maximum depth, not the mean depth within dives.'**
+  String get info_term_avgMaxDepth_body;
+
+  /// No description provided for @info_term_diveTypeCounting_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Dive types'**
+  String get info_term_diveTypeCounting_label;
+
+  /// No description provided for @info_term_diveTypeCounting_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A dive with several types counts once under each, so the bars can add up to more than the number of dives.'**
+  String get info_term_diveTypeCounting_body;
+
+  /// No description provided for @info_term_gasMixCounting_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Several mixes'**
+  String get info_term_gasMixCounting_label;
+
+  /// No description provided for @info_term_gasMixCounting_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A dive that breathed more than one mix counts once under each, so the bars can add up to more than the number of dives.'**
+  String get info_term_gasMixCounting_body;
+
+  /// No description provided for @info_term_cylinderRole_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Cylinder role'**
+  String get info_term_cylinderRole_label;
+
+  /// No description provided for @info_term_cylinderRole_body.
+  ///
+  /// In en, this message translates to:
+  /// **'What a cylinder was for on the dive: bottom gas, stage, deco, pony or bailout. Consumption is grouped by it.'**
+  String get info_term_cylinderRole_body;
+
+  /// No description provided for @info_term_colourBy_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Color by'**
+  String get info_term_colourBy_label;
+
+  /// No description provided for @info_term_colourBy_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Kind colors each point by what it is, groups colors the clusters that dive together, and recency fades links that have not been dived lately.'**
+  String get info_term_colourBy_body;
+
+  /// No description provided for @info_term_weightedEdges_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Weighted links'**
+  String get info_term_weightedEdges_label;
+
+  /// No description provided for @info_term_weightedEdges_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A thicker line means more dives shared by the two points it joins.'**
+  String get info_term_weightedEdges_body;
+
+  /// No description provided for @info_term_hops_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Hops'**
+  String get info_term_hops_label;
+
+  /// No description provided for @info_term_hops_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How many links away from the chosen point the view reaches. One hop shows its direct connections only.'**
+  String get info_term_hops_body;
+
+  /// No description provided for @info_term_lastStop_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Last stop'**
+  String get info_term_lastStop_label;
+
+  /// No description provided for @info_term_lastStop_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The depth of the shallowest decompression stop. A deeper last stop is easier to hold in swell but takes longer.'**
+  String get info_term_lastStop_body;
+
+  /// No description provided for @info_term_ascentStages_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Ascent stages'**
+  String get info_term_ascentStages_label;
+
+  /// No description provided for @info_term_ascentStages_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The plan can use a different speed for each part of the ascent: to the first stop, between stops and near the surface.'**
+  String get info_term_ascentStages_body;
+
+  /// No description provided for @info_term_reserveGas_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Reserve'**
+  String get info_term_reserveGas_label;
+
+  /// No description provided for @info_term_reserveGas_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas the plan holds back in each cylinder and never counts as usable.'**
+  String get info_term_reserveGas_body;
+
+  /// No description provided for @info_term_setpointSwitchDepth_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Setpoint switch depth'**
+  String get info_term_setpointSwitchDepth_label;
+
+  /// No description provided for @info_term_setpointSwitchDepth_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The depth at which the plan moves from the low to the high setpoint on the way down, and back on the way up.'**
+  String get info_term_setpointSwitchDepth_body;
+
+  /// No description provided for @info_term_pscrRatio_label.
+  ///
+  /// In en, this message translates to:
+  /// **'pSCR ratio'**
+  String get info_term_pscrRatio_label;
+
+  /// No description provided for @info_term_pscrRatio_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The share of each exhaled breath a passive semi-closed rebreather discards. It sets how far the loop oxygen falls below the supply gas.'**
+  String get info_term_pscrRatio_body;
+
+  /// No description provided for @info_term_turnFraction_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Turn fraction'**
+  String get info_term_turnFraction_label;
+
+  /// No description provided for @info_term_turnFraction_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The share of the starting gas the plan uses before turning back. A third is the common rule for caves and other overhead dives.'**
+  String get info_term_turnFraction_body;
+
+  /// No description provided for @info_term_dpv_label.
+  ///
+  /// In en, this message translates to:
+  /// **'DPV (scooter)'**
+  String get info_term_dpv_label;
+
+  /// No description provided for @info_term_dpv_body.
+  ///
+  /// In en, this message translates to:
+  /// **'A diver propulsion vehicle. The mission plan covers the battery, the distance covered and the swim back if a scooter fails.'**
+  String get info_term_dpv_body;
+
+  /// No description provided for @info_term_ceilingViolation_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Ceiling violations'**
+  String get info_term_ceilingViolation_label;
+
+  /// No description provided for @info_term_ceilingViolation_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How often and how far a version of the dive went shallower than the model\'s ceiling.'**
+  String get info_term_ceilingViolation_body;
+
+  /// No description provided for @info_term_deepestStop_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Deepest stop'**
+  String get info_term_deepestStop_label;
+
+  /// No description provided for @info_term_deepestStop_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The depth of the first required decompression stop.'**
+  String get info_term_deepestStop_body;
+
+  /// No description provided for @info_term_minGasMargin_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Min gas margin'**
+  String get info_term_minGasMargin_label;
+
+  /// No description provided for @info_term_minGasMargin_body.
+  ///
+  /// In en, this message translates to:
+  /// **'How much gas was left above the minimum gas at the point where the change happened.'**
+  String get info_term_minGasMargin_body;
+
+  /// No description provided for @info_term_gasOutTime_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas out time'**
+  String get info_term_gasOutTime_label;
+
+  /// No description provided for @info_term_gasOutTime_body.
+  ///
+  /// In en, this message translates to:
+  /// **'When a cylinder would run empty at the breathing rate the replay uses.'**
+  String get info_term_gasOutTime_body;
+
+  /// No description provided for @info_term_whatIf_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Actual and what if'**
+  String get info_term_whatIf_label;
+
+  /// No description provided for @info_term_whatIf_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Actual replays the logged dive through the model, and what if replays it with the changes added in the Dive Lab.'**
+  String get info_term_whatIf_body;
+
+  /// No description provided for @info_term_cellGain_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Cell output (mV per bar)'**
+  String get info_term_cellGain_label;
+
+  /// No description provided for @info_term_cellGain_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Each oxygen cell\'s millivolt reading divided by the ppO2 it measures. It stays steady while a cell is healthy and falls as the cell ages.'**
+  String get info_term_cellGain_body;
+
+  /// No description provided for @info_term_transmitterDropouts_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Transmitter dropouts'**
+  String get info_term_transmitterDropouts_label;
+
+  /// No description provided for @info_term_transmitterDropouts_body.
+  ///
+  /// In en, this message translates to:
+  /// **'The share of each dive with no pressure reading from the transmitter.'**
+  String get info_term_transmitterDropouts_body;
+
+  /// No description provided for @info_term_o2Narcotic_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Oxygen counted as narcotic'**
+  String get info_term_o2Narcotic_label;
+
+  /// No description provided for @info_term_o2Narcotic_body.
+  ///
+  /// In en, this message translates to:
+  /// **'When on, oxygen counts as narcotic like nitrogen in END and MND. This makes END deeper and MND shallower.'**
+  String get info_term_o2Narcotic_body;
+
+  /// No description provided for @info_term_ascentGasSet_label.
+  ///
+  /// In en, this message translates to:
+  /// **'Gases for the ascent'**
+  String get info_term_ascentGasSet_label;
+
+  /// No description provided for @info_term_ascentGasSet_body.
+  ///
+  /// In en, this message translates to:
+  /// **'Which carried cylinders the simulated ascent may switch to: every gas carried, or only stage and deco cylinders.'**
+  String get info_term_ascentGasSet_body;
+
+  /// No description provided for @info_diveLog_profile_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Depth over time for the whole dive, with each overlay that is switched on drawn on the same time axis.'**
+  String get info_diveLog_profile_summary;
+
+  /// No description provided for @info_diveLog_profile_background.
+  ///
+  /// In en, this message translates to:
+  /// **'Deco and oxygen overlays come from the Buhlmann ZHL-16C model with the gradient factors in settings, and from the NOAA oxygen tables.'**
+  String get info_diveLog_profile_background;
+
+  /// No description provided for @info_diveLog_profile_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Move across the chart to read every value at one moment. The legend turns overlays on and off, and the range button selects part of the dive to see its statistics.'**
+  String get info_diveLog_profile_howToUse;
+
+  /// No description provided for @info_diveLog_rangeStats_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Statistics for the part of the dive selected on the chart.'**
+  String get info_diveLog_rangeStats_summary;
+
+  /// No description provided for @info_diveLog_decoStatus_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'What the decompression model reports at the cursor time: whether stops are needed, and how much time or depth remains.'**
+  String get info_diveLog_decoStatus_summary;
+
+  /// No description provided for @info_diveLog_decoStatus_background.
+  ///
+  /// In en, this message translates to:
+  /// **'The app runs the Buhlmann ZHL-16C model with the gradient factors on the GF chip. A dive computer with another model or settings can show different numbers.'**
+  String get info_diveLog_decoStatus_background;
+
+  /// No description provided for @info_diveLog_o2Toxicity_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How much oxygen exposure the dive added, on the short-term CNS clock and the slower OTU dose.'**
+  String get info_diveLog_o2Toxicity_summary;
+
+  /// No description provided for @info_diveLog_o2Toxicity_background.
+  ///
+  /// In en, this message translates to:
+  /// **'CNS% follows the NOAA ppO2 exposure limits and falls with a 90-minute half-life after the dive. Daily OTU resets at midnight and weekly OTU covers the last seven days.'**
+  String get info_diveLog_o2Toxicity_background;
+
+  /// No description provided for @info_diveLog_gasSwitches_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How each gas switch compared with the deepest point where that gas was within its ppO2 limit.'**
+  String get info_diveLog_gasSwitches_summary;
+
+  /// No description provided for @info_diveLog_tissueLoading_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How loaded each of the model\'s 16 compartments is with inert gas at the cursor time.'**
+  String get info_diveLog_tissueLoading_summary;
+
+  /// No description provided for @info_diveLog_tissueLoading_background.
+  ///
+  /// In en, this message translates to:
+  /// **'The model is Buhlmann ZHL-16C, which tracks nitrogen and helium separately in each compartment. Load counts only what sits above the surface level, so fully off-gassed bars never read zero.'**
+  String get info_diveLog_tissueLoading_background;
+
+  /// No description provided for @info_diveLog_safetyReview_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Moments in this dive that crossed one of the safety review rules, found by checking the profile after the dive.'**
+  String get info_diveLog_safetyReview_summary;
+
+  /// No description provided for @info_diveLog_safetyReview_background.
+  ///
+  /// In en, this message translates to:
+  /// **'The rules and their thresholds are set in Settings, under Safety review.'**
+  String get info_diveLog_safetyReview_background;
+
+  /// No description provided for @info_diveLog_safetyReview_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap a finding to show where it happened on the profile. Dismissing a finding hides it for this dive.'**
+  String get info_diveLog_safetyReview_howToUse;
+
+  /// No description provided for @info_diveLog_cylinders_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Each cylinder on the dive with its gas, the pressure used and the depth limits of that gas.'**
+  String get info_diveLog_cylinders_summary;
+
+  /// No description provided for @info_diveLog_sacSegments_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas use split into phases of the dive or into time slices, so the effort of each part can be compared.'**
+  String get info_diveLog_sacSegments_summary;
+
+  /// No description provided for @info_diveLog_sacSegments_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'The selector above the chart switches between SAC and RMV.'**
+  String get info_diveLog_sacSegments_howToUse;
+
+  /// No description provided for @info_diveLog_details_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The logged facts of this dive, with values worked out from the profile where nothing was entered.'**
+  String get info_diveLog_details_summary;
+
+  /// No description provided for @info_diveLog_altitude_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'This dive was at altitude, where lower air pressure at the surface makes the decompression model more conservative.'**
+  String get info_diveLog_altitude_summary;
+
+  /// No description provided for @info_diveLog_buoyancy_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'A model of net buoyancy through the dive, from the profile, the gas breathed and the gear logged with the dive.'**
+  String get info_diveLog_buoyancy_summary;
+
+  /// No description provided for @info_diveLog_buoyancy_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Adjust opens a sheet that tries a different amount of lead or suit buoyancy against this dive.'**
+  String get info_diveLog_buoyancy_howToUse;
+
+  /// No description provided for @info_diveLog_waterConditions_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Sea temperature and coral heat stress near the site around the dive date, from NOAA Coral Reef Watch satellite data.'**
+  String get info_diveLog_waterConditions_summary;
+
+  /// No description provided for @info_diveLab_compare_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How this dive compares with its linked plan or saved scenarios on the numbers that matter for decompression.'**
+  String get info_diveLab_compare_summary;
+
+  /// No description provided for @info_diveLab_compare_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap the card to open the Dive Lab and try other choices against this dive.'**
+  String get info_diveLab_compare_howToUse;
+
+  /// No description provided for @info_safety_noFly_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'When the guideline interval for flying ends after the most recent dives.'**
+  String get info_safety_noFly_summary;
+
+  /// No description provided for @info_insights_trendControls_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'The range button picks the period, and the grouping button shows each dive, each week or each month. Rolling average and overall trend switch their lines on and off, and long gaps can be collapsed from the menu.'**
+  String get info_insights_trendControls_howToUse;
+
+  /// No description provided for @info_insights_sacTrend_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas use per dive over time, one point per dive or per group, on the lane chosen above.'**
+  String get info_insights_sacTrend_summary;
+
+  /// No description provided for @info_insights_roleUse_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Gas use over time for each kind of cylinder, so bottom gas and stages are not mixed together.'**
+  String get info_insights_roleUse_summary;
+
+  /// No description provided for @info_insights_ccrUse_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Oxygen and diluent used per rebreather dive, as volume per minute at surface pressure.'**
+  String get info_insights_ccrUse_summary;
+
+  /// No description provided for @info_insights_depthTrend_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The maximum depth of each dive over time.'**
+  String get info_insights_depthTrend_summary;
+
+  /// No description provided for @info_insights_runtimeTrend_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How long each dive lasted from leaving the surface to surfacing, over time.'**
+  String get info_insights_runtimeTrend_summary;
+
+  /// No description provided for @info_insights_bottomTimeTrend_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Each dive\'s bottom time over time, which leaves out the final ascent and stops that runtime includes.'**
+  String get info_insights_bottomTimeTrend_summary;
+
+  /// No description provided for @info_insights_waterTempTrend_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The water temperature logged on each dive over time.'**
+  String get info_insights_waterTempTrend_summary;
+
+  /// No description provided for @info_insights_airTempTrend_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The air temperature logged on each dive over time.'**
+  String get info_insights_airTempTrend_summary;
+
+  /// No description provided for @info_insights_weightTrend_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The lead carried on each dive over time.'**
+  String get info_insights_weightTrend_summary;
+
+  /// No description provided for @info_insights_gasMix_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How many dives breathed each gas mix.'**
+  String get info_insights_gasMix_summary;
+
+  /// No description provided for @info_insights_tankConfig_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How the cylinders were set up on each dive, counted from the cylinders\' logged roles.'**
+  String get info_insights_tankConfig_summary;
+
+  /// No description provided for @info_insights_sacRecords_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The dives with the lowest and highest gas use in the range.'**
+  String get info_insights_sacRecords_summary;
+
+  /// No description provided for @info_insights_ascentDescent_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Average speed going down and coming up, worked out from the profiles.'**
+  String get info_insights_ascentDescent_summary;
+
+  /// No description provided for @info_insights_timeAtDepth_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How the total time underwater divides across depth bands.'**
+  String get info_insights_timeAtDepth_summary;
+
+  /// No description provided for @info_insights_decoObligation_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How many dives needed decompression stops, by the model\'s reading of each profile.'**
+  String get info_insights_decoObligation_summary;
+
+  /// No description provided for @info_insights_cumulative_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The running total of dives logged over time.'**
+  String get info_insights_cumulative_summary;
+
+  /// No description provided for @info_insights_visibility_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives grouped by the visibility logged, in the bands of the visibility scale in settings.'**
+  String get info_insights_visibility_summary;
+
+  /// No description provided for @info_insights_waterType_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives in salt, fresh and brackish water.'**
+  String get info_insights_waterType_summary;
+
+  /// No description provided for @info_insights_seasonalTemp_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The lowest, average and highest water temperature logged in each month of the year.'**
+  String get info_insights_seasonalTemp_summary;
+
+  /// No description provided for @info_insights_waterTempBands_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives grouped by water temperature, with the average gas use and depth for each band.'**
+  String get info_insights_waterTempBands_summary;
+
+  /// No description provided for @info_insights_siteType_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives by the kind of site logged, such as reef, wreck or cave.'**
+  String get info_insights_siteType_summary;
+
+  /// No description provided for @info_insights_altitude_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives grouped by the altitude of the site.'**
+  String get info_insights_altitude_summary;
+
+  /// No description provided for @info_insights_surfacePressure_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Dives grouped by the air pressure recorded at the surface.'**
+  String get info_insights_surfacePressure_summary;
+
+  /// No description provided for @info_insights_timeOfDay_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'When dives happened relative to sunrise and sunset at each site.'**
+  String get info_insights_timeOfDay_summary;
+
+  /// No description provided for @info_insights_calendarDays_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Which days of the year have had dives, across every year in range.'**
+  String get info_insights_calendarDays_summary;
+
+  /// No description provided for @info_insights_surfaceIntervals_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The average, shortest and longest time on the surface between one dive and the one before it.'**
+  String get info_insights_surfaceIntervals_summary;
+
+  /// No description provided for @info_insights_exposure_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Gear ranked by how much use and wear it has seen, in the unit chosen from the menu.'**
+  String get info_insights_exposure_summary;
+
+  /// No description provided for @info_insights_conditionFindings_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Patterns in the logged dives and issues that point to gear needing attention.'**
+  String get info_insights_conditionFindings_summary;
+
+  /// No description provided for @info_insights_reportedIssues_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The problems logged against dives, grouped by their tag and counted.'**
+  String get info_insights_reportedIssues_summary;
+
+  /// No description provided for @info_insights_focus_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The dives picked by the sentence above, compared with all the other dives in range.'**
+  String get info_insights_focus_summary;
+
+  /// No description provided for @info_insights_focus_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap the underlined words in the sentence to change the measure, the direction and the number of dives. A threshold mode compares every dive above or below a value instead.'**
+  String get info_insights_focus_howToUse;
+
+  /// No description provided for @info_insights_standouts_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The factors that are clearly more or less common among the focus dives than among the rest.'**
+  String get info_insights_standouts_summary;
+
+  /// No description provided for @info_insights_comparison_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Every factor side by side: its share among the focus dives and among the other dives.'**
+  String get info_insights_comparison_summary;
+
+  /// No description provided for @info_insights_overviewStats_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Totals and averages for every dive in range.'**
+  String get info_insights_overviewStats_summary;
+
+  /// No description provided for @info_insights_distributions_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How dives spread across depth bands and dive types.'**
+  String get info_insights_distributions_summary;
+
+  /// No description provided for @info_insights_observations_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Short notes the app found in the logbook, such as a new deepest dive or a change in gas use.'**
+  String get info_insights_observations_summary;
+
+  /// No description provided for @info_connections_display_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Each point is a buddy, site, trip or piece of gear, and each line joins two that share dives.'**
+  String get info_connections_display_summary;
+
+  /// No description provided for @info_connections_display_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap a point to focus on it and its links. The panel chooses the colors, the line style and how far the view reaches.'**
+  String get info_connections_display_howToUse;
+
+  /// No description provided for @info_planner_results_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The headline numbers for the plan as it stands, updated as the plan changes.'**
+  String get info_planner_results_summary;
+
+  /// No description provided for @info_planner_decoSchedule_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The ascent the model plans, one row per stop or gas switch, with its depth, time, running time and gas.'**
+  String get info_planner_decoSchedule_summary;
+
+  /// No description provided for @info_planner_gas_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How much of each cylinder the plan uses, with its turn pressure and minimum gas where the start pressure is known.'**
+  String get info_planner_gas_summary;
+
+  /// No description provided for @info_planner_bailout_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The open-circuit ascent from the worst point of the dive if the loop is lost, and whether the bailout gas carried covers it.'**
+  String get info_planner_bailout_summary;
+
+  /// No description provided for @info_planner_contingencies_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The plan worked again for things going differently: a deeper or longer dive, or a lost gas.'**
+  String get info_planner_contingencies_summary;
+
+  /// No description provided for @info_planner_range_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How the schedule changes if the dive goes deeper or stays longer than planned.'**
+  String get info_planner_range_summary;
+
+  /// No description provided for @info_planner_mission_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The scooter plan for the team: battery use, distance and the swim back if a scooter fails.'**
+  String get info_planner_mission_summary;
+
+  /// No description provided for @info_planner_carry_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'What this dive leaves for the next one: the surface interval, the CNS still carried and the OTU.'**
+  String get info_planner_carry_summary;
+
+  /// No description provided for @info_plannerSetup_deco_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How conservative the schedule is and where the last stop sits.'**
+  String get info_plannerSetup_deco_summary;
+
+  /// No description provided for @info_plannerSetup_deco_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Lower GF Low moves the first stop deeper, and lower GF High lengthens the shallow stops. The results update as each value changes.'**
+  String get info_plannerSetup_deco_howToUse;
+
+  /// No description provided for @info_plannerSetup_rates_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How fast the plan descends and ascends in each part of the dive.'**
+  String get info_plannerSetup_rates_summary;
+
+  /// No description provided for @info_plannerSetup_rates_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Each rate applies to its own part of the dive. The results update as a value changes.'**
+  String get info_plannerSetup_rates_howToUse;
+
+  /// No description provided for @info_plannerSetup_gas_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The breathing rate and reserve the plan uses to size the gas.'**
+  String get info_plannerSetup_gas_summary;
+
+  /// No description provided for @info_plannerSetup_gas_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a bottom breathing rate, or take it from logged dives, and the reserve to keep in each cylinder.'**
+  String get info_plannerSetup_gas_howToUse;
+
+  /// No description provided for @info_plannerSetup_environment_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The water type and altitude, which set the surface pressure the model starts from.'**
+  String get info_plannerSetup_environment_summary;
+
+  /// No description provided for @info_plannerSetup_environment_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick the water type and enter the site\'s altitude.'**
+  String get info_plannerSetup_environment_howToUse;
+
+  /// No description provided for @info_plannerSetup_ccr_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The setpoints the closed-circuit rebreather holds during the plan.'**
+  String get info_plannerSetup_ccr_summary;
+
+  /// No description provided for @info_plannerSetup_ccr_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Set the low and high setpoints and the depth where the plan switches between them.'**
+  String get info_plannerSetup_ccr_howToUse;
+
+  /// No description provided for @info_plannerSetup_pscr_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How the passive semi-closed rebreather is modelled in the plan.'**
+  String get info_plannerSetup_pscr_summary;
+
+  /// No description provided for @info_plannerSetup_pscr_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the discard ratio given by the rebreather\'s maker.'**
+  String get info_plannerSetup_pscr_howToUse;
+
+  /// No description provided for @info_plannerSetup_contingencies_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How far the contingency plans go and the rule the gas plan turns on.'**
+  String get info_plannerSetup_contingencies_summary;
+
+  /// No description provided for @info_plannerSetup_contingencies_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Set how much deeper and longer the contingency plans go, then pick a turn rule and fraction.'**
+  String get info_plannerSetup_contingencies_howToUse;
+
+  /// No description provided for @info_plannerSetup_dpvTeam_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The team, scooters and conditions behind the mission plan.'**
+  String get info_plannerSetup_dpvTeam_summary;
+
+  /// No description provided for @info_plannerSetup_dpvTeam_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the divers and scooters, the battery reserve, the current and the swim speed.'**
+  String get info_plannerSetup_dpvTeam_howToUse;
+
+  /// No description provided for @info_plannerSetup_gear_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The gear and weights on the plan, used to predict buoyancy through the dive.'**
+  String get info_plannerSetup_gear_summary;
+
+  /// No description provided for @info_plannerSetup_gear_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Add the suit, cylinders and weights to see the predicted buoyancy.'**
+  String get info_plannerSetup_gear_howToUse;
+
+  /// No description provided for @info_diveLab_tiles_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The main results of the what if replay, tinted by whether each got better or worse than the actual dive.'**
+  String get info_diveLab_tiles_summary;
+
+  /// No description provided for @info_diveLab_delta_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Each measure for the actual dive and the what if version side by side, with the difference.'**
+  String get info_diveLab_delta_summary;
+
+  /// No description provided for @info_diveLab_tissues_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Compartment loads as each version reaches the surface, actual and what if.'**
+  String get info_diveLab_tissues_summary;
+
+  /// No description provided for @info_diveLab_buoyancy_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Buoyancy at the last stop for each version of the dive.'**
+  String get info_diveLab_buoyancy_summary;
+
+  /// No description provided for @info_diveLab_interventions_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Changes to try against this dive, each replayed through the same model from the moment it applies.'**
+  String get info_diveLab_interventions_summary;
+
+  /// No description provided for @info_calculators_mod_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The deepest depth where the chosen mix stays within its ppO2 limit, with the EAD and END there.'**
+  String get info_calculators_mod_summary;
+
+  /// No description provided for @info_calculators_mod_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick a mode, then set the oxygen and the working ppO2. A target depth can be added to check a planned depth against the mix. The END limit and whether oxygen counts as narcotic come from the diver profile.'**
+  String get info_calculators_mod_howToUse;
+
+  /// No description provided for @info_calculators_bestMix_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The richest mix for a target depth that keeps ppO2 within its limit and END within the narcosis limit.'**
+  String get info_calculators_bestMix_summary;
+
+  /// No description provided for @info_calculators_bestMix_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Set the target depth and the mode. On CCR, choose whether the mix is a diluent or a bailout gas.'**
+  String get info_calculators_bestMix_howToUse;
+
+  /// No description provided for @info_calculators_consumption_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How much gas a planned dive uses at a given depth, time and breathing rate.'**
+  String get info_calculators_consumption_summary;
+
+  /// No description provided for @info_calculators_consumption_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the depth, the time, the breathing rate and the cylinder.'**
+  String get info_calculators_consumption_howToUse;
+
+  /// No description provided for @info_calculators_rockBottom_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The minimum gas reserve for two divers to ascend together on one supply from the deepest point.'**
+  String get info_calculators_rockBottom_summary;
+
+  /// No description provided for @info_calculators_rockBottom_background.
+  ///
+  /// In en, this message translates to:
+  /// **'It uses a stressed breathing rate, commonly two to three times normal, and counts both divers on one cylinder. The safety stop is included when that option is on.'**
+  String get info_calculators_rockBottom_background;
+
+  /// No description provided for @info_calculators_rockBottom_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Set the depth, the stressed breathing rate, the ascent rate and the cylinder.'**
+  String get info_calculators_rockBottom_howToUse;
+
+  /// No description provided for @info_calculators_mnd_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The deepest depth a gas stays within the END limit, and the END of a gas at a given depth.'**
+  String get info_calculators_mnd_summary;
+
+  /// No description provided for @info_calculators_mnd_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the gas, the END limit and whether oxygen counts as narcotic.'**
+  String get info_calculators_mnd_howToUse;
+
+  /// No description provided for @info_calculators_icd_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Whether a switch between two gases passes the rule of fifths for counterdiffusion.'**
+  String get info_calculators_icd_summary;
+
+  /// No description provided for @info_calculators_icd_background.
+  ///
+  /// In en, this message translates to:
+  /// **'Helium diffuses faster than nitrogen, so a switch to a more nitrogen-rich gas can raise total inert gas in tissue. Agencies differ on how much this matters for standard gases.'**
+  String get info_calculators_icd_background;
+
+  /// No description provided for @info_calculators_icd_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the current gas and the gas switched to.'**
+  String get info_calculators_icd_howToUse;
+
+  /// No description provided for @info_calculators_density_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How dense a gas is at depth, and the depth at which air would be as dense.'**
+  String get info_calculators_density_summary;
+
+  /// No description provided for @info_calculators_density_background.
+  ///
+  /// In en, this message translates to:
+  /// **'On CCR the density is that of the loop gas: oxygen at the setpoint, the rest split in the diluent\'s ratio. Colder gas is denser, and the calculation assumes an ideal gas.'**
+  String get info_calculators_density_background;
+
+  /// No description provided for @info_calculators_density_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the mix, the depth and the water temperature, and switch between OC and CCR.'**
+  String get info_calculators_density_howToUse;
+
+  /// No description provided for @info_calculators_blender_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'A partial-pressure blend: the fill gases to add, in order, to reach the target mix.'**
+  String get info_calculators_blender_summary;
+
+  /// No description provided for @info_calculators_blender_background.
+  ///
+  /// In en, this message translates to:
+  /// **'Each gas is added up to the pressure shown and the cylinder is left to settle before the next. Fill gases and their order are configurable, so the last gas can be EAN32 instead of air.'**
+  String get info_calculators_blender_background;
+
+  /// No description provided for @info_calculators_blender_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter what is already in the cylinder and the target mix. The last step of every blend is analyzing the finished mix.'**
+  String get info_calculators_blender_howToUse;
+
+  /// No description provided for @info_decoCalculator_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'A single-level dive run through the Buhlmann ZHL-16C model, showing its gas limits, stops and tissue loading.'**
+  String get info_decoCalculator_summary;
+
+  /// No description provided for @info_decoCalculator_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Set the depth, the time, the gas and the water conditions. The gas limits, the stops and the tissue chart update as each value changes.'**
+  String get info_decoCalculator_howToUse;
+
+  /// No description provided for @info_surfaceIntervalTool_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Whether a second dive fits within no-stop limits after a surface interval, from the tissue loading carried over from the first dive.'**
+  String get info_surfaceIntervalTool_summary;
+
+  /// No description provided for @info_surfaceIntervalTool_background.
+  ///
+  /// In en, this message translates to:
+  /// **'The model\'s 16 compartments release gas during the interval, fast ones within minutes and slow ones over hours. The leading compartment is the most loaded one and usually sets the NDL.'**
+  String get info_surfaceIntervalTool_background;
+
+  /// No description provided for @info_surfaceIntervalTool_howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'Set the first dive, the second dive and the surface interval. The result shows the minimum interval and the NDL for the second dive.'**
+  String get info_surfaceIntervalTool_howToUse;
+
+  /// No description provided for @info_equipment_trend_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'One point per dive, so a slow change in this item shows as a trend over its life.'**
+  String get info_equipment_trend_summary;
+
+  /// No description provided for @info_equipment_findings_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Patterns in this item\'s dives and reported issues that the condition rules flagged.'**
+  String get info_equipment_findings_summary;
+
+  /// No description provided for @info_equipment_exposure_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How much use this item has seen, counted in each of the units its service clocks use.'**
+  String get info_equipment_exposure_summary;
+
+  /// No description provided for @info_site_altitude_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The site\'s height above sea level and the air pressure there, which the decompression model starts from.'**
+  String get info_site_altitude_summary;
+
+  /// No description provided for @info_trips_scrubberMargin_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How much rated scrubber time is left for the trip\'s planned rebreather dives.'**
+  String get info_trips_scrubberMargin_summary;
+
+  /// No description provided for @info_settings_gradientFactors_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'How conservative the app\'s decompression model is.'**
+  String get info_settings_gradientFactors_summary;
+
+  /// No description provided for @info_settings_gradientFactors_background.
+  ///
+  /// In en, this message translates to:
+  /// **'Gradient factors scale back the Buhlmann ZHL-16C M-values, a method described by Erik Baker. Every deco figure the app calculates uses them.'**
+  String get info_settings_gradientFactors_background;
+
+  /// No description provided for @info_settings_oxygenToxicity_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The ppO2 limits and the CNS method used for oxygen figures across the app.'**
+  String get info_settings_oxygenToxicity_summary;
+
+  /// No description provided for @info_settings_dataSources_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Whether NDL, deco stops, TTS, GTR and CNS come from the dive computer or from the app\'s own calculation.'**
+  String get info_settings_dataSources_summary;
+
+  /// No description provided for @info_settings_narcosis_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The END limit and how END and MND are worked out across the app.'**
+  String get info_settings_narcosis_summary;
+
+  /// No description provided for @info_settings_icd_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The check the app runs on gas switches for counterdiffusion between helium and nitrogen.'**
+  String get info_settings_icd_summary;
+
+  /// No description provided for @info_settings_ascent_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Which gases the simulated ascent may switch to when the app works out TTS, the ceiling and stops.'**
+  String get info_settings_ascent_summary;
+
+  /// No description provided for @info_settings_safetyRules_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The rules each dive is checked against after it is logged. A rule that is off is never reported.'**
+  String get info_settings_safetyRules_summary;
+
+  /// No description provided for @info_settings_conditionThresholds_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The lines that make a dive count as cold, deep or high-oxygen for service clocks.'**
+  String get info_settings_conditionThresholds_summary;
+
+  /// No description provided for @info_settings_sensorSummaries_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The per-dive figures the app keeps for oxygen cells, transmitters and scrubbers.'**
+  String get info_settings_sensorSummaries_summary;
+
+  /// No description provided for @info_settings_conditionRules_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'The checks behind the equipment condition findings. A rule that is off is never reported.'**
+  String get info_settings_conditionRules_summary;
+
+  /// No description provided for @info_settings_notifications_summary.
+  ///
+  /// In en, this message translates to:
+  /// **'Reminders are scheduled when the app opens and refreshed in the background. Each equipment item can set its own reminders in its edit screen.'**
+  String get info_settings_notifications_summary;
+
+  /// Summary on the info sheet for the Ascent rate section of the decompression settings.
+  ///
+  /// In en, this message translates to:
+  /// **'The speeds at which the profile colors the ascent and logs ascent rate events.'**
+  String get info_settings_ascentRate_summary;
+
+  /// Standing safety note under the gas blender's fill procedure.
+  ///
+  /// In en, this message translates to:
+  /// **'Always analyze the finished mix before diving it.'**
+  String get gasCalculators_blender_analyseNote;
+
+  /// Background on the MOD calculator's info sheet. {depth} is 10 m in the diver's depth unit.
+  ///
+  /// In en, this message translates to:
+  /// **'The MOD is always rounded down, never up. Rec uses 1 bar per {depth}, like the dive log. OC Tec and CCR Tec work out the pressure at depth from the water type, so the same mix can show a slightly shallower MOD there.'**
+  String info_calculators_mod_background(String depth);
 }
 
 class _AppLocalizationsDelegate

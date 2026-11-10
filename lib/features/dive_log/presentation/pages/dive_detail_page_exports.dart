@@ -490,13 +490,17 @@ mixin _DiveDetailPageExports on ConsumerState<DiveDetailPage> {
           children: [
             Padding(
               padding: const EdgeInsets.all(16),
-              // A planned entry has no number yet (issue #3565).
+              // A planned or draft entry has no number yet (issues #3565
+              // and #637).
               child: Text(
-                dive.isPlanned
-                    ? context.l10n.diveLog_planned_bannerTitle
-                    : context.l10n.diveLog_export_titleDiveNumber(
-                        dive.diveNumber ?? 0,
-                      ),
+                unfilledDiveTitle(
+                      context,
+                      isPlanned: dive.isPlanned,
+                      isDraft: dive.isDraft,
+                    ) ??
+                    context.l10n.diveLog_export_titleDiveNumber(
+                      dive.diveNumber ?? 0,
+                    ),
                 style: Theme.of(context).textTheme.titleLarge,
               ),
             ),
@@ -578,12 +582,12 @@ mixin _DiveDetailPageExports on ConsumerState<DiveDetailPage> {
                         [dive],
                         sites: sites,
                         options: choice.options,
-                        dataSources: await ref.read(uddfSourceFetchProvider)([
-                          dive.id,
-                        ], choice.options),
                         extras: await ref.read(uddfDivesExtrasFetchProvider)([
                           dive.id,
                         ], choice.options),
+                        loadDiveChunk: ref.read(uddfDiveChunksProvider)(
+                          choice.options,
+                        ),
                         certificationCatalog: await ref.read(
                           allCustomCertificationsCatalogProvider.future,
                         ),
@@ -594,12 +598,12 @@ mixin _DiveDetailPageExports on ConsumerState<DiveDetailPage> {
                         [dive],
                         sites: sites,
                         options: choice.options,
-                        dataSources: await ref.read(uddfSourceFetchProvider)([
-                          dive.id,
-                        ], choice.options),
                         extras: await ref.read(uddfDivesExtrasFetchProvider)([
                           dive.id,
                         ], choice.options),
+                        loadDiveChunk: ref.read(uddfDiveChunksProvider)(
+                          choice.options,
+                        ),
                         certificationCatalog: await ref.read(
                           allCustomCertificationsCatalogProvider.future,
                         ),

@@ -17,6 +17,8 @@ import 'package:submersion/features/planner/domain/services/air_break_runs.dart'
 import 'package:submersion/features/planner/domain/services/bailout_chart_support.dart';
 import 'package:submersion/features/planner/domain/services/diluent_switch_time.dart';
 import 'package:submersion/features/planner/domain/services/plan_engine.dart';
+import 'package:submersion/features/planner/domain/services/plan_gas_switches.dart';
+import 'package:submersion/features/planner/domain/services/same_mix_share.dart';
 import 'package:submersion/features/planner/domain/services/segment_rate_split.dart';
 import 'package:submersion/features/planner/domain/services/segment_chain.dart';
 import 'package:submersion/features/planner/domain/services/setpoint_switch_split.dart';
@@ -119,6 +121,13 @@ class BailoutOutcome {
   /// flat-hold-then-climb steps every other stop shows.
   final List<PlanStop> ocStops;
 
+  /// The worst-case point's OC ascent travel, stretch by stretch, from where
+  /// each starts: to the first stop, between stops and to the surface, split
+  /// wherever the gas changes. [worstCaseRows] folds the travel between
+  /// stops into the stop it leads to, so the chart reads its gas switches
+  /// from this and [ocStops] instead (issue #4078).
+  final List<PlanBreathingStretch> ocTravel;
+
   /// Null when a carried bailout gas is eligible at every sampled instant.
   /// When set, the figures above were worked out on a gas past its MOD: they
   /// have to answer something, but none of them may be shown as a bailout
@@ -136,6 +145,7 @@ class BailoutOutcome {
     required this.bailoutTankUsages,
     required this.ceilingTrace,
     required this.ocStops,
+    this.ocTravel = const [],
     this.gasGap,
   });
 
@@ -272,17 +282,11 @@ class BailoutSolver {
     );
     final bailoutPlan = config.bailoutAscentGas(bailoutTanks, environment);
 
+    double capacityOf(DiveTank tank) =>
+        fillCapacityLiters(tank, config.gasModel);
     final carriedLiters = bailoutTanks.fold<double>(
       0,
-      (sum, tank) =>
-          sum +
-          gasVolume(
-            tankSizeLiters: tank.volume ?? 11.0,
-            pressureBar: tank.startPressure ?? 0,
-            o2Percent: tank.gasMix.o2,
-            hePercent: tank.gasMix.he,
-            model: config.gasModel,
-          ),
+      (sum, tank) => sum + capacityOf(tank),
     );
 
     final totalSeconds = segments.fold<int>(
@@ -449,6 +453,15 @@ class BailoutSolver {
       stressedAmv: stressedAmv,
       hypercapniaSeconds: hypercapniaSeconds,
     );
+    // The schedule charges a mix to the first cylinder carrying it; every
+    // cylinder of that mix shares it, so a second one never reads full
+    // beside an overdrawn first (#4138).
+    final ocLitersByTank = spreadAcrossSameMix(
+      ocSchedule.litersByTank,
+      tanks: bailoutTanks,
+      capacityOf: capacityOf,
+      alreadyUsed: spentAtWorst,
+    );
     return BailoutOutcome(
       gasGap: bailoutPlan.coversDepth(deepestPoint)
           ? null
@@ -462,6 +475,12 @@ class BailoutSolver {
       ccrRows: ccrRows,
       worstCaseRows: [...ccrRows, ...ocSchedule.rows],
       ocStops: unfoldedOcStops(
+        worst,
+        bailoutPlan: bailoutPlan,
+        policy: policy,
+        bailoutTanks: bailoutTanks,
+      ),
+      ocTravel: ocTravelStretches(
         worst,
         bailoutPlan: bailoutPlan,
         policy: policy,
@@ -482,7 +501,7 @@ class BailoutSolver {
         for (final tank in bailoutTanks)
           () {
             final used =
-                (ocSchedule.litersByTank[tank.id] ?? 0.0) +
+                (ocLitersByTank[tank.id] ?? 0.0) +
                 (spentAtWorst[tank.id] ?? 0.0);
             final start = tank.startPressure;
             final total = start != null
@@ -594,10 +613,11 @@ class BailoutSolver {
           // goes negative for a helium-rich mix at shallow depth.
           endMeters: math.max(
             0.0,
-            GasMix(
-              o2: fO2 * 100,
-              he: fHe * 100,
-            ).end(depth, o2Narcotic: config.o2Narcotic),
+            GasMix(o2: fO2 * 100, he: fHe * 100).end(
+              depth,
+              o2Narcotic: config.o2Narcotic,
+              environment: environment,
+            ),
           ),
         ),
       );
@@ -648,16 +668,10 @@ class BailoutSolver {
     double? previousFO2;
     double? previousFHe;
 
-    String? tankForGas(double fO2, double fHe) {
-      for (final tank in bailoutTanks) {
-        final tankFO2 = tank.gasMix.o2 / 100.0;
-        final tankFHe = tank.gasMix.he / 100.0;
-        if ((tankFO2 - fO2).abs() < 0.005 && (tankFHe - fHe).abs() < 0.005) {
-          return tank.id;
-        }
-      }
-      return null;
-    }
+    // The first cylinder of the mix; its sameMixShareGroup shares the
+    // liters charged to it afterwards (#4138).
+    String? tankForGas(double fO2, double fHe) =>
+        sameMixTanks(bailoutTanks, fO2: fO2, fHe: fHe).firstOrNull?.id;
 
     // Same per-leg liters formula as _ascentLiters (a travel leg's linear
     // depth range, the stop's own depth across a stop, split at the
@@ -735,10 +749,11 @@ class BailoutSolver {
           // Floored at 0 m, same as PlanEngine's END column.
           endMeters: math.max(
             0.0,
-            GasMix(
-              o2: fO2 * 100,
-              he: fHe * 100,
-            ).end(endDepth, o2Narcotic: config.o2Narcotic),
+            GasMix(o2: fO2 * 100, he: fHe * 100).end(
+              endDepth,
+              o2Narcotic: config.o2Narcotic,
+              environment: environment,
+            ),
           ),
         ),
       );
@@ -861,7 +876,7 @@ class BailoutSolver {
         runStart += run.seconds;
       }
       depth = stop.depthMeters;
-      phase = AscentPhase.betweenStops;
+      phase = phase.afterStop(gasSwitchOnly: stop.isGasSwitchOnly);
     }
     if (depth > 0) {
       final travelSeconds = policy.ascentSeconds(
@@ -927,7 +942,7 @@ class BailoutSolver {
       );
       elapsed += stop.durationSeconds;
       depth = stop.depthMeters;
-      phase = AscentPhase.betweenStops;
+      phase = phase.afterStop(gasSwitchOnly: stop.isGasSwitchOnly);
     }
     if (depth > 0) {
       final legSeconds = policy.ascentSeconds(

@@ -66,9 +66,8 @@ class _MediaLibraryViewState extends ConsumerState<MediaLibraryView> {
   Widget build(BuildContext context) {
     final state = ref.watch(mediaLibraryNotifierProvider);
     final mode = ref.watch(mediaLibraryViewModeProvider);
-    final showingMissing =
-        ref.watch(mediaLibraryFilterProvider).health ==
-        MediaHealthFilter.missing;
+    final filter = ref.watch(mediaLibraryFilterProvider);
+    final showingMissing = filter.health == MediaHealthFilter.missing;
 
     final visibleIds = state.entries.map((e) => e.item.id).toList();
     // Drop checked ids that a filter or sort change pushed off screen, so a
@@ -82,7 +81,13 @@ class _MediaLibraryViewState extends ConsumerState<MediaLibraryView> {
     // and entering the mode starts from an empty checked set with nothing
     // stale to drop. Selection changes alone do not reach here at all; the
     // ValueListenableBuilder below owns those.
-    if (_selection.value.isActive) {
+    //
+    // Not while page one loads: a new filter, sort or view grouping builds a
+    // new notifier that starts with no rows, and pruning against that would
+    // drop every checked row, even ones the new query brings straight back
+    // (issue #4268 made a mode switch one of these). The prune runs once the
+    // rows land.
+    if (_selection.value.isActive && !state.isLoading) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _selection.pruneTo(visibleIds);
       });
@@ -118,13 +123,7 @@ class _MediaLibraryViewState extends ConsumerState<MediaLibraryView> {
             if (showingMissing)
               MediaMissingBanner(isEmpty: state.entries.isEmpty),
             Expanded(
-              child: _buildBody(
-                context,
-                state,
-                mode,
-                showingMissing,
-                selection,
-              ),
+              child: _buildBody(context, state, mode, filter, selection),
             ),
           ],
         ),
@@ -136,7 +135,7 @@ class _MediaLibraryViewState extends ConsumerState<MediaLibraryView> {
     BuildContext context,
     MediaLibraryState state,
     MediaLibraryViewMode mode,
-    bool showingMissing,
+    MediaLibraryFilter filter,
     SelectionState selection,
   ) {
     // The map runs its own unpaged query and owns its loading, empty and
@@ -146,21 +145,24 @@ class _MediaLibraryViewState extends ConsumerState<MediaLibraryView> {
       return const Center(child: CircularProgressIndicator());
     }
     if (state.entries.isEmpty) {
-      return Center(
-        child: Text(
-          showingMissing
-              ? context.l10n.media_missing_empty
-              : context.l10n.media_library_empty,
-        ),
-      );
+      // Under a filter, empty means nothing matches it, not an empty
+      // library; with the cleanup filters (issue #4148) it is the finished
+      // state. So a read that failed must not pass for either.
+      final message = state.error != null
+          ? context.l10n.media_diveMediaSection_errorLoading
+          : filter.health == MediaHealthFilter.missing
+          ? context.l10n.media_missing_empty
+          : filter.isEmpty
+          ? context.l10n.media_library_empty
+          : context.l10n.media_library_emptyFiltered;
+      return Center(child: Text(message));
     }
     void loadMore() =>
         ref.read(mediaLibraryNotifierProvider.notifier).loadMore();
 
-    // The grouped modes reorder the sorted page: a dive's photos come
-    // together and unlinked ones go last, days likewise. The viewer pages
-    // through what the gallery shows, so it gets the groups' order, not the
-    // page's (issue #4146).
+    // The grouped modes load pages already ordered by group (issue #4268),
+    // so each group here is one run of rows. The viewer pages through what
+    // the gallery shows, so it gets the groups' order (issue #4146).
     final groups = switch (mode) {
       MediaLibraryViewMode.byDive => groupByDive(state.entries),
       MediaLibraryViewMode.timeline => groupByTimeline(state.entries),

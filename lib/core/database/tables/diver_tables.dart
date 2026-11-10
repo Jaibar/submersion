@@ -320,6 +320,22 @@ class DiverSettings extends Table {
       text().withDefault(const Constant('heatMap'))();
   BoolColumn get showMapBackgroundOnDiveCards =>
       boolean().withDefault(const Constant(false))();
+
+  /// Whether a dive card shows one of the dive's photos behind its text
+  /// (v347). It takes precedence over the map; a dive with no usable photo
+  /// falls back to the map or the attribute colour.
+  BoolColumn get showPhotoBackgroundOnDiveCards =>
+      boolean().withDefault(const Constant(false))();
+
+  /// Opacity (0..1) of the black overlay over a dive card's photo on the
+  /// dark theme (v347).
+  RealColumn get cardPhotoOverlayDark =>
+      real().withDefault(const Constant(0.6))();
+
+  /// Opacity (0..1) of the white overlay over a dive card's photo on the
+  /// light theme (v347).
+  RealColumn get cardPhotoOverlayLight =>
+      real().withDefault(const Constant(0.6))();
   BoolColumn get showMapBackgroundOnSiteCards =>
       boolean().withDefault(const Constant(false))();
   // Dive profile markers
@@ -399,6 +415,10 @@ class DiverSettings extends Table {
   /// v323: the Equipment page's group-by-location switch, moved here from
   /// the app-wide `equipment_group_by_location` key. Null falls back to it.
   BoolColumn get equipmentGroupByLocation => boolean().nullable()();
+
+  /// v351: the Equipment page's folded group keys, a JSON list (issue
+  /// #4184). Null or empty means every group open.
+  TextColumn get equipmentCollapsedGroups => text().nullable()();
 
   /// v323: the clock the arrangement columns above, the list view modes and
   /// [groupTripsInDiveList] sync under (`SyncFactGroups`), so a sort tap

@@ -103,11 +103,15 @@ String _supersededOriginalSql(String s) {
 /// only executed for the dives that actually reach that step. A dive with an
 /// explicit `runtime` never touches `dive_profile_series`, which is what keeps this
 /// usable in aggregates that scan the whole dive table.
+///
+/// NULL for a draft (issue #637): its times are taps at the site and any
+/// runtime it holds came from the plan it adopted, so neither is a reading
+/// to report; [effectiveRuntimeSecondsSql] still spans its taps.
 String measuredRuntimeSecondsSql(String alias) =>
-    'COALESCE('
+    'CASE WHEN $alias.is_draft = 1 THEN NULL ELSE COALESCE('
     '$alias.runtime, '
     '${timestampRuntimeSecondsSql(alias)}, '
-    '${profileSpanSecondsSql(alias)})';
+    '${profileSpanSecondsSql(alias)}) END';
 
 /// What [measuredRuntimeSecondsSql] reads beyond the dive row, by SQL name:
 /// the tables a query or a tick over a measured runtime has to follow. The
@@ -122,8 +126,13 @@ const Set<String> measuredRuntimeTables = {
 /// seconds, NULL only for a dive that carries no duration in any form: the
 /// [measuredRuntimeSecondsSql] steps, then `bottom_time`. An estimate for a
 /// time window, never a value to report as a runtime.
+///
+/// A draft's window is its taps, NULL while it is still open (issue #637).
 String effectiveRuntimeSecondsSql(String alias) =>
-    'COALESCE(${measuredRuntimeSecondsSql(alias)}, $alias.bottom_time)';
+    'CASE WHEN $alias.is_draft = 1 '
+    'THEN ${timestampRuntimeSecondsSql(alias)} '
+    'ELSE COALESCE(${measuredRuntimeSecondsSql(alias)}, $alias.bottom_time) '
+    'END';
 
 /// When the dive started, in epoch milliseconds: `entry_time`, else the dive
 /// date.
@@ -154,10 +163,19 @@ String diveExitMillisSql(String alias) {
 /// `idx_dives_outing` serves.
 String diveUndivedSql(String alias) {
   const s = 'undived_sibling';
-  return '($alias.is_planned = 1 AND NOT ($alias.outing_id IS NOT NULL AND '
+  return '($alias.is_planned = 1 AND $alias.is_draft = 0 AND '
+      'NOT ($alias.outing_id IS NOT NULL AND '
       'EXISTS (SELECT 1 FROM dives $s WHERE $s.outing_id = $alias.outing_id '
       'AND $s.is_planned = 0)))';
 }
+
+/// True for a dive that waits for its dive computer readings: a plan or a
+/// draft (issue #637). The one place "plan or draft" is spelled in SQL, for
+/// numbering and matching, which skip both. Safety reads do NOT use it: a
+/// draft happened, so no-fly and surface interval count it
+/// ([diveUndivedSql]).
+String diveUnfilledSql(String alias) =>
+    '($alias.is_planned = 1 OR $alias.is_draft = 1)';
 
 /// How far back a dive's residual load reads: the tissue lookback's window.
 const kResidualLookback = Duration(hours: 48);
@@ -212,7 +230,7 @@ SELECT id, dive_date_time, entry_time, max_depth,
   ABS($start - ?1) AS time_diff
 FROM dives
 WHERE $start BETWEEN ?2 AND ?3
-  AND is_planned = 0
+  AND NOT ${diveUnfilledSql('dives')}
   ${scopedToDiver ? 'AND diver_id = ?4' : ''}
 ORDER BY time_diff ASC
 LIMIT 10
@@ -251,10 +269,7 @@ String diveSurfaceIntervalSecondsSql(
 }) {
   const p = kSurfaceIntervalPreviousAlias;
   final start = 'COALESCE($alias.entry_time, $alias.dive_date_time)';
-  final previousExit =
-      'COALESCE($p.exit_time, COALESCE($p.entry_time, $p.dive_date_time) '
-      '+ COALESCE(${effectiveRuntimeSecondsSql(p)}, 0) '
-      '* $_millisecondsPerSecond)';
+  final previousExit = diveEndMillisSql(p);
   String gap(String where, String order) =>
       '(SELECT MAX(0, CAST(($start - $previousExit) '
       '/ $_millisecondsPerSecond AS INTEGER)) '
@@ -272,4 +287,44 @@ String diveSurfaceIntervalSecondsSql(
   );
   return 'COALESCE($alias.surface_interval_seconds, $withEntry, '
       '$withoutEntry)';
+}
+
+/// When the dive at [alias] ended, in epoch milliseconds, as the planner's
+/// `diveEnd` reads it: the stored `exit_time` whenever there is one, else the
+/// start plus [effectiveRuntimeSecondsSql], else the start. Unlike
+/// [diveExitMillisSql] it is never NULL and trusts an exit time at or before
+/// the start. The previous dive's exit in [diveSurfaceIntervalSecondsSql] and
+/// the Follow prompt's lookup ([latestEndedDiveSql]) both read it.
+String diveEndMillisSql(String alias) =>
+    'COALESCE($alias.exit_time, ${diveStartMillisSql(alias)} '
+    '+ COALESCE(${effectiveRuntimeSecondsSql(alias)}, 0) '
+    '* $_millisecondsPerSecond)';
+
+/// The logged dive that ended last inside a window, for the planner's Follow
+/// prompt (issue #4250): its id, or no row when no logged dive ended in it.
+///
+/// Binds the earliest start to read, then the window's first millisecond
+/// (exclusive) and last (inclusive), then the diver when [scopedToDiver].
+/// The window is on [diveEndMillisSql]; a planned dive never counts,
+/// and a dive still under way or stamped in the future ends after the window.
+///
+/// The end has no index, so the start bounds the read: a range on it seeks
+/// idx_dives_start or idx_dives_diver_start, and reads the few dives of the
+/// last days rather than the whole log. The earliest start is the window's
+/// first millisecond less the longest dive the lookup allows for. A dive that
+/// starts after the window's last millisecond is stamped in the future and is
+/// passed over, even with an exit time before its start.
+String latestEndedDiveSql({required bool scopedToDiver}) {
+  final start = diveStartMillisSql('dives');
+  final end = diveEndMillisSql('dives');
+  return '''
+SELECT id, $end AS end_ms
+FROM dives
+WHERE $start BETWEEN ?1 AND ?3
+  AND is_planned = 0
+  ${scopedToDiver ? 'AND diver_id = ?4' : ''}
+  AND $end > ?2 AND $end <= ?3
+ORDER BY end_ms DESC, $start DESC, dive_number DESC
+LIMIT 1
+''';
 }

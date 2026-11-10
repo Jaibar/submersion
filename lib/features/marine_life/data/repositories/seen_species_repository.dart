@@ -26,14 +26,22 @@ class SeenSpeciesRepository {
   /// joins drop species with no sightings. `COUNT(DISTINCT d.site_id)`
   /// ignores nulls, so dives without a site do not count as a site. No
   /// `ORDER BY`: the Species page sorts in Dart on the localized name.
-  Future<List<SeenSpecies>> getSeenSpecies({String? diverId}) async {
+  /// [speciesIds] narrows it to those species.
+  Future<List<SeenSpecies>> getSeenSpecies({
+    String? diverId,
+    List<String>? speciesIds,
+  }) async {
+    if (speciesIds != null && speciesIds.isEmpty) return const [];
     final diverClause = diverId != null ? 'AND d.diver_id = ?' : '';
+    final speciesClause = speciesIds == null
+        ? ''
+        : ' AND sp.id IN (${List.filled(speciesIds.length, '?').join(', ')})';
     final rows = await _db
         .customSelect(
           '''
       SELECT sp.id, sp.common_name, sp.scientific_name, sp.category,
              sp.taxonomy_class, sp.description, sp.photo_path, sp.is_built_in,
-             SUM(s.count) AS total_sightings,
+             COUNT(DISTINCT s.dive_id) AS total_sightings,
              COUNT(DISTINCT d.id) AS dive_count,
              COUNT(DISTINCT d.site_id) AS site_count,
              MIN(d.dive_date_time) AS first_seen,
@@ -41,10 +49,13 @@ class SeenSpeciesRepository {
       FROM species sp
       JOIN sightings s ON s.species_id = sp.id
       JOIN dives d ON d.id = s.dive_id
-      WHERE 1=1 $diverClause${DiveStatsScope.and(alias: 'd')}
+      WHERE 1=1 $diverClause${DiveStatsScope.and(alias: 'd')}$speciesClause
       GROUP BY sp.id
     ''',
-          variables: [if (diverId != null) Variable.withString(diverId)],
+          variables: [
+            if (diverId != null) Variable.withString(diverId),
+            ...?speciesIds?.map(Variable.withString),
+          ],
         )
         .get();
     return rows.map(_seenSpeciesFromRow).toList();

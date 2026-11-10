@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/features/deco_calculator/presentation/info/deco_calculator_info.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 import 'package:submersion/core/utils/unit_formatter.dart';
@@ -16,6 +17,8 @@ import 'package:submersion/features/deco_calculator/presentation/widgets/gas_war
 import 'package:submersion/features/deco_calculator/presentation/widgets/time_slider.dart';
 import 'package:submersion/features/planning/presentation/widgets/planning_tool_pane.dart';
 import 'package:submersion/shared/widgets/app_bar_text_action.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
 
 /// Interactive deco calculator page with real-time calculations.
 ///
@@ -60,11 +63,16 @@ class DecoCalculatorPage extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    context.l10n.decoCalculator_diveParameters,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
+                  InfoTitleRow(
+                    title: Text(
+                      context.l10n.decoCalculator_diveParameters,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
+                    label: context.l10n.decoCalculator_title,
+                    info: (context) =>
+                        decoCalculatorInfo(context.l10n, infoUnits(context)),
                   ),
                   const SizedBox(height: 12),
                   const DepthSlider(),
@@ -126,6 +134,18 @@ class DecoCalculatorPage extends ConsumerWidget {
     if (planState.tanks.isNotEmpty) {
       final firstTank = planState.tanks.first;
       planNotifier.updateTank(firstTank.id, firstTank.copyWith(gasMix: gasMix));
+    }
+
+    // Carry the calculator's environment so the planner's deco is computed
+    // in the conditions the diver just looked at (#4314). A blank altitude
+    // is sea level in the calculator, so it clears any altitude the plan
+    // had. A chosen water type replaces the plan's water (and any custom
+    // salinity); Standard (EN13319) has no planner preset, so it leaves the
+    // plan's water as it was.
+    planNotifier.updateAltitude(ref.read(calcAltitudeProvider));
+    final waterType = ref.read(calcWaterTypeProvider);
+    if (waterType != null) {
+      planNotifier.updateWaterType(waterType);
     }
 
     // Add the simple plan with calculator values

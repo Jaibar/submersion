@@ -16,6 +16,9 @@ import 'package:submersion/core/database/dive_course_links_schema.dart';
 import 'package:submersion/core/database/legacy_sample_staging.dart';
 import 'package:submersion/core/database/profile_series_pack.dart';
 import 'package:submersion/core/database/site_type_seed.dart';
+import 'package:submersion/core/database/snapshot_serial_heal.dart';
+import 'package:submersion/core/database/source_computer_relink.dart';
+import 'package:submersion/core/services/sync/referenced_computer_export.dart';
 import 'package:submersion/core/database/tag_scope_tables.dart';
 import 'package:submersion/core/database/trip_checklist_default.dart';
 import 'package:submersion/core/services/sync/child_column_clears.dart';
@@ -26,6 +29,7 @@ import 'package:submersion/core/services/sync/sync_json_weight.dart';
 import 'package:submersion/core/services/sync/sync_record_overlay.dart';
 import 'package:submersion/core/services/sync/view_config_merge.dart';
 import 'package:submersion/core/services/sync/changeset_log/sync_temp_dir.dart';
+import 'package:submersion/core/services/sync/changeset_log/gzip_temp_sink.dart';
 import 'package:submersion/core/services/sync/changeset_log/sync_temp_files.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
@@ -283,6 +287,7 @@ class SyncData {
   final List<Map<String, dynamic>> qualityFindings;
   final List<Map<String, dynamic>> equipmentAttributes;
   final List<Map<String, dynamic>> equipmentComponents;
+  final List<Map<String, dynamic>> cylinderPairings;
   final List<Map<String, dynamic>> mediaSmartAlbums;
   final List<Map<String, dynamic>> media;
   final List<Map<String, dynamic>> mediaEnrichment;
@@ -362,6 +367,7 @@ class SyncData {
   /// [toJson].
   final List<Map<String, dynamic>> tankPressureProfiles;
   final List<Map<String, dynamic>> tideRecords;
+  final List<Map<String, dynamic>> diveHealthRecords;
   final List<Map<String, dynamic>> settings;
   final List<Map<String, dynamic>> species;
   final List<Map<String, dynamic>> sightings;
@@ -431,6 +437,7 @@ class SyncData {
     this.qualityFindings = const [],
     this.equipmentAttributes = const [],
     this.equipmentComponents = const [],
+    this.cylinderPairings = const [],
     this.mediaSmartAlbums = const [],
     this.media = const [],
     this.mediaEnrichment = const [],
@@ -505,6 +512,7 @@ class SyncData {
     this.insightObservationDismissals = const [],
     this.tankPressureProfiles = const [],
     this.tideRecords = const [],
+    this.diveHealthRecords = const [],
     this.settings = const [],
     this.species = const [],
     this.sightings = const [],
@@ -567,6 +575,7 @@ class SyncData {
     'qualityFindings': qualityFindings,
     'equipmentAttributes': equipmentAttributes,
     'equipmentComponents': equipmentComponents,
+    'cylinderPairings': cylinderPairings,
     'mediaSmartAlbums': mediaSmartAlbums,
     'media': media,
     'mediaEnrichment': mediaEnrichment,
@@ -640,6 +649,7 @@ class SyncData {
     'ruleRunChanges': ruleRunChanges,
     'insightObservationDismissals': insightObservationDismissals,
     'tideRecords': tideRecords,
+    'diveHealthRecords': diveHealthRecords,
     'settings': settings,
     'species': species,
     'sightings': sightings,
@@ -704,6 +714,7 @@ class SyncData {
       qualityFindings: _parseList(json['qualityFindings']),
       equipmentAttributes: _parseList(json['equipmentAttributes']),
       equipmentComponents: _parseList(json['equipmentComponents']),
+      cylinderPairings: _parseList(json['cylinderPairings']),
       mediaSmartAlbums: _parseList(json['mediaSmartAlbums']),
       media: _parseList(json['media']),
       mediaEnrichment: _parseList(json['mediaEnrichment']),
@@ -792,6 +803,7 @@ class SyncData {
       ),
       tankPressureProfiles: _parseList(json['tankPressureProfiles']),
       tideRecords: _parseList(json['tideRecords']),
+      diveHealthRecords: _parseList(json['diveHealthRecords']),
       settings: _parseList(json['settings']),
       species: _parseList(json['species']),
       sightings: _parseList(json['sightings']),
@@ -1144,6 +1156,12 @@ class SyncDataSerializer {
       full: null,
     ),
     (
+      key: 'cylinderPairings',
+      table: _db.cylinderPairings,
+      blob: false,
+      full: null,
+    ),
+    (
       key: 'mediaSmartAlbums',
       table: _db.mediaSmartAlbums,
       blob: false,
@@ -1420,6 +1438,12 @@ class SyncDataSerializer {
       full: null,
     ),
     (key: 'tideRecords', table: _db.tideRecords, blob: false, full: null),
+    (
+      key: 'diveHealthRecords',
+      table: _db.diveHealthRecords,
+      blob: false,
+      full: null,
+    ),
     (
       key: 'settings',
       table: null,
@@ -1713,6 +1737,10 @@ class SyncDataSerializer {
   /// large libraries (#358, write side). Rows stream in `id` order; the internal
   /// `checksum` is patched in over the streamed `data` bytes via a single
   /// seek-back so there is no second DB scan. Caller owns and must delete [path].
+  ///
+  /// [gzipped] writes the same document gzipped as it streams (a nearby full
+  /// copy, issue #4256), so it is never on disk plain as well as compressed;
+  /// the returned `byteLength` is then the compressed size.
   Future<StreamedBase> exportBaseToTempFile({
     required String deviceId,
     required List<DeletionLogData> deletions,
@@ -1723,6 +1751,7 @@ class SyncDataSerializer {
     int blobPageBytes = kBaseBlobPageBytes,
     DateTime Function() now = DateTime.now,
     Future<Directory> Function()? tempDir,
+    bool gzipped = false,
   }) async {
     // The sink joins the directory and name itself (never a literal '/':
     // a mixed-separator path broke the Windows publish in #1304). A browser
@@ -1730,10 +1759,13 @@ class SyncDataSerializer {
     final directoryPath = tempDir == null && HostPlatform.isWeb
         ? null
         : (await (tempDir?.call() ?? resolveSyncTempDir())).path;
-    final out = await SyncTempFiles.create(
-      'ssv1_base_${deviceId}_${seq ?? 0}.${_baseTempUuid.v4()}.json',
+    final file = await SyncTempFiles.create(
+      'ssv1_base_${deviceId}_${seq ?? 0}.${_baseTempUuid.v4()}'
+      '.json${gzipped ? '.gz' : ''}',
       directoryPath: directoryPath,
     );
+    final gzipSink = gzipped ? GzipTempSink(file) : null;
+    final SyncTempSink out = gzipSink ?? file;
     final path = out.path;
     final digestSink = _Sha256DigestSink();
     final dataHash = sha256.startChunkedConversion(digestSink);
@@ -1760,6 +1792,8 @@ class SyncDataSerializer {
       );
       final checksumOffset = out.length;
       await out.add(List.filled(64, 0x30)); // '0'*64 placeholder
+      // Only the bytes up to here are patched later; the rest compresses.
+      await gzipSink?.endHead();
       await out.add(utf8.encode('","data":'));
 
       // ---- data object (hashed) ----
@@ -1867,8 +1901,8 @@ class SyncDataSerializer {
         checksumOffset,
         utf8.encode(digestSink.value.toString()),
       );
-      final byteLength = out.length;
       await out.close();
+      final byteLength = gzipSink?.diskLength ?? out.length;
       return (
         path: path,
         byteLength: byteLength,
@@ -1984,6 +2018,7 @@ class SyncDataSerializer {
     'equipmentLocationMoves',
     'diveCenterGearNotes',
     'tideRecords',
+    'diveHealthRecords',
     'sightings',
     'diveCustomFields',
     'diveDataSources',
@@ -2221,6 +2256,7 @@ class SyncDataSerializer {
     'weightPresetEntries': 'weight_preset_entries',
     'diveCenterGearNotes': 'dive_center_gear_notes',
     'tideRecords': 'tide_records',
+    'diveHealthRecords': 'dive_health_records',
     'sightings': 'sightings',
     'diveCustomFields': 'dive_custom_fields',
     'diveDataSources': 'dive_data_sources',
@@ -2405,21 +2441,69 @@ class SyncDataSerializer {
       for (final type in {...pending.keys, ...byOwnClock.keys})
         type: {...?pending[type], ...?byOwnClock[type]},
     };
+    // Read ahead of the computers, which must cover every row below that
+    // references one (issue #4368).
+    final dives = await _safeExport('dives', () => _exportDives(hlcSince));
+    final diveDataSources = await _safeExport(
+      'diveDataSources',
+      () async => _withPendingChildren(
+        'diveDataSources',
+        await _exportDiveDataSources(hlcSince),
+        pendingChildren,
+      ),
+    );
+    final diveTanks = await _safeExport(
+      'diveTanks',
+      () async => _withPendingChildren(
+        'diveTanks',
+        await _exportDiveTanks(hlcSince),
+        pendingChildren,
+      ),
+    );
+    final qualityFindings = await _safeExport(
+      'qualityFindings',
+      () => _exportQualityFindings(hlcSince),
+    );
+    final transmitters = await _safeExport(
+      'transmitters',
+      () => _exportTransmitters(hlcSince),
+    );
+    final diveProfileEvents = await _safeExport(
+      'diveProfileEvents',
+      () async => _withPendingChildren(
+        'diveProfileEvents',
+        await _exportDiveProfileEvents(hlcSince),
+        pendingChildren,
+      ),
+    );
+    final gasSwitches = await _safeExport(
+      'gasSwitches',
+      () async => _withPendingChildren(
+        'gasSwitches',
+        await _exportGasSwitches(hlcSince),
+        pendingChildren,
+      ),
+    );
+    final diveComputerConnections = await _safeExport(
+      'diveComputerConnections',
+      () => _exportDiveComputerConnections(hlcSince),
+    );
+    final diveProfileSeries = await _safeExport(
+      'diveProfileSeries',
+      () => _exportDiveProfileSeries(hlcSince),
+    );
+    final tankPressureSeries = await _safeExport(
+      'tankPressureSeries',
+      () => _exportTankPressureSeries(hlcSince),
+    );
     return SyncData(
       divers: await _safeExport('divers', () => _exportDivers(hlcSince)),
       diverSettings: await _safeExport(
         'diverSettings',
         () => _exportDiverSettings(hlcSince),
       ),
-      dives: await _safeExport('dives', () => _exportDives(hlcSince)),
-      diveTanks: await _safeExport(
-        'diveTanks',
-        () async => _withPendingChildren(
-          'diveTanks',
-          await _exportDiveTanks(hlcSince),
-          pendingChildren,
-        ),
-      ),
+      dives: dives,
+      diveTanks: diveTanks,
       diveEquipment: await _safeExport(
         'diveEquipment',
         () async => _withPendingChildren(
@@ -2468,10 +2552,7 @@ class SyncDataSerializer {
         'cylinderConfigItems',
         () => _exportCylinderConfigItems(hlcSince),
       ),
-      qualityFindings: await _safeExport(
-        'qualityFindings',
-        () => _exportQualityFindings(hlcSince),
-      ),
+      qualityFindings: qualityFindings,
       equipmentAttributes: await _safeExport(
         'equipmentAttributes',
         () => _exportEquipmentAttributes(hlcSince),
@@ -2479,6 +2560,10 @@ class SyncDataSerializer {
       equipmentComponents: await _safeExport(
         'equipmentComponents',
         () => _exportEquipmentComponents(hlcSince),
+      ),
+      cylinderPairings: await _safeExport(
+        'cylinderPairings',
+        () => _exportCylinderPairings(hlcSince),
       ),
       mediaSmartAlbums: await _safeExport(
         'mediaSmartAlbums',
@@ -2775,12 +2860,25 @@ class SyncDataSerializer {
       ),
       diveComputers: await _safeExport(
         'diveComputers',
-        () => _exportDiveComputers(hlcSince),
+        () async => withReferencedComputers(
+          _db,
+          await _exportDiveComputers(hlcSince),
+          hlcSince: hlcSince,
+          referencing: {
+            'dives': dives,
+            'diveDataSources': diveDataSources,
+            'diveTanks': diveTanks,
+            'qualityFindings': qualityFindings,
+            'transmitters': transmitters,
+            'diveProfileEvents': diveProfileEvents,
+            'gasSwitches': gasSwitches,
+            'diveComputerConnections': diveComputerConnections,
+            'diveProfileSeries': diveProfileSeries,
+            'tankPressureSeries': tankPressureSeries,
+          },
+        ),
       ),
-      transmitters: await _safeExport(
-        'transmitters',
-        () => _exportTransmitters(hlcSince),
-      ),
+      transmitters: transmitters,
       cylinderFills: await _safeExport(
         'cylinderFills',
         () => _exportCylinderFills(hlcSince),
@@ -2811,6 +2909,14 @@ class SyncDataSerializer {
           pendingChildren,
         ),
       ),
+      diveHealthRecords: await _safeExport(
+        'diveHealthRecords',
+        () async => _withPendingChildren(
+          'diveHealthRecords',
+          await _exportDiveHealthRecords(hlcSince),
+          pendingChildren,
+        ),
+      ),
       settings: await _safeExport('settings', () => _exportSettings(hlcSince)),
       species: await _safeExport('species', () => _exportSpecies(hlcSince)),
       sightings: await _safeExport(
@@ -2821,14 +2927,7 @@ class SyncDataSerializer {
           pendingChildren,
         ),
       ),
-      diveProfileEvents: await _safeExport(
-        'diveProfileEvents',
-        () async => _withPendingChildren(
-          'diveProfileEvents',
-          await _exportDiveProfileEvents(hlcSince),
-          pendingChildren,
-        ),
-      ),
+      diveProfileEvents: diveProfileEvents,
       diveSafetyReviews: await _safeExport(
         'diveSafetyReviews',
         () async => _withPendingChildren(
@@ -2861,14 +2960,7 @@ class SyncDataSerializer {
         'equipmentFindings',
         () => _exportEquipmentFindings(hlcSince),
       ),
-      gasSwitches: await _safeExport(
-        'gasSwitches',
-        () async => _withPendingChildren(
-          'gasSwitches',
-          await _exportGasSwitches(hlcSince),
-          pendingChildren,
-        ),
-      ),
+      gasSwitches: gasSwitches,
       diveCustomFields: await _safeExport(
         'diveCustomFields',
         () async => _withPendingChildren(
@@ -2881,14 +2973,7 @@ class SyncDataSerializer {
         'importedFiles',
         () => _exportImportedFiles(hlcSince),
       ),
-      diveDataSources: await _safeExport(
-        'diveDataSources',
-        () async => _withPendingChildren(
-          'diveDataSources',
-          await _exportDiveDataSources(hlcSince),
-          pendingChildren,
-        ),
-      ),
+      diveDataSources: diveDataSources,
       siteSpecies: await _safeExport(
         'siteSpecies',
         () async => _withPendingChildren(
@@ -3005,10 +3090,7 @@ class SyncDataSerializer {
           pendingChildren,
         ),
       ),
-      diveComputerConnections: await _safeExport(
-        'diveComputerConnections',
-        () => _exportDiveComputerConnections(hlcSince),
-      ),
+      diveComputerConnections: diveComputerConnections,
       sharedLibraryMemberships: await _safeExport(
         'sharedLibraryMemberships',
         () => _exportSharedLibraryMemberships(hlcSince),
@@ -3045,14 +3127,8 @@ class SyncDataSerializer {
         'fieldPresets',
         () => _exportFieldPresets(hlcSince),
       ),
-      diveProfileSeries: await _safeExport(
-        'diveProfileSeries',
-        () => _exportDiveProfileSeries(hlcSince),
-      ),
-      tankPressureSeries: await _safeExport(
-        'tankPressureSeries',
-        () => _exportTankPressureSeries(hlcSince),
-      ),
+      diveProfileSeries: diveProfileSeries,
+      tankPressureSeries: tankPressureSeries,
     );
   }
 
@@ -3160,14 +3236,58 @@ class SyncDataSerializer {
         .customSelect('PRAGMA foreign_key_check("$table")')
         .get();
     if (dangling.isNotEmpty) await _repairDanglingReferences();
-    await _rederivePeerValues();
+    await _rederivePeerValues(writtenEntityType: entityType);
   }
 
   /// The values a peer's row may not carry, derived again after every apply.
-  Future<void> _rederivePeerValues() async {
+  /// [writtenEntityType] names the one row type a conflict resolution wrote,
+  /// so steps that cannot be affected by it are skipped; null after a batch.
+  Future<void> _rederivePeerValues({String? writtenEntityType}) async {
     await alignLinkedRouteOwners();
     await seedRepresentativeCourseLinks();
     await anchorTankInspectionClocks();
+    if (writtenEntityType == null ||
+        _sourceComputerAlignInputs.contains(writtenEntityType)) {
+      await alignDownloadedSourcesWithComputers();
+    }
+  }
+
+  /// The row types [alignDownloadedSourcesWithComputers] reads: a write to
+  /// any other leaves nothing new for it to do.
+  static const _sourceComputerAlignInputs = {
+    'dives',
+    'diveDataSources',
+    'diveComputers',
+  };
+
+  /// The foreign-key repair above clears a data source's computer link when
+  /// an apply ends without that computer's row, and a peer below the fix
+  /// still sends empty or decimal serial copies (issue #4368). Gives a
+  /// downloaded source back the link its own dive names, then brings the
+  /// serial copies on downloaded sources and dives in line with their
+  /// computer. Every apply path runs this, per-row conflict resolution
+  /// included. Marks nothing pending: every device derives the same values
+  /// from the same synced rows. Best-effort: a failure is logged and the
+  /// apply goes on, since the next apply or open repeats it.
+  Future<void> alignDownloadedSourcesWithComputers() async {
+    try {
+      final relinked = await relinkDiveAttributedSources(_db);
+      final healed = await healDownloadedSnapshotSerials(_db);
+      if (relinked + healed > 0) {
+        _db.notifyUpdates({
+          TableUpdate.onTable(_db.diveDataSources, kind: UpdateKind.update),
+          TableUpdate.onTable(_db.dives, kind: UpdateKind.update),
+          TableUpdate.onTable(_db.diveProfileSeries, kind: UpdateKind.update),
+          TableUpdate.onTable(_db.tankPressureSeries, kind: UpdateKind.update),
+        });
+      }
+    } catch (e, stackTrace) {
+      _log.warning(
+        'Aligning downloaded sources with their computers failed (non-fatal)',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
   }
 
   /// A peer below v317 saves a tank's last visual inspection and last hydro
@@ -3372,6 +3492,11 @@ class SyncDataSerializer {
       case 'equipmentComponents':
         final row = await (_db.select(
           _db.equipmentComponents,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row?.toJson();
+      case 'cylinderPairings':
+        final row = await (_db.select(
+          _db.cylinderPairings,
         )..where((t) => t.id.equals(recordId))).getSingleOrNull();
         return row?.toJson();
       case 'equipmentSetItems':
@@ -3867,6 +3992,11 @@ class SyncDataSerializer {
           _db.tideRecords,
         )..where((t) => t.id.equals(recordId))).getSingleOrNull();
         return row?.toJson();
+      case 'diveHealthRecords':
+        final row = await (_db.select(
+          _db.diveHealthRecords,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row?.toJson();
       case 'settings':
         final row = await (_db.select(
           _db.settings,
@@ -4078,6 +4208,11 @@ class SyncDataSerializer {
       case 'equipmentComponents':
         final rows = await (_db.select(
           _db.equipmentComponents,
+        )..where((t) => t.id.isIn(idList))).get();
+        return {for (final r in rows) r.id: r.toJson()};
+      case 'cylinderPairings':
+        final rows = await (_db.select(
+          _db.cylinderPairings,
         )..where((t) => t.id.isIn(idList))).get();
         return {for (final r in rows) r.id: r.toJson()};
       case 'buddies':
@@ -5414,6 +5549,13 @@ class SyncDataSerializer {
               EquipmentComponentRow.fromJson(data).toCompanion(false),
             );
         return;
+      case 'cylinderPairings':
+        await _db
+            .into(_db.cylinderPairings)
+            .insertOnConflictUpdate(
+              CylinderPairingRow.fromJson(data).toCompanion(false),
+            );
+        return;
       case 'equipmentSetItems':
         await _upsertGearJunction(entityType, [data]);
         return;
@@ -6019,6 +6161,11 @@ class SyncDataSerializer {
             .into(_db.tideRecords)
             .insertOnConflictUpdate(TideRecord.fromJson(data));
         return;
+      case 'diveHealthRecords':
+        await _db
+            .into(_db.diveHealthRecords)
+            .insertOnConflictUpdate(DiveHealthRecord.fromJson(data));
+        return;
       case 'settings':
         // Never let an incoming payload overwrite a device-local settings key
         // (e.g. active_diver_id). Export filters these, but a peer on an older
@@ -6532,6 +6679,16 @@ class SyncDataSerializer {
                 .map(
                   (r) => EquipmentComponentRow.fromJson(r).toCompanion(false),
                 )
+                .toList(),
+          ),
+        );
+        return;
+      case 'cylinderPairings':
+        await _db.batch(
+          (b) => b.insertAllOnConflictUpdate(
+            _db.cylinderPairings,
+            records
+                .map((r) => CylinderPairingRow.fromJson(r).toCompanion(false))
                 .toList(),
           ),
         );
@@ -7723,6 +7880,14 @@ class SyncDataSerializer {
           ),
         );
         return;
+      case 'diveHealthRecords':
+        await _db.batch(
+          (b) => b.insertAllOnConflictUpdate(
+            _db.diveHealthRecords,
+            records.map((r) => DiveHealthRecord.fromJson(r)).toList(),
+          ),
+        );
+        return;
       case 'settings':
         // Mirror upsertRecord: never overwrite a device-local settings key.
         final settingsRows = records
@@ -8152,6 +8317,8 @@ class SyncDataSerializer {
         return plain(_db.equipmentAttributes, _db.equipmentAttributes.id);
       case 'equipmentComponents':
         return plain(_db.equipmentComponents, _db.equipmentComponents.id);
+      case 'cylinderPairings':
+        return plain(_db.cylinderPairings, _db.cylinderPairings.id);
       case 'diveTypes':
         return plain(_db.diveTypes, _db.diveTypes.id);
       case 'siteTypes':
@@ -8306,6 +8473,8 @@ class SyncDataSerializer {
         return plain(_db.fieldPresets, _db.fieldPresets.id);
       case 'tideRecords':
         return plain(_db.tideRecords, _db.tideRecords.id);
+      case 'diveHealthRecords':
+        return plain(_db.diveHealthRecords, _db.diveHealthRecords.id);
       case 'sightings':
         return plain(_db.sightings, _db.sightings.id);
       case 'certifications':
@@ -8703,6 +8872,8 @@ class SyncDataSerializer {
         return _db.equipmentAttributes;
       case 'equipmentComponents':
         return _db.equipmentComponents;
+      case 'cylinderPairings':
+        return _db.cylinderPairings;
       case 'diveTypes':
         return _db.diveTypes;
       case 'siteTypes':
@@ -8839,6 +9010,8 @@ class SyncDataSerializer {
         return _db.fieldPresets;
       case 'tideRecords':
         return _db.tideRecords;
+      case 'diveHealthRecords':
+        return _db.diveHealthRecords;
       case 'sightings':
         return _db.sightings;
       case 'certifications':
@@ -8985,6 +9158,11 @@ class SyncDataSerializer {
       case 'equipmentComponents':
         await (_db.delete(
           _db.equipmentComponents,
+        )..where((t) => t.id.equals(recordId))).go();
+        return;
+      case 'cylinderPairings':
+        await (_db.delete(
+          _db.cylinderPairings,
         )..where((t) => t.id.equals(recordId))).go();
         return;
       case 'equipmentSetItems':
@@ -9459,6 +9637,11 @@ class SyncDataSerializer {
           _db.tideRecords,
         )..where((t) => t.id.equals(recordId))).go();
         return;
+      case 'diveHealthRecords':
+        await (_db.delete(
+          _db.diveHealthRecords,
+        )..where((t) => t.id.equals(recordId))).go();
+        return;
       case 'settings':
         await (_db.delete(
           _db.settings,
@@ -9877,6 +10060,17 @@ class SyncDataSerializer {
     String? hlcSince,
   ) async {
     final query = _db.select(_db.equipmentComponents);
+    if (hlcSince != null) {
+      query.where((t) => t.hlc.isBiggerThanValue(hlcSince));
+    }
+    final rows = await query.get();
+    return rows.map((r) => r.toJson()).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> _exportCylinderPairings(
+    String? hlcSince,
+  ) async {
+    final query = _db.select(_db.cylinderPairings);
     if (hlcSince != null) {
       query.where((t) => t.hlc.isBiggerThanValue(hlcSince));
     }
@@ -10967,6 +11161,27 @@ class SyncDataSerializer {
     return rows.map((r) => r.toJson()).toList();
   }
 
+  /// Apple Health readings (issue #637) travel with their dive, as tide
+  /// records do; a record marked pending is added by [_withPendingChildren].
+  Future<List<Map<String, dynamic>>> _exportDiveHealthRecords(
+    String? hlcSince,
+  ) async {
+    if (hlcSince != null) {
+      final modifiedDives = await (_db.select(
+        _db.dives,
+      )..where((t) => t.hlc.isBiggerThanValue(hlcSince))).get();
+      final diveIds = modifiedDives.map((d) => d.id).toSet();
+      if (diveIds.isEmpty) return [];
+
+      final rows = await (_db.select(
+        _db.diveHealthRecords,
+      )..where((t) => t.diveId.isIn(diveIds))).get();
+      return rows.map((r) => r.toJson()).toList();
+    }
+    final rows = await _db.select(_db.diveHealthRecords).get();
+    return rows.map((r) => r.toJson()).toList();
+  }
+
   Future<List<Map<String, dynamic>>> _exportSettings(String? hlcSince) async {
     final query = _db.select(_db.settings);
     if (hlcSince != null) {
@@ -11966,6 +12181,9 @@ class SyncDataSerializer {
       'tissueColorScheme': 'classic',
       'tissueVizMode': 'heatMap',
       'showMapBackgroundOnDiveCards': false,
+      'showPhotoBackgroundOnDiveCards': false,
+      'cardPhotoOverlayDark': 0.6,
+      'cardPhotoOverlayLight': 0.6,
       'groupTripsInDiveList': false,
       'autoTagImports': true,
       'downloadsFollowComputerOwner': true,

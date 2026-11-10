@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/features/dive_log/data/repositories/depth_bucket_sql.dart';
 import 'package:submersion/features/dive_log/data/repositories/trip_cylinder_links.dart';
+import 'package:submersion/features/dive_log/data/sql/multi_cylinder_sac_sql.dart';
 import 'package:submersion/core/constants/dive_search.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/profile/tank_pressure_glitches.dart';
@@ -15,6 +16,7 @@ import 'package:submersion/core/performance/perf_timer.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/database/dive_source_stamp.dart';
 import 'package:submersion/core/database/dive_stats_scope.dart';
+import 'package:submersion/core/database/existing_row_ids.dart';
 import 'package:submersion/core/util/wall_clock_utc.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/features/courses/data/dive_course_links.dart';
@@ -26,6 +28,8 @@ import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_list_snapshot.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_picker_rows.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_times_sql.dart';
+import 'package:submersion/features/dive_log/data/sql/gas_use_sql.dart';
+import 'package:submersion/features/dive_log/data/repositories/latest_ended_dive.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_site_snap.dart';
 import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
 import 'package:submersion/features/dive_log/data/services/user_event_preservation.dart';
@@ -71,6 +75,8 @@ import 'package:submersion/features/dive_log/domain/entities/profile_series_revi
 import 'package:submersion/features/dive_log/domain/entities/source_profile.dart'
     as domain;
 import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
+import 'package:submersion/features/dive_log/domain/services/dive_surface_breathing.dart';
+import 'package:submersion/features/dive_log/domain/services/gas_use_window.dart';
 import 'package:submersion/features/dive_log/domain/services/profile_depth_summary.dart';
 import 'package:submersion/features/dive_log/domain/services/profile_event_mapper.dart';
 import 'package:submersion/features/dive_log/domain/services/profile_series_merge.dart';
@@ -96,6 +102,7 @@ import 'package:submersion/features/equipment/domain/entities/equipment_item.dar
 import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
 import 'package:submersion/features/equipment/domain/entities/gear_history_rewrite.dart';
 import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
+import 'package:submersion/features/equipment/domain/entities/set_history_rewrite.dart';
 import 'package:submersion/features/equipment/domain/services/components_index.dart';
 import 'package:submersion/features/equipment/domain/services/gear_expander.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
@@ -118,14 +125,22 @@ import 'package:submersion/features/buddies/data/repositories/buddy_repository.d
 import 'package:submersion/features/dive_roles/data/repositories/dive_role_link_repository.dart';
 import 'package:submersion/features/dive_roles/domain/services/dive_role_set.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_observation_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/gear_template_dive_queries.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_visibility_queries.dart';
 import 'package:submersion/features/data_quality/data/services/quality_scan_service.dart';
 import 'package:submersion/features/documents/data/repositories/document_repository.dart';
 import 'package:submersion/features/documents/domain/entities/document.dart';
 
 part 'dive_repository_gear_preview.dart';
+part 'dive_repository_conditions.dart';
+part 'dive_repository_gear_sets.dart';
+part 'dive_repository_surface_intervals.dart';
 
-/// A dive that a conditions fetch can still do something for: its site carries
-/// coordinates and at least one weather column is empty.
+/// A dive that a conditions fetch can still do something for: it has a
+/// location and at least one weather column is empty.
+///
+/// [latitude] and [longitude] are the site's coordinates when it has them,
+/// otherwise the dive's own entry GPS fix, otherwise its exit fix (#4329).
 ///
 /// [dateTime] is the dive's wall clock (entry time when recorded, otherwise the
 /// dive date), used to pick the hour to sample from the archive response.
@@ -290,6 +305,8 @@ class DiveRepository {
     'buddies',
     // The profile span of a dive only its samples can measure.
     ...measuredRuntimeTickTables,
+    // The stored gas-use window SAC and RMV divide by (#2930).
+    ...gasUseTables,
   };
 
   /// Fires on a write to any of [diveHydrationTables], so a holder of hydrated
@@ -363,6 +380,9 @@ class DiveRepository {
     'dive_dive_types',
     // The row's Runtime.
     ...measuredRuntimeTickTables,
+    // The row's SAC and RMV read the stored gas-use window (#2930), which the
+    // derived metrics sweep writes after the dive itself.
+    ...gasUseTables,
   };
 
   List<TableUpdateQuery> get _diveListTables => [
@@ -818,6 +838,8 @@ class DiveRepository {
     final buddiesByDive = await _buddyRepository.getBuddiesForDives(diveIds);
 
     final profileSpans = await _profileSpansFor(rows);
+    final gasUses = await _gasUsesFor(diveIds);
+    final loggedTankIds = await _loggedTankIdsFor(diveIds);
 
     return rows
         .map(
@@ -841,6 +863,9 @@ class DiveRepository {
             buddies: buddiesByDive[row.id] ?? const [],
             weights: weightsByDive[row.id] ?? const [],
             profileSpan: profileSpans[row.id],
+            storedGasUse: gasUses[row.id]?.use,
+            surfaceBreathing: gasUses[row.id]?.breathing,
+            loggedTankIds: loggedTankIds,
           ),
         )
         .toList();
@@ -880,6 +905,73 @@ class DiveRepository {
       }
     }
     return spans;
+  }
+
+  /// The stored gas-use window of each of [diveIds] that has one (issue
+  /// #2930): what `Dive.sac` and `Dive.rmvFor` divide by on a dive read
+  /// without its samples, so a list row reports the rate the detail page
+  /// works out from the profile. Only dives with surface time at the ends of
+  /// their recording have a window.
+  // stats-scope-exempt: hydrates the dives of a list, and aggregates nothing
+  Future<Map<String, ({GasUse? use, SurfaceBreathing? breathing})>> _gasUsesFor(
+    List<String> diveIds,
+  ) async {
+    final uses = <String, ({GasUse? use, SurfaceBreathing? breathing})>{};
+    for (final chunk in seriesIdChunks(diveIds)) {
+      final placeholders = List.filled(chunk.length, '?').join(', ');
+      final result = await _db
+          .customSelect(
+            'SELECT dive_id, gas_use_s, gas_use_avg_depth_m, '
+            'surface_breathed_from_s, surface_breathed_until_s '
+            'FROM dive_derived_metrics '
+            'WHERE dive_id IN ($placeholders) '
+            'AND ((gas_use_s > 0 AND gas_use_avg_depth_m IS NOT NULL) '
+            'OR surface_breathed_from_s IS NOT NULL '
+            'OR surface_breathed_until_s IS NOT NULL)',
+            variables: [for (final id in chunk) Variable<String>(id)],
+            readsFrom: {_db.diveDerivedMetricsRows},
+          )
+          .get();
+      for (final row in result) {
+        final seconds = row.read<int?>('gas_use_s');
+        final depth = row.read<double?>('gas_use_avg_depth_m');
+        final from = row.read<int?>('surface_breathed_from_s');
+        final until = row.read<int?>('surface_breathed_until_s');
+        uses[row.read<String>('dive_id')] = (
+          use: seconds != null && seconds > 0 && depth != null
+              ? GasUse(seconds: seconds, avgDepth: depth)
+              : null,
+          // A profile attached to this dive later stretches its own window
+          // alike (see [domain.Dive.gasUse]).
+          breathing: from == null && until == null
+              ? null
+              : SurfaceBreathing(from: from, until: until),
+        );
+      }
+    }
+    return uses;
+  }
+
+  /// The ids of the cylinders of [diveIds] that a transmitter logged (issue
+  /// #2930): their end pressure is the last reading, so entered surface
+  /// minutes do not count on them (see `DiveTank.hasPressureSeries`). Reads
+  /// no samples.
+  // stats-scope-exempt: hydrates the dives of a list, and aggregates nothing
+  Future<Set<String>> _loggedTankIdsFor(List<String> diveIds) async {
+    final ids = <String>{};
+    for (final chunk in seriesIdChunks(diveIds)) {
+      final placeholders = List.filled(chunk.length, '?').join(', ');
+      final result = await _db
+          .customSelect(
+            'SELECT DISTINCT tank_id FROM tank_pressure_series '
+            'WHERE dive_id IN ($placeholders)',
+            variables: [for (final id in chunk) Variable<String>(id)],
+            readsFrom: {_db.tankPressureSeries},
+          )
+          .get();
+      ids.addAll(result.map((row) => row.read<String>('tank_id')));
+    }
+    return ids;
   }
 
   /// Get a single dive by ID
@@ -1153,53 +1245,23 @@ class DiveRepository {
     }
   }
 
-  /// The weather columns a conditions fetch is allowed to fill.
-  ///
-  /// `weatherDescription` is deliberately absent: the provider returns no
-  /// prose, and the column holds the diver's own words when it holds anything.
-  static Expression<bool> _hasConditionsGap(Dives t) =>
-      t.windSpeed.isNull() |
-      t.windDirection.isNull() |
-      t.cloudCover.isNull() |
-      t.precipitation.isNull() |
-      t.humidity.isNull() |
-      t.weatherCode.isNull() |
-      t.airTemp.isNull() |
-      t.surfacePressure.isNull();
-
-  /// Restricts a conditions query to dives that can still be filled: the dive
-  /// has a site with coordinates and at least one empty weather column.
-  ///
-  /// Shared by the candidate list and its count so the two can never disagree
-  /// about what "needs conditions" means.
-  Expression<bool> _needsConditions($DiveSitesTable sites, {String? diverId}) {
-    var condition =
-        sites.latitude.isNotNull() &
-        sites.longitude.isNotNull() &
-        _hasConditionsGap(_db.dives);
-    if (diverId != null) {
-      condition = condition & _db.dives.diverId.equals(diverId);
-    }
-    return condition;
-  }
-
-  /// How many dives a conditions fetch could still fill something in for.
+  /// How many dives a conditions fetch could still fill something in for:
+  /// those with an empty weather column and a location, restricted to
+  /// [diveIds] when given.
   ///
   /// A COUNT rather than `getDivesNeedingConditions().length`: the confirm
   /// dialog only needs the number, and a large logbook should not be
   /// materialised to produce it.
-  Future<int> countDivesNeedingConditions({String? diverId}) async {
+  Future<int> countDivesNeedingConditions({
+    String? diverId,
+    Set<String>? diveIds,
+  }) async {
     try {
-      final sites = _db.diveSites;
-      final countExpr = _db.dives.id.count();
-      final query = _db.selectOnly(_db.dives)
-        ..addColumns([countExpr])
-        ..where(_needsConditions(sites, diverId: diverId));
-      query.join([innerJoin(sites, sites.id.equalsExp(_db.dives.siteId))]);
-
-      final row = await query.getSingle();
-      final int total = row.read(countExpr) ?? 0;
-      return total;
+      return await _countConditionsGaps(
+        located: true,
+        diverId: diverId,
+        diveIds: diveIds,
+      );
     } catch (e, stackTrace) {
       _log.error(
         'Failed to count dives needing conditions',
@@ -1210,53 +1272,112 @@ class DiveRepository {
     }
   }
 
+  /// How many dives are missing conditions but have nowhere to fetch them
+  /// for: no site coordinates and no GPS fix of their own. The selection's
+  /// confirm dialog says these will be skipped.
+  Future<int> countDivesMissingConditionsWithoutLocation({
+    String? diverId,
+    Set<String>? diveIds,
+  }) async {
+    try {
+      return await _countConditionsGaps(
+        located: false,
+        diverId: diverId,
+        diveIds: diveIds,
+      );
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to count dives missing conditions without a location',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  /// How many of [diveIds] are logged dives: neither planned nor gone. A
+  /// selection's conditions fetch states its share against this, since
+  /// planned dives are never fetched for.
+  Future<int> countLoggedDives(Set<String> diveIds) async {
+    try {
+      var total = 0;
+      for (final chunk in seriesIdChunks(diveIds.toList())) {
+        final countExpr = _db.dives.id.count();
+        final query = _db.selectOnly(_db.dives)
+          ..addColumns([countExpr])
+          ..where(_db.dives.id.isIn(chunk) & _db.dives.isPlanned.equals(false));
+        final row = await query.getSingle();
+        total += row.read(countExpr) ?? 0;
+      }
+      return total;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to count logged dives',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
   /// Dives a conditions fetch can still fill something in for: the dive has a
-  /// site with coordinates and at least one empty weather column.
+  /// location and at least one empty weather column, restricted to [diveIds]
+  /// when given. Newest first.
   ///
   /// Projects only the id, sample time and coordinates rather than selecting
   /// whole `dives` and `dive_sites` rows, so scanning a large logbook neither
   /// transfers nor deserialises columns nobody reads.
   Future<List<ConditionsCandidate>> getDivesNeedingConditions({
     String? diverId,
+    Set<String>? diveIds,
   }) async {
     try {
       final sites = _db.diveSites;
-      final query = _db.selectOnly(_db.dives)
-        ..addColumns([
-          _db.dives.id,
-          _db.dives.entryTime,
-          _db.dives.diveDateTime,
-          sites.latitude,
-          sites.longitude,
-        ])
-        ..where(_needsConditions(sites, diverId: diverId))
-        ..orderBy([OrderingTerm.desc(_db.dives.diveDateTime)]);
-      query.join([innerJoin(sites, sites.id.equalsExp(_db.dives.siteId))]);
+      final dives = _db.dives;
+      // Paired with the dive date, which orders the result across chunks.
+      final rows = <(int, ConditionsCandidate)>[];
+      for (final chunk in _conditionsIdChunks(diveIds)) {
+        final query = _db.selectOnly(dives)
+          ..addColumns([
+            dives.id,
+            dives.entryTime,
+            dives.diveDateTime,
+            dives.entryLatitude,
+            dives.entryLongitude,
+            dives.exitLatitude,
+            dives.exitLongitude,
+            sites.latitude,
+            sites.longitude,
+          ])
+          ..where(
+            _conditionsScope(diverId: diverId, diveIds: chunk) &
+                _hasConditionsLocation(sites),
+          );
+        query.join([leftOuterJoin(sites, sites.id.equalsExp(dives.siteId))]);
 
-      final rows = await query.get();
-      final candidates = <ConditionsCandidate>[];
-      for (final row in rows) {
-        final id = row.read(_db.dives.id);
-        final diveDateTime = row.read(_db.dives.diveDateTime);
-        final latitude = row.read(sites.latitude);
-        final longitude = row.read(sites.longitude);
-        if (id == null ||
-            diveDateTime == null ||
-            latitude == null ||
-            longitude == null) {
-          continue;
+        for (final row in await query.get()) {
+          final id = row.read(dives.id);
+          final diveDateTime = row.read(dives.diveDateTime);
+          final location = _conditionsLocation(row, sites);
+          if (id == null || diveDateTime == null || location == null) {
+            continue;
+          }
+          rows.add((
+            diveDateTime,
+            (
+              id: id,
+              dateTime: DateTime.fromMillisecondsSinceEpoch(
+                row.read(dives.entryTime) ?? diveDateTime,
+                isUtc: true,
+              ),
+              latitude: location.latitude,
+              longitude: location.longitude,
+            ),
+          ));
         }
-        candidates.add((
-          id: id,
-          dateTime: DateTime.fromMillisecondsSinceEpoch(
-            row.read(_db.dives.entryTime) ?? diveDateTime,
-            isUtc: true,
-          ),
-          latitude: latitude,
-          longitude: longitude,
-        ));
       }
-      return candidates;
+      rows.sort((a, b) => b.$1.compareTo(a.$1));
+      return [for (final (_, candidate) in rows) candidate];
     } catch (e, stackTrace) {
       _log.error(
         'Failed to get dives needing conditions',
@@ -1533,6 +1654,9 @@ class DiveRepository {
             isPrimary: true,
             parentSeriesId: parentSeriesId,
             revisionKind: revisionKind,
+            // Synced, so a re-parse on any device keeps this edit once a
+            // re-activated original demotes it (issue #4386).
+            isEdit: true,
             samples: [
               for (final point in editedPoints) profileSampleFromPoint(point),
             ],
@@ -2172,10 +2296,13 @@ class DiveRepository {
   /// smoothing flattening short features.
   ///
   /// Summarises a dive's primary series only when it has any, every series
-  /// otherwise; a dive with no series is absent from the result. The blobs
-  /// are decoded, merged and downsampled on a background isolate
-  /// ([summarizeSparklinesInBackground]), since a page's worth on the UI
-  /// isolate dropped frames mid-scroll (#3506).
+  /// otherwise. A dive with no series maps to an empty list, so the list can
+  /// tell it has no samples from not fetched yet and draw an estimated
+  /// outline (#4112); a dive whose every series is unreadable, and every
+  /// dive when the read fails, is absent instead, since it may well have
+  /// samples. The blobs are decoded, merged and downsampled on a background
+  /// isolate ([summarizeSparklinesInBackground]), since a page's worth on
+  /// the UI isolate dropped frames mid-scroll (#3506).
   Future<Map<String, List<domain.DiveProfilePoint>>> getBatchProfileSummaries(
     List<String> diveIds, {
     int maxSamples = 120,
@@ -2189,7 +2316,12 @@ class DiveRepository {
           maxSamples: maxSamples,
         );
         _logUnreadableSeries(summaries.unreadable);
-        return summaries.result;
+        final withSeries = {for (final row in rows) row.diveId};
+        return {
+          ...summaries.result,
+          for (final id in diveIds)
+            if (!withSeries.contains(id)) id: const <domain.DiveProfilePoint>[],
+        };
       });
     } catch (e, stackTrace) {
       _log.error(
@@ -2198,6 +2330,25 @@ class DiveRepository {
         stackTrace: stackTrace,
       );
       return {};
+    }
+  }
+
+  /// Whether [diveId] has any stored profile series, readable or not.
+  ///
+  /// [getDiveById] reads an unreadable series as an empty profile, which
+  /// looks like a dive logged without samples; this tells the two apart,
+  /// so only the second gets an estimated outline (#4112). It counts rows
+  /// without reading a blob.
+  Future<bool> hasProfileSeries(String diveId) async {
+    try {
+      return await _profileSeries.hasAnySeries(diveId);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to check for stored profile series: $diveId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
     }
   }
 
@@ -2344,7 +2495,9 @@ class DiveRepository {
                   dive.scrubber?.remainingMinutes,
                 ),
                 // Dive planner (v1.5)
-                isPlanned: Value(dive.isPlanned),
+                // Never both (issue #637): a draft happened, so it wins.
+                isPlanned: Value(dive.isPlanned && !dive.isDraft),
+                isDraft: Value(dive.isDraft),
                 outingId: Value(dive.outingId),
                 // Training course (v1.5)
                 courseId: Value(dive.courseId),
@@ -2417,12 +2570,16 @@ class DiveRepository {
                   validTripCylinderLink(tank.tripCylinderId, validSlots),
                 ),
                 passportId: Value(tank.passportId),
+                twinPassportId: Value(tank.twinPassportId),
                 sourceTankIndex: Value(tank.sourceTankIndex),
                 sharedComputerIds: Value(
                   encodeSharedComputerIds(tank.sharedComputerIds),
                 ),
                 // What the source log recorded (issue #1496).
                 usageDuration: Value(tank.usageDuration?.inSeconds),
+                surfaceBreathingDuration: Value(
+                  tank.surfaceBreathingDuration?.inSeconds,
+                ),
               ),
             );
           }
@@ -2512,6 +2669,8 @@ class DiveRepository {
         if (dive.profile.isNotEmpty) {
           await _profileSeries.insertSeries(
             diveId: id,
+            // The dive's first profile, so not an edit (issue #4386).
+            isEdit: false,
             samples: [
               for (final point in dive.profile) profileSampleFromPoint(point),
             ],
@@ -2674,7 +2833,9 @@ class DiveRepository {
             scrubberDurationMinutes: Value(dive.scrubber?.ratedMinutes),
             scrubberRemainingMinutes: Value(dive.scrubber?.remainingMinutes),
             // Dive planner (v1.5)
-            isPlanned: Value(dive.isPlanned),
+            // Never both (issue #637): a draft happened, so it wins.
+            isPlanned: Value(dive.isPlanned && !dive.isDraft),
+            isDraft: Value(dive.isDraft),
             outingId: Value(dive.outingId),
             // Training course (v1.5)
             courseId: Value(dive.courseId),
@@ -2758,6 +2919,12 @@ class DiveRepository {
                 // The tagged cylinder is user-authored like the slot, so an
                 // edit writes it (issue #2650).
                 passportId: Value(tank.passportId),
+                twinPassportId: Value(tank.twinPassportId),
+                // Minutes the diver entered for breathing at the surface
+                // (issue #2930): user-authored, so an edit writes them.
+                surfaceBreathingDuration: Value(
+                  tank.surfaceBreathingDuration?.inSeconds,
+                ),
               ),
             );
             // Log as pending update (assuming sync handles updates)
@@ -2796,11 +2963,15 @@ class DiveRepository {
                       validTripCylinderLink(tank.tripCylinderId, validSlots),
                     ),
                     passportId: Value(tank.passportId),
+                    twinPassportId: Value(tank.twinPassportId),
                     sourceTankIndex: Value(tank.sourceTankIndex),
                     sharedComputerIds: Value(
                       encodeSharedComputerIds(tank.sharedComputerIds),
                     ),
                     usageDuration: Value(tank.usageDuration?.inSeconds),
+                    surfaceBreathingDuration: Value(
+                      tank.surfaceBreathingDuration?.inSeconds,
+                    ),
                   ),
                 );
             await _syncRepository.markRecordPending(
@@ -3066,8 +3237,14 @@ class DiveRepository {
   /// so such a dive costs what it always did and the rest cost almost
   /// nothing. [domain.Dive.profile] is therefore empty on nearly every dive
   /// returned: never draw it, or derive anything else from it, here.
+  ///
+  /// [offUiIsolate] decodes each such dive's samples on a background isolate,
+  /// as [getDiveById] does. It suits a read of a handful of dives, such as
+  /// Home's cards (issue #4251); a bulk read leaves it off, since it starts
+  /// one isolate per dive at once (see [_reduceRows]).
   Future<List<domain.Dive>> getDivesByIdsWithoutSamples(
     List<String> ids, {
+    bool offUiIsolate = false,
     @visibleForTesting int chunkSize = kSeriesIdChunkSize,
   }) async {
     if (ids.isEmpty) return [];
@@ -3091,7 +3268,7 @@ class DiveRepository {
           final sampled = await Future.wait(
             chunkRows
                 .where((r) => needSamples.contains(r.id))
-                .map(_mapRowToDive),
+                .map((r) => _mapRowToDive(r, offUiIsolate: offUiIsolate)),
           );
           final chunkDives = [
             ...await _mapRowsWithPreloadedData(
@@ -3276,7 +3453,8 @@ class DiveRepository {
             '${measuredRuntimeSecondsSql('d')} AS runtime, '
             'd.water_temp, d.rating, '
             'd.is_favorite, d.excluded_from_stats, d.excluded_from_gas_stats, '
-            'd.is_planned, '
+            'd.is_planned, d.is_draft, '
+            '(d.is_draft = 1 AND d.exit_time IS NULL) AS is_open_draft, '
             'd.dive_type, d.dive_mode, '
             'COALESCE(d.entry_time, d.dive_date_time) AS sort_timestamp, '
             's.name AS site_name, s.country AS site_country, '
@@ -3443,10 +3621,11 @@ class DiveRepository {
             // Correlated on d.id so SQLite reads only the kept dives' tanks
             // through idx_dive_tanks_dive_id, rather than grouping the whole
             // table for every diver.
+            // A suit inflation bottle is not the dive's gas (issue #4243).
             '(SELECT MAX(dt.o2_percent) FROM dive_tanks dt '
-            'WHERE dt.dive_id = d.id) AS max_o2, '
+            'WHERE dt.dive_id = d.id AND ${breathingTankSql('dt')}) AS max_o2, '
             '(SELECT MAX(dt.he_percent) FROM dive_tanks dt '
-            'WHERE dt.dive_id = d.id) AS max_he '
+            'WHERE dt.dive_id = d.id AND ${breathingTankSql('dt')}) AS max_he '
             'FROM dives d '
             'LEFT JOIN dive_sites s ON d.site_id = s.id '
             'LEFT JOIN trips t ON d.trip_id = t.id '
@@ -4191,7 +4370,8 @@ class DiveRepository {
           '${measuredRuntimeSecondsSql('d')} AS runtime, '
           'd.water_temp, d.rating, '
           'd.is_favorite, d.excluded_from_stats, d.excluded_from_gas_stats, '
-          'd.is_planned, '
+          'd.is_planned, d.is_draft, '
+          '(d.is_draft = 1 AND d.exit_time IS NULL) AS is_open_draft, '
           'd.dive_type, d.dive_mode, '
           'COALESCE(d.entry_time, d.dive_date_time) AS sort_timestamp, '
           's.name AS site_name, s.country AS site_country, '
@@ -4308,6 +4488,8 @@ class DiveRepository {
         excludedFromStats: row.read<int>('excluded_from_stats') == 1,
         excludedFromGasStats: row.read<int>('excluded_from_gas_stats') == 1,
         isPlanned: row.read<int>('is_planned') == 1,
+        isDraft: row.read<int>('is_draft') == 1,
+        isOpenDraft: row.read<int>('is_open_draft') == 1,
         diveMode: DiveMode.fromCode(row.read<String>('dive_mode')),
         diveTypeIds: diveTypesByDive[id] ?? [row.read<String>('dive_type')],
         tags: tagsByDive[id] ?? [],
@@ -4883,6 +5065,9 @@ class DiveRepository {
     List<domain.BuddyWithRole> buddies = const [],
     List<domain.DiveWeight> weights = const [],
     Duration? profileSpan,
+    GasUse? storedGasUse,
+    SurfaceBreathing? surfaceBreathing,
+    Set<String> loggedTankIds = const {},
   }) {
     // Map site if exists
     final domainSite = site == null ? null : mapDiveSiteRow(site);
@@ -4956,6 +5141,8 @@ class DiveRepository {
           : null,
       runtime: row.runtime != null ? Duration(seconds: row.runtime!) : null,
       profileSpan: profileSpan,
+      storedGasUse: storedGasUse,
+      surfaceBreathing: surfaceBreathing,
       maxDepth: row.maxDepth,
       avgDepth: row.avgDepth,
       entryLocation: row.entryLatitude != null && row.entryLongitude != null
@@ -5107,12 +5294,17 @@ class DiveRepository {
               extraRegulatorIds: decodeExtraRegulatorIds(t.extraRegulatorIds),
               tripCylinderId: t.tripCylinderId,
               passportId: t.passportId,
+              twinPassportId: t.twinPassportId,
               equipmentId: t.equipmentId,
               sourceTankIndex: t.sourceTankIndex,
               sharedComputerIds: decodeSharedComputerIds(t.sharedComputerIds),
               usageDuration: t.usageDuration != null
                   ? Duration(seconds: t.usageDuration!)
                   : null,
+              surfaceBreathingDuration: t.surfaceBreathingDuration != null
+                  ? Duration(seconds: t.surfaceBreathingDuration!)
+                  : null,
+              hasPressureSeries: loggedTankIds.contains(t.id),
             ),
           )
           .toList(),
@@ -5150,6 +5342,7 @@ class DiveRepository {
           : null,
       // Dive planner (v1.5)
       isPlanned: row.isPlanned,
+      isDraft: row.isDraft,
       outingId: row.outingId,
       // Training courses (issue #2515); callers that do not preload the set
       // get the representative alone.
@@ -5215,11 +5408,20 @@ class DiveRepository {
     final startPressureByTank = <String, double>{};
     final endPressureByTank = <String, double>{};
     final byTank = <String, List<dynamic>>{};
+    final pressuresByTank = <String, List<domain.TankPressurePoint>>{};
     for (final s in tankSeries) {
       byTank.putIfAbsent(s.tankId, () => []).add(s);
     }
     for (final entry in byTank.entries) {
       final merged = mergeTankSeriesPoints(entry.value.cast());
+      pressuresByTank[entry.key] = [
+        for (final p in merged)
+          domain.TankPressurePoint(
+            tankId: entry.key,
+            timestamp: p.timestamp,
+            pressure: p.pressure,
+          ),
+      ];
       final endpoints = cleanSeriesEndpoints([
         for (final p in merged) (t: p.timestamp, bar: p.pressure),
       ]);
@@ -5227,6 +5429,11 @@ class DiveRepository {
       startPressureByTank[entry.key] = endpoints.start;
       endPressureByTank[entry.key] = endpoints.end;
     }
+
+    // Which cylinders a transmitter logged, from whether a series row exists
+    // rather than from the series decoded above, which drops a row it cannot
+    // read: the list read and the SQL ask the same question (issue #2930).
+    final loggedTankIds = await _loggedTankIdsFor([row.id]);
 
     // Get profile for this dive from [_mergedSeriesPoints].
     // [getMergedProfile] mirrors this read and the two must stay in step.
@@ -5400,7 +5607,7 @@ class DiveRepository {
     // imports populate per-sample temperature but miss the dive-level field.
     final effectiveWaterTemp = row.waterTemp ?? _minProfileTemp(seriesProfile);
 
-    return domain.Dive(
+    final dive = domain.Dive(
       id: row.id,
       diverId: row.diverId,
       diveNumber: row.diveNumber,
@@ -5569,12 +5776,17 @@ class DiveRepository {
           extraRegulatorIds: decodeExtraRegulatorIds(t.extraRegulatorIds),
           tripCylinderId: t.tripCylinderId,
           passportId: t.passportId,
+          twinPassportId: t.twinPassportId,
           equipmentId: t.equipmentId,
           sourceTankIndex: t.sourceTankIndex,
           sharedComputerIds: decodeSharedComputerIds(t.sharedComputerIds),
           usageDuration: t.usageDuration != null
               ? Duration(seconds: t.usageDuration!)
               : null,
+          surfaceBreathingDuration: t.surfaceBreathingDuration != null
+              ? Duration(seconds: t.surfaceBreathingDuration!)
+              : null,
+          hasPressureSeries: loggedTankIds.contains(t.id),
         );
       }).toList(),
       profile: seriesProfile,
@@ -5611,6 +5823,7 @@ class DiveRepository {
           : null,
       // Dive planner (v1.5)
       isPlanned: row.isPlanned,
+      isDraft: row.isDraft,
       outingId: row.outingId,
       // Training courses (issue #2515)
       courseIds: courseIds,
@@ -5619,6 +5832,24 @@ class DiveRepository {
       importId: row.importId,
       // User-defined custom fields
       customFields: customFields,
+    );
+
+    // Surface time a switch logged on the surface or a pressure still falling
+    // there says a cylinder was breathed in, worked out from the same series
+    // and switches the dive page reads so SAC by cylinder agrees (#2930).
+    final switchRows = await (_db.select(
+      _db.gasSwitches,
+    )..where((t) => t.diveId.equals(row.id))).get();
+    return dive.copyWith(
+      surfaceBreathing: diveSurfaceBreathing(
+        profile: dive.profile,
+        tanks: dive.tanks,
+        switches: [
+          for (final sw in switchRows)
+            (tankId: sw.tankId, timestamp: sw.timestamp),
+        ],
+        tankPressures: pressuresByTank,
+      ),
     );
   }
 
@@ -5731,6 +5962,55 @@ class DiveRepository {
   // Planned Dive Operations (v1.5)
   // ============================================================================
 
+  /// The drafts (issue #637) of [diverId], every diver's when null, newest
+  /// entry first. Only `is_draft` rows, read without their samples: the
+  /// draft listings (the Home card, the reminders, the conditions fill, the
+  /// open dive) run on every dive change and draw no profile.
+  Future<List<domain.Dive>> getDraftDives({String? diverId}) async {
+    final query = _db.selectOnly(_db.dives)
+      ..addColumns([_db.dives.id])
+      ..where(_db.dives.isDraft.equals(true))
+      ..orderBy([
+        OrderingTerm.desc(
+          coalesce([_db.dives.entryTime, _db.dives.diveDateTime]),
+        ),
+      ]);
+    if (diverId != null) query.where(_db.dives.diverId.equals(diverId));
+    final ids = [for (final row in await query.get()) row.read(_db.dives.id)!];
+    final byId = {
+      for (final dive in await getDivesByIdsWithoutSamples(ids)) dive.id: dive,
+    };
+    return [for (final id in ids) ?byId[id]];
+  }
+
+  /// The plans and drafts a download may fill (issue #637): every dive of
+  /// [diverId] still waiting for its dive computer readings, newest first,
+  /// scoped as [getPlannedDives] is. The fill pass reads its targets only
+  /// through this.
+  Future<List<domain.Dive>> getUnfilledDives({String? diverId}) async {
+    try {
+      final query = _db.select(_db.dives)
+        ..where((t) => t.isPlanned.equals(true) | t.isDraft.equals(true))
+        ..orderBy([
+          (t) => OrderingTerm.desc(coalesce([t.entryTime, t.diveDateTime])),
+        ]);
+
+      if (diverId != null) {
+        query.where((t) => t.diverId.equals(diverId));
+      }
+
+      final rows = await query.get();
+      return await Future.wait(rows.map(_mapRowToDive));
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get unfilled dives',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
   /// Get all planned dives (not yet executed)
   Future<List<domain.Dive>> getPlannedDives({String? diverId}) async {
     try {
@@ -5791,31 +6071,7 @@ class DiveRepository {
         throw Exception('Dive is not a planned dive: $planId');
       }
 
-      // Get next dive number for the actual dive
-      final diveNumber = await getNextDiveNumber(diverId: plannedDive.diverId);
-
-      // Update the dive to mark it as actual
-      final now = DateTime.now().millisecondsSinceEpoch;
-      await (_db.update(_db.dives)..where((t) => t.id.equals(planId))).write(
-        DivesCompanion(
-          isPlanned: const Value(false),
-          diveDateTime: actualDateTime != null
-              ? Value(actualDateTime.millisecondsSinceEpoch)
-              : const Value.absent(),
-          entryTime: actualDateTime != null
-              ? Value(actualDateTime.millisecondsSinceEpoch)
-              : const Value.absent(),
-          diveNumber: Value(diveNumber),
-          updatedAt: Value(now),
-        ),
-      );
-      await _syncRepository.markRecordPending(
-        entityType: 'dives',
-        recordId: planId,
-        localUpdatedAt: now,
-      );
-      SyncEventBus.notifyLocalChange();
-
+      await _promote(plannedDive, actualDateTime: actualDateTime);
       _log.info('Converted planned dive to actual: $planId');
       return planId;
     } catch (e, stackTrace) {
@@ -5826,6 +6082,47 @@ class DiveRepository {
       );
       rethrow;
     }
+  }
+
+  /// Makes the plan or draft [diveId] an ordinary logged dive (issue #637):
+  /// clears both flags and gives it the next free number of its diver, as
+  /// [convertPlanToActualDive] does for a plan. [actualDateTime], when given,
+  /// becomes its start. Throws a [StateError] for a dive that is neither.
+  Future<String> promoteToLoggedDive(
+    String diveId, {
+    DateTime? actualDateTime,
+  }) async {
+    final dive = await getDiveById(diveId);
+    if (dive == null || !(dive.isPlanned || dive.isDraft)) {
+      throw StateError('Dive $diveId is neither a plan nor a draft');
+    }
+    await _promote(dive, actualDateTime: actualDateTime);
+    return diveId;
+  }
+
+  Future<void> _promote(domain.Dive dive, {DateTime? actualDateTime}) async {
+    final diveNumber = await getNextDiveNumber(diverId: dive.diverId);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (_db.update(_db.dives)..where((t) => t.id.equals(dive.id))).write(
+      DivesCompanion(
+        isPlanned: const Value(false),
+        isDraft: const Value(false),
+        diveDateTime: actualDateTime != null
+            ? Value(actualDateTime.millisecondsSinceEpoch)
+            : const Value.absent(),
+        entryTime: actualDateTime != null
+            ? Value(actualDateTime.millisecondsSinceEpoch)
+            : const Value.absent(),
+        diveNumber: Value(diveNumber),
+        updatedAt: Value(now),
+      ),
+    );
+    await _syncRepository.markRecordPending(
+      entityType: 'dives',
+      recordId: dive.id,
+      localUpdatedAt: now,
+    );
+    SyncEventBus.notifyLocalChange();
   }
 
   /// Delete a planned dive
@@ -6397,10 +6694,15 @@ class DiveRepository {
   /// has passed still restricts nothing until it is marked executed (issue
   /// #3924). A dive mirrored from a logged dive counts, since it happened, and
   /// reads that dive's deco obligation and end, having none of its own.
+  ///
+  /// A draft (issue #637) happened but has no readings, so it counts as a
+  /// deco dive, and one still in the water ends at [now], wall clock
+  /// flagged UTC like the stored times (the device's clock by default).
   // stats-scope-exempt: flying-after-diving safety, an excluded dive still off-gassed
   Future<List<NoFlyDiveInput>> getNoFlyDiveInputs({
     required DateTime since,
     String? diverId,
+    DateTime? now,
   }) async {
     try {
       final diverClause = diverId != null ? 'AND d.diver_id = ?' : '';
@@ -6413,18 +6715,25 @@ class DiveRepository {
       const profileDives =
           'SELECT d.id UNION ALL '
           'SELECT source.id FROM dives source WHERE $loggedSource';
+      // A draft still in the water (no exit tapped yet) ends now, so its
+      // wait counts from the moment the diver surfaces (issue #637).
       const endMs =
+          'CASE WHEN d.is_draft = 1 AND d.exit_time IS NULL THEN ? ELSE '
           'COALESCE(d.exit_time, '
           '(SELECT MAX(source.exit_time) FROM dives source '
           'WHERE $loggedSource), '
           'COALESCE(d.entry_time, d.dive_date_time) '
           '+ COALESCE(d.runtime, (SELECT MAX(source.runtime) '
-          'FROM dives source WHERE $loggedSource), 0) * 1000)';
+          'FROM dives source WHERE $loggedSource), 0) * 1000) END';
+      final nowMs =
+          (now ?? asWallClockUtc(DateTime.now())).millisecondsSinceEpoch;
       final rows = await _db
           .customSelect(
             'SELECT '
             '$endMs AS end_ms, '
-            '(EXISTS(SELECT 1 FROM dive_profile_series s '
+            // A draft has no readings to say whether it needed deco, so it
+            // counts as a deco dive, the longest wait (issue #637).
+            '(d.is_draft = 1 OR EXISTS(SELECT 1 FROM dive_profile_series s '
             'WHERE s.dive_id IN ($profileDives) AND (s.has_deco_stop = 1 '
             'OR (s.has_deco_type = 0 AND s.has_positive_ceiling = 1))) '
             'OR EXISTS(SELECT 1 FROM dive_profile_events e '
@@ -6436,6 +6745,8 @@ class DiveRepository {
             'AND NOT ${diveUndivedSql('d')} '
             '$diverClause',
             variables: [
+              Variable(nowMs),
+              Variable(nowMs),
               Variable(since.millisecondsSinceEpoch),
               if (diverId != null) Variable(diverId),
             ],
@@ -6740,6 +7051,43 @@ class DiveRepository {
       // overloaded to also mean "no executed dive on record". Swallowing a
       // real DB failure into that same null would render as "all clear"
       // instead of the page's explicit error state.
+      rethrow;
+    }
+  }
+
+  /// The logged dive that ended last after [endedAfter] and at or before
+  /// [notAfter], or null when none did: what the planner offers to follow
+  /// (issue #4250). See [latestEndedDiveId].
+  ///
+  /// Read as [_mapRowsWithPreloadedData] reads a dive, so no sample is
+  /// decoded, even for a downloaded dive that only its profile measures.
+  /// `profile` is empty, and a water temperature or tank pressure taken from
+  /// the samples is missing, but `profileSpan` keeps its end where the SQL
+  /// put it. The prompt shows only the dive's name, number and times.
+  Future<domain.Dive?> getLatestEndedDive({
+    String? diverId,
+    required DateTime endedAfter,
+    required DateTime notAfter,
+  }) async {
+    try {
+      final id = await latestEndedDiveId(
+        _db,
+        diverId: diverId,
+        endedAfter: endedAfter,
+        notAfter: notAfter,
+      );
+      if (id == null) return null;
+      final row = await (_db.select(
+        _db.dives,
+      )..where((t) => t.id.equals(id))).getSingleOrNull();
+      // Null when the dive went between the lookup and this read.
+      return (await _mapRowsWithPreloadedData([?row])).firstOrNull;
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get the latest ended dive for diver: $diverId',
+        error: e,
+        stackTrace: stackTrace,
+      );
       rethrow;
     }
   }
@@ -7183,9 +7531,10 @@ class DiveRepository {
       );
 
       // A planned dive holds no number until it is promoted (issue #2002),
-      // so it neither takes a slot nor shifts the numbers around it.
+      // and a draft none until it is filled (issue #637), so neither takes
+      // a slot nor shifts the numbers around it.
       final query = _db.select(_db.dives)
-        ..where((t) => t.isPlanned.equals(false))
+        ..where((t) => t.isPlanned.equals(false) & t.isDraft.equals(false))
         ..orderBy([
           (t) => OrderingTerm.asc(t.entryTime),
           (t) => OrderingTerm.asc(t.diveDateTime),
@@ -8029,62 +8378,189 @@ class DiveRepository {
   }
 
   /// Writes [rows] as the dive's exact gear list, with provenance (the
-  /// bulk-edit undo path). No notify/txn.
+  /// bulk-edit, rule and repair undo paths). A set deleted since the rows
+  /// were captured cannot be named again: such a row comes back untagged,
+  /// as the delete left every other row of that set (#4284). No notify/txn.
   Future<void> replaceGearRows(String diveId, List<GearProvenance> rows) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    await _writeGearDiff(diveId, rows, now);
+    final liveSets = await existingRowIds(_db, _db.equipmentSets, [
+      for (final r in rows) ?r.viaSetId,
+    ]);
+    await _writeGearDiff(diveId, [
+      for (final r in rows)
+        r.viaSetId == null || liveSets.contains(r.viaSetId)
+            ? r
+            : r.copyWith(clearViaSetId: true),
+    ], now);
     await _bumpDives([diveId], now);
   }
 
-  /// Ids of the dives that carry [equipmentId] as a gear row.
-  Future<List<String>> diveIdsWithEquipment(String equipmentId) async {
-    final rows =
-        await (_db.selectOnly(_db.diveEquipment, distinct: true)
-              ..addColumns([_db.diveEquipment.diveId])
-              ..where(_db.diveEquipment.equipmentId.equals(equipmentId)))
-            .get();
-    return [for (final r in rows) r.read(_db.diveEquipment.diveId)!];
-  }
+  /// How many logged dives carry [assemblyId] as a gear row: the dives
+  /// [rewriteAssemblyOnDives] visits with `alsoLogged`, so the "also update
+  /// N dives" question names the dives the answer changes (issue #4283).
+  Future<int> countLoggedDivesWithAssembly(String assemblyId) =>
+      _gearTemplates.countWithAssembly(assemblyId, planned: false);
 
-  /// Replays changes to an assembly's template on every past dive that
-  /// carries the assembly (issue #1487, "also update N past dives"). One
+  /// How many planned dives carry [assemblyId]: the ones every template
+  /// change reaches.
+  Future<int> countPlannedDivesWithAssembly(String assemblyId) =>
+      _gearTemplates.countWithAssembly(assemblyId, planned: true);
+
+  /// How many logged dives carry set [setId], through a gear row it put
+  /// there.
+  Future<int> countLoggedDivesWithSet(String setId) =>
+      _gearTemplates.countWithSet(setId, planned: false);
+
+  /// How many planned dives carry set [setId].
+  Future<int> countPlannedDivesWithSet(String setId) =>
+      _gearTemplates.countWithSet(setId, planned: true);
+
+  GearTemplateDiveQueries get _gearTemplates => GearTemplateDiveQueries(_db);
+
+  /// Replays changes to an assembly's template on the dives that carry the
+  /// assembly (issue #1487, "also update N past dives"): the planned ones
+  /// always, the logged ones only with [alsoLogged] (issue #4283). One
   /// transaction; each dive whose rows changed goes through the diff
   /// writer, so unchanged rows are neither tombstoned nor re-marked, and
-  /// is re-stamped so sync carries it. Returns how many dives changed.
+  /// is re-stamped so sync carries it. Returns the dives that changed.
   ///
-  /// [rewrites] are applied in order to each dive's rows and written once,
+  /// [rewrites] is the whole batch, replayed in order against each dive,
   /// so adding several parts at once costs one pass over the dives rather
   /// than one pass per part. The result is the same either way: the rules
   /// compose, and the diff writer compares against the rows on disk.
-  Future<int> rewriteAssemblyOnPastDives(
+  ///
+  /// A new part goes on a dive only as expanding the assembly fresh would
+  /// put it there: active, and usable by the dive's diver (an unowned dive:
+  /// the assembly owner's).
+  ///
+  /// With [notify] false the caller tells sync and queues the rescan of the
+  /// returned dives once its own transaction commits, as an agent apply
+  /// does: the entity rescans in `afterApply`, and `WriteApplier` tells
+  /// sync.
+  Future<List<String>> rewriteAssemblyOnDives(
     String assemblyId,
-    List<GearHistoryRewrite> rewrites,
-  ) async {
-    if (rewrites.isEmpty) return 0;
-    final diveIds = await diveIdsWithEquipment(assemblyId);
-    if (diveIds.isEmpty) return 0;
+    List<GearHistoryRewrite> rewrites, {
+    required bool alsoLogged,
+    bool notify = true,
+  }) async {
+    if (rewrites.isEmpty) return const [];
+    final templates = _gearTemplates;
+    final diveIds = await templates.diveIdsWithAssembly(
+      assemblyId,
+      alsoLogged: alsoLogged,
+    );
+    if (diveIds.isEmpty) return const [];
+    final incoming = {
+      for (final rewrite in rewrites)
+        ?switch (rewrite) {
+          GearPartAdded(:final partId) => partId,
+          GearPartReplaced(:final newPartId) => newPartId,
+          GearPartRemoved() => null,
+        },
+    };
+    final active = await _activeIdsAmong(incoming);
+    final usable = await templates.usableOnDives(
+      diveIds,
+      incoming,
+      fallbackDiverId: incoming.isEmpty
+          ? null
+          : await templates.ownerOfEquipment(assemblyId),
+    );
+    return _rewriteGearOn(diveIds, notify: notify, (rows, diveId) {
+      bool canAdd(String id) => active.contains(id) && usable(diveId, id);
+      var next = rows;
+      for (final rewrite in rewrites) {
+        next = rewrite.applyTo(next, assemblyId, canAdd: canAdd);
+      }
+      return next;
+    });
+  }
+
+  /// Replays changes to the members of set [setId] on the dives that carry
+  /// the set (issue #4283), planned ones always and logged ones only with
+  /// [alsoLogged], as [rewriteAssemblyOnDives] does, [notify] included. An
+  /// added member goes on a dive only when it is active and its diver may
+  /// use it, the filter applying the set already uses.
+  Future<List<String>> rewriteSetOnDives(
+    String setId,
+    List<SetHistoryRewrite> rewrites, {
+    required bool alsoLogged,
+    bool notify = true,
+  }) async {
+    if (rewrites.isEmpty) return const [];
+    final templates = _gearTemplates;
+    final diveIds = await templates.diveIdsWithSet(
+      setId,
+      alsoLogged: alsoLogged,
+    );
+    if (diveIds.isEmpty) return const [];
+    final members = await templates.membersOfSet(setId);
+    final added = [
+      for (final r in rewrites)
+        if (r is SetItemAdded) r.itemId,
+    ];
+    // A removal needs only the dive's rows and the members; what an
+    // addition puts on a dive is worked out only when there is one.
+    var index = ComponentsIndex.empty;
+    var active = const <String>{};
+    bool Function(String diveId, String id) usable = (_, _) => true;
+    if (added.isNotEmpty) {
+      index = await _loadComponentsIndex();
+      final candidates = {
+        for (final id in added) ...[id, ...index.descendantsOf(id)],
+      };
+      active = await _activeIdsAmong(candidates);
+      usable = await templates.usableOnDives(
+        diveIds,
+        candidates,
+        fallbackDiverId: await templates.ownerOfSet(setId),
+      );
+    }
+    return _rewriteGearOn(diveIds, notify: notify, (rows, diveId) {
+      var next = rows;
+      for (final rewrite in rewrites) {
+        next = rewrite.applyTo(
+          next,
+          setId,
+          index: index,
+          isActive: active.contains,
+          isUsable: (id) => usable(diveId, id),
+          isMember: members.contains,
+        );
+      }
+      return next;
+    });
+  }
+
+  /// Writes [change] of each of [diveIds]' gear rows in one transaction,
+  /// skipping the dives it leaves as they were. Returns the dives that
+  /// changed. With [notify] false, sync and the rescan are the caller's.
+  Future<List<String>> _rewriteGearOn(
+    List<String> diveIds,
+    List<GearProvenance> Function(List<GearProvenance> rows, String diveId)
+    change, {
+    required bool notify,
+  }) async {
+    if (diveIds.isEmpty) return const [];
     final now = DateTime.now().millisecondsSinceEpoch;
     final touched = <String>[];
     await _db.transaction(() async {
       for (final diveId in diveIds) {
         final rows = await _provenanceOf(diveId);
-        var next = rows;
-        for (final rewrite in rewrites) {
-          next = rewrite.applyTo(next, assemblyId);
-        }
+        final next = change(rows, diveId);
         if (_sameRows(rows, next)) continue;
         await _writeGearDiff(diveId, next, now);
         touched.add(diveId);
       }
       if (touched.isNotEmpty) await _bumpDives(touched, now);
     });
-    if (touched.isNotEmpty) {
+    if (notify && touched.isNotEmpty) {
       SyncEventBus.notifyLocalChange();
       // The gear changed without a save, so queue the rescan a save would
       // (issue #2853): a shared gear overlap can appear or go with it.
       scheduleQualityScan(touched);
     }
-    return touched.length;
+    return List.unmodifiable(touched);
   }
 
   static bool _sameRows(List<GearProvenance> a, List<GearProvenance> b) {
@@ -8142,14 +8618,15 @@ class DiveRepository {
 
   /// Add each equipment id to each dive, expanding assemblies into their
   /// active parts and tagging every written row with [viaSetId] when the
-  /// addition came from a set. No notify/txn.
+  /// addition came from a set. Writes and bumps only the dives whose rows
+  /// change: a bulk "Use Set" re-adds items every dive already has (#4284),
+  /// and those dives must not be re-stamped for sync. No notify/txn.
   Future<void> bulkAddEquipment(
     List<String> diveIds,
     List<String> equipmentIds, {
     String? viaSetId,
   }) async {
     if (diveIds.isEmpty || equipmentIds.isEmpty) return;
-    final now = DateTime.now().millisecondsSinceEpoch;
     final index = await _loadComponentsIndex();
     final candidates = {
       for (final id in equipmentIds) ...[id, ...index.descendantsOf(id)],
@@ -8158,16 +8635,15 @@ class DiveRepository {
     final additions = [
       for (final id in equipmentIds) (equipmentId: id, viaSetId: viaSetId),
     ];
-    for (final diveId in diveIds) {
-      final expanded = GearExpander.expand(
+    await _rewriteGear(
+      diveIds,
+      (rows) => GearExpander.expand(
         additions: additions,
         index: index,
-        existing: await _provenanceOf(diveId),
+        existing: rows,
         isActive: active.contains,
-      );
-      await _writeGearDiff(diveId, expanded, now);
-    }
-    await _bumpDives(diveIds, now);
+      ),
+    );
   }
 
   /// Remove each equipment id, and everything attached through it, from
@@ -9551,6 +10027,7 @@ class DiveRepository {
             computerId: computerId,
             sourceId: reading.id.value,
             isPrimary: false,
+            isEdit: false,
             samples: [
               for (final point in profile) profileSampleFromPoint(point),
             ],

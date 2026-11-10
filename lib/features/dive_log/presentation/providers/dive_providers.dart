@@ -21,6 +21,7 @@ import 'package:submersion/features/dive_log/data/services/dive_consolidation_se
 import 'package:submersion/features/dive_log/data/services/dive_merge_service.dart';
 import 'package:submersion/features/dive_log/data/services/dive_split_service.dart';
 import 'package:submersion/features/dive_log/data/services/dive_uncombine_service.dart';
+import 'package:submersion/features/dive_log/presentation/providers/dive_data_retention.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_list_loader.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_profile_batcher.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
@@ -301,21 +302,20 @@ final divesProvider = FutureProvider<List<domain.Dive>>((ref) async {
 /// self-invalidates on dives-table writes) already shows the new one. The
 /// hydrated [domain.Dive] embeds tanks, tank pressures, profile, and equipment,
 /// so this must watch more than just the `dives` table.
-final diveProvider = FutureProvider.family<domain.Dive?, String>((
+final diveProvider = FutureProvider.autoDispose.family<domain.Dive?, String>((
   ref,
   id,
 ) async {
+  retainDiveData(ref);
   final repository = ref.watch(diveRepositoryProvider);
   ref.invalidateSelfWhen(repository.watchDiveDetailChanges());
   return repository.getDiveById(id);
 });
 
 /// Dive profile provider - for lazy loading profiles in list views
-final diveProfileProvider =
-    FutureProvider.family<List<domain.DiveProfilePoint>, String>((
-      ref,
-      diveId,
-    ) async {
+final diveProfileProvider = FutureProvider.autoDispose
+    .family<List<domain.DiveProfilePoint>, String>((ref, diveId) async {
+      retainDiveData(ref);
       final repository = ref.watch(diveRepositoryProvider);
       ref.invalidateSelfWhen(repository.watchDiveDetailChanges());
       return repository.getDiveProfile(diveId);
@@ -324,11 +324,9 @@ final diveProfileProvider =
 /// Profiles grouped by owning data source (active-source model). Keys are
 /// dive_data_sources ids, primary source first; null-computerId rows are
 /// attributed to the primary source so no source ever renders as unknown.
-final sourceProfilesProvider =
-    FutureProvider.family<Map<String, domain.SourceProfile>, String>((
-      ref,
-      diveId,
-    ) async {
+final sourceProfilesProvider = FutureProvider.autoDispose
+    .family<Map<String, domain.SourceProfile>, String>((ref, diveId) async {
+      retainDiveData(ref);
       final repository = ref.watch(diveRepositoryProvider);
       // Analysis-input tick: this hydration feeds sourceProfileAnalysisProvider
       // and reads only profile/source tables, so the broad detail tick (which
@@ -348,6 +346,18 @@ final profileSeriesHistoryProvider =
       return repository.getProfileHistory(diveId);
     });
 
+/// Whether a dive has any stored profile series, readable or not (#4112).
+///
+/// A dive read with an unreadable series has an empty profile, just like one
+/// logged without samples; only the second may be drawn as an estimate. Null
+/// (loading or failed) means draw nothing.
+final diveHasProfileSeriesProvider = FutureProvider.autoDispose
+    .family<bool, String>((ref, diveId) async {
+      final repository = ref.watch(diveRepositoryProvider);
+      ref.invalidateSelfWhen(repository.watchAnalysisInputChanges());
+      return repository.hasProfileSeries(diveId);
+    });
+
 /// Batch profile cache for mini charts in the dive list.
 ///
 /// Stores downsampled (~20 points) profiles keyed by dive ID. Populated in
@@ -363,12 +373,38 @@ final batchProfileCacheProvider =
 /// snapshot back would drop the newer page's entries and blank those cards'
 /// mini charts (#3506). Existing entries keep their list instances, which is
 /// what lets a card watching only its own entry skip the rebuild.
+///
+/// An empty answer (a dive without samples, #4112) only fills a dive with no
+/// entry yet. Asked again on every list load, it would otherwise write a
+/// fresh map that runs every card's selector for no change; and the list and
+/// the dashboard can ask for the same dive at once, so an older empty answer
+/// landing after a newer profile must not replace it.
+///
+/// A dive in [requested] that the answer leaves out (its series is
+/// unreadable, or the read failed) is unknown again: an empty entry for it
+/// is dropped, so its card stops drawing an estimate for a dive that may
+/// well have samples. An entry with samples stays.
 void mergeIntoBatchProfileCache(
   StateController<Map<String, List<domain.DiveProfilePoint>>> cache,
-  Map<String, List<domain.DiveProfilePoint>> profiles,
-) {
-  if (profiles.isEmpty) return;
-  cache.state = {...cache.state, ...profiles};
+  Map<String, List<domain.DiveProfilePoint>> profiles, {
+  Iterable<String> requested = const [],
+}) {
+  final current = cache.state;
+  final changed = {
+    for (final entry in profiles.entries)
+      if (entry.value.isNotEmpty || !current.containsKey(entry.key))
+        entry.key: entry.value,
+  };
+  final forgotten = {
+    for (final id in requested)
+      if (!profiles.containsKey(id) && (current[id]?.isEmpty ?? false)) id,
+  };
+  if (changed.isEmpty && forgotten.isEmpty) return;
+  cache.state = {
+    for (final entry in current.entries)
+      if (!forgotten.contains(entry.key)) entry.key: entry.value,
+    ...changed,
+  };
 }
 
 /// Statistics provider (filtered by current diver).
@@ -650,7 +686,7 @@ class DiveListNotifier extends StateNotifier<AsyncValue<List<domain.Dive>>> {
     // chronologically to ensure proper ordering. Scope to this diver so
     // we don't disturb other profiles' per-diver numbering.
     // A planned dive stays unnumbered until it is promoted (issue #2002).
-    if (dive.diveNumber == null && !dive.isPlanned) {
+    if (dive.diveNumber == null && !dive.isPlanned && !dive.isDraft) {
       await _repository.assignMissingDiveNumbers(
         diverId: newDive.diverId ?? diverId,
       );
@@ -1303,7 +1339,7 @@ class PaginatedDiveListNotifier
     final newDive = await _repository.createDive(diveWithDiver);
 
     // A planned dive stays unnumbered until it is promoted (issue #2002).
-    if (dive.diveNumber == null && !dive.isPlanned) {
+    if (dive.diveNumber == null && !dive.isPlanned && !dive.isDraft) {
       await _repository.assignMissingDiveNumbers(
         diverId: newDive.diverId ?? diverId,
       );
@@ -1562,11 +1598,12 @@ final tankPressureRepositoryProvider = Provider<TankPressureRepository>((ref) {
 /// Returns a map where keys are tank IDs and values are lists of
 /// pressure points sorted by timestamp. Used for multi-tank pressure
 /// visualization in the dive profile chart.
-final tankPressuresProvider =
-    FutureProvider.family<Map<String, List<domain.TankPressurePoint>>, String>((
+final tankPressuresProvider = FutureProvider.autoDispose
+    .family<Map<String, List<domain.TankPressurePoint>>, String>((
       ref,
       diveId,
     ) async {
+      retainDiveData(ref);
       final repository = ref.watch(tankPressureRepositoryProvider);
       // Analysis-input tick covers tank_pressure_series (and the dives
       // cascade); the broad detail tick made every pressure curve re-query

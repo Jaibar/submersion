@@ -2,6 +2,7 @@ import 'package:equatable/equatable.dart';
 
 import 'package:submersion/core/constants/app_enums.dart';
 import 'package:submersion/core/deco/constants/buhlmann_coefficients.dart';
+import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/deco/max_operating_depth.dart';
 import 'package:submersion/features/dive_log/domain/entities/tank_extra_regulators.dart';
 
@@ -88,6 +89,12 @@ class DiveTank extends Equatable {
   /// [tripCylinderId]: downloads never touch it.
   final String? passportId;
 
+  /// The passport id of the second cylinder when this tank is a twin set
+  /// picked from a linked cylinder (issue #4242): [passportId] names the
+  /// cylinder picked, this its partner, so both passports count the dive.
+  /// Set and cleared with [passportId]; a later swap never rewrites it.
+  final String? twinPassportId;
+
   /// The gear item this cylinder is (the `dive_tanks.equipment_id` link the
   /// transmitter registry writes when a serial is assigned to an item).
   /// Read-only on the domain side: edit flows rebuild the tank field by
@@ -101,6 +108,20 @@ class DiveTank extends Equatable {
   /// the breathing time when the dive has no gas switches. Import-owned,
   /// like [transmitterSerial]: edit flows never write it.
   final Duration? usageDuration;
+
+  /// How long the diver breathed this cylinder at the surface after the
+  /// computer stopped logging, as they entered it (issue #2930): oxygen on the
+  /// boat after a deco dive. An end pressure read off the gauge includes that
+  /// gas, so SAC counts this time at 0 m, unless [hasPressureSeries] says the
+  /// end is a transmitter's last reading. Null when none.
+  final Duration? surfaceBreathingDuration;
+
+  /// Whether a transmitter logged this cylinder's pressure (issue #2930): its
+  /// end pressure is then the last reading, taken before the computer
+  /// stopped, so it holds none of the gas breathed after and
+  /// [surfaceBreathingDuration] does not count. Read, never stored: the dive
+  /// reads set it from `tank_pressure_series`.
+  final bool hasPressureSeries;
 
   /// Deco gas-switch depth override in meters (planning only); null = auto
   /// (MOD at the deco pO2). Subsurface per-cylinder "Deco switch at", v120.
@@ -137,8 +158,11 @@ class DiveTank extends Equatable {
     this.extraRegulatorIds = const [],
     this.tripCylinderId,
     this.passportId,
+    this.twinPassportId,
     this.equipmentId,
     this.usageDuration,
+    this.surfaceBreathingDuration,
+    this.hasPressureSeries = false,
     this.decoSwitchDepth,
     this.isTravelGas = false,
   });
@@ -202,12 +226,17 @@ class DiveTank extends Equatable {
     String? equipmentId,
     Duration? usageDuration,
     bool clearUsageDuration = false,
+    Duration? surfaceBreathingDuration,
+    bool clearSurfaceBreathingDuration = false,
+    bool? hasPressureSeries,
     bool clearRegulatorEquipmentId = false,
     bool clearMaterial = false,
     String? tripCylinderId,
     bool clearTripCylinderId = false,
     String? passportId,
     bool clearPassportId = false,
+    String? twinPassportId,
+    bool clearTwinPassportId = false,
     double? decoSwitchDepth,
     bool clearDecoSwitchDepth = false,
     bool? isTravelGas,
@@ -242,10 +271,17 @@ class DiveTank extends Equatable {
           ? null
           : (tripCylinderId ?? this.tripCylinderId),
       passportId: clearPassportId ? null : (passportId ?? this.passportId),
+      twinPassportId: clearTwinPassportId
+          ? null
+          : (twinPassportId ?? this.twinPassportId),
       equipmentId: equipmentId ?? this.equipmentId,
       usageDuration: clearUsageDuration
           ? null
           : (usageDuration ?? this.usageDuration),
+      surfaceBreathingDuration: clearSurfaceBreathingDuration
+          ? null
+          : (surfaceBreathingDuration ?? this.surfaceBreathingDuration),
+      hasPressureSeries: hasPressureSeries ?? this.hasPressureSeries,
       decoSwitchDepth: clearDecoSwitchDepth
           ? null
           : (decoSwitchDepth ?? this.decoSwitchDepth),
@@ -277,7 +313,10 @@ class DiveTank extends Equatable {
     equipmentId,
     tripCylinderId,
     passportId,
+    twinPassportId,
     usageDuration,
+    surfaceBreathingDuration,
+    hasPressureSeries,
     decoSwitchDepth,
     isTravelGas,
   ];
@@ -317,7 +356,29 @@ class GasMix extends Equatable {
   ///
   /// When [o2Narcotic] is true, all gases except He are narcotic.
   /// When false, only N2 is narcotic (compared against the air N2 baseline).
-  double end(double depth, {bool o2Narcotic = true}) {
+  ///
+  /// Without an [environment] this is the flat model, 1 bar surface and
+  /// exactly 10 m per bar. With one, the narcotic pressure follows its
+  /// surface pressure and water density, and the END is the depth in that
+  /// same water where air reaches it, as the gas calculators' Tec mode reads
+  /// it. Neither form is floored: a helium-rich mix at shallow depth goes
+  /// negative, and a caller that shows the value floors it.
+  double end(
+    double depth, {
+    bool o2Narcotic = true,
+    DiveEnvironment? environment,
+  }) {
+    if (environment != null) {
+      final narcoticFraction = o2Narcotic
+          ? (100.0 - he) / 100.0
+          : n2 / 100.0 / airN2Fraction;
+      // depthAtPressure(pressureAtDepth(depth) * f), solved so that air
+      // (f == 1) gives back exactly its own depth.
+      return depth * narcoticFraction -
+          environment.surfacePressureBar *
+              (1 - narcoticFraction) /
+              environment.barPerMeter;
+    }
     final ambientPressure = (depth / 10) + 1;
     if (o2Narcotic) {
       final narcoticFraction = (100.0 - he) / 100.0;

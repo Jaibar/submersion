@@ -65,7 +65,7 @@ class MockSpeciesRepository extends Mock implements SpeciesRepository {
   Stream<void> watchSpeciesChanges() => const Stream.empty();
 
   @override
-  Future<List<marine.Species>> getAllSpecies() async => [];
+  Future<List<marine.Species>> getAllSpecies({List<String>? ids}) async => [];
 
   @override
   Future<List<marine.SiteSpeciesEntry>> getExpectedSpeciesForSite(
@@ -74,8 +74,10 @@ class MockSpeciesRepository extends Mock implements SpeciesRepository {
 
   @override
   Future<List<marine.SiteSpeciesSummary>> getSpeciesSpottedAtSite(
-    String siteId,
-  ) async => [];
+    String siteId, {
+    String? excludeDiveId,
+    bool statsScope = true,
+  }) async => [];
 }
 
 void main() {

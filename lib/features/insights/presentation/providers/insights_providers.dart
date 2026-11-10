@@ -17,6 +17,7 @@ import 'package:submersion/features/insights/data/services/deco_classification_s
 import 'package:submersion/features/insights/domain/calendar_day_matrix.dart';
 import 'package:submersion/features/insights/domain/entities/species_insights.dart';
 import 'package:submersion/features/insights/domain/logbook_dive_counts.dart';
+import 'package:submersion/features/insights/domain/role_consumption_trend.dart';
 import 'package:submersion/features/insights/domain/suit_thickness_stats.dart';
 import 'package:submersion/features/insights/domain/tank_configuration/tank_configuration.dart';
 import 'package:submersion/features/insights/domain/water_temp_band_metrics.dart';
@@ -247,25 +248,19 @@ final ccrGasUseTrendProvider = FutureProvider<CcrGasUseTrend>((ref) async {
   );
 });
 
-/// Average consumption by tank role for the lane the gas page shows.
-final sacByTankRoleProvider = FutureProvider<Map<String, double>>((ref) async {
+/// Consumption by cylinder role per dive (issue #771). Both lanes come back
+/// at once, so it does not watch the lane and the toggle needs no reload.
+final roleConsumptionTrendProvider = FutureProvider<RoleConsumptionTrend>((
+  ref,
+) async {
   _keepAliveWithExpiry(ref);
   final repository = ref.watch(insightsRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
-  final lane = ref.watch(insightsGasLaneProvider);
   final filter = ref.watch(insightsFilterProvider);
-
-  if (lane == GasConsumptionLane.rmv) {
-    return repository.getSacVolumeByTankRole(
-      diverId: currentDiverId,
-      filter: filter,
-    );
-  } else {
-    return repository.getSacPressureByTankRole(
-      diverId: currentDiverId,
-      filter: filter,
-    );
-  }
+  return repository.getRoleConsumptionPerDive(
+    diverId: currentDiverId,
+    filter: filter,
+  );
 });
 
 // ============================================================================
@@ -519,7 +514,12 @@ final topBuddiesProvider = FutureProvider<List<RankingItem>>((ref) async {
   final repository = ref.watch(insightsRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
   final filter = ref.watch(insightsFilterProvider);
-  return repository.getTopBuddies(diverId: currentDiverId, filter: filter);
+  // Every row: the card shows ten until the diver asks for the rest.
+  return repository.getTopBuddies(
+    diverId: currentDiverId,
+    limit: null,
+    filter: filter,
+  );
 });
 
 final soloVsBuddyCountProvider =
@@ -539,7 +539,12 @@ final topDiveCentersProvider = FutureProvider<List<RankingItem>>((ref) async {
   final repository = ref.watch(insightsRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
   final filter = ref.watch(insightsFilterProvider);
-  return repository.getTopDiveCenters(diverId: currentDiverId, filter: filter);
+  // Every row: the card shows ten until the diver asks for the rest.
+  return repository.getTopDiveCenters(
+    diverId: currentDiverId,
+    limit: null,
+    filter: filter,
+  );
 });
 
 // ============================================================================
@@ -551,8 +556,10 @@ final countriesVisitedProvider = FutureProvider<List<RankingItem>>((ref) async {
   final repository = ref.watch(insightsRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
   final filter = ref.watch(insightsFilterProvider);
+  // Every row: the card shows ten until the diver asks for the rest.
   return repository.getCountriesVisited(
     diverId: currentDiverId,
+    limit: null,
     filter: filter,
   );
 });
@@ -562,7 +569,12 @@ final regionsExploredProvider = FutureProvider<List<RankingItem>>((ref) async {
   final repository = ref.watch(insightsRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
   final filter = ref.watch(insightsFilterProvider);
-  return repository.getRegionsExplored(diverId: currentDiverId, filter: filter);
+  // Every row: the card shows ten until the diver asks for the rest.
+  return repository.getRegionsExplored(
+    diverId: currentDiverId,
+    limit: null,
+    filter: filter,
+  );
 });
 
 final divesPerTripProvider = FutureProvider<List<RankingItem>>((ref) async {
@@ -570,7 +582,12 @@ final divesPerTripProvider = FutureProvider<List<RankingItem>>((ref) async {
   final repository = ref.watch(insightsRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
   final filter = ref.watch(insightsFilterProvider);
-  return repository.getDivesPerTrip(diverId: currentDiverId, filter: filter);
+  // Every row: the card shows ten until the diver asks for the rest.
+  return repository.getDivesPerTrip(
+    diverId: currentDiverId,
+    limit: null,
+    filter: filter,
+  );
 });
 
 // ============================================================================
@@ -595,8 +612,10 @@ final mostCommonSightingsProvider = FutureProvider<List<RankingItem>>((
   final repository = ref.watch(insightsRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
   final filter = ref.watch(insightsFilterProvider);
+  // Every row: the card shows ten until the diver asks for the rest.
   return repository.getMostCommonSightings(
     diverId: currentDiverId,
+    limit: null,
     filter: filter,
   );
 });
@@ -608,8 +627,10 @@ final bestSitesForMarineLifeProvider = FutureProvider<List<RankingItem>>((
   final repository = ref.watch(insightsRepositoryProvider);
   final currentDiverId = ref.watch(currentDiverIdProvider);
   final filter = ref.watch(insightsFilterProvider);
+  // Every row: the card shows ten until the diver asks for the rest.
   return repository.getBestSitesForMarineLife(
     diverId: currentDiverId,
+    limit: null,
     filter: filter,
   );
 });

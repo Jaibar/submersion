@@ -18,6 +18,7 @@ import 'package:submersion/features/settings/presentation/providers/settings_pro
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/folded_groups.dart';
 
 class _FakeComponentRepository extends EquipmentComponentRepository {
   final added = <(String, String)>[];
@@ -69,33 +70,36 @@ class _FakeComponentRepository extends EquipmentComponentRepository {
   }
 }
 
-/// How many logged dives carry the assembly, as the history dialog sees it.
-/// The real one logs and rethrows on a query failure.
-class _FakeEquipmentRepository extends EquipmentRepository {
+/// How many logged dives carry the assembly, as the history dialog reads it
+/// from the dive repository. The real one logs and rethrows on a failure.
+class _DiveCount {
   int diveCount = 0;
   Object? throwOnCount;
-
-  @override
-  Future<int> getDiveCountForEquipment(
-    String equipmentId, {
-    String? diverId,
-  }) async {
-    if (throwOnCount != null) throw throwOnCount!;
-    return diveCount;
-  }
 }
+
+/// Stands in for anything else that reads the equipment repository.
+class _FakeEquipmentRepository extends EquipmentRepository {}
 
 /// DiveRepository only has a factory, so a Fake stands in for it.
 class _FakeDiveRepository extends Fake implements DiveRepository {
-  final rewrites = <(String, List<GearHistoryRewrite>)>[];
+  final rewrites = <(String, List<GearHistoryRewrite>, bool)>[];
+  _DiveCount count = _DiveCount();
 
   @override
-  Future<int> rewriteAssemblyOnPastDives(
+  Future<int> countLoggedDivesWithAssembly(String assemblyId) async {
+    if (count.throwOnCount != null) throw count.throwOnCount!;
+    return count.diveCount;
+  }
+
+  @override
+  Future<List<String>> rewriteAssemblyOnDives(
     String assemblyId,
-    List<GearHistoryRewrite> rewrites_,
-  ) async {
-    rewrites.add((assemblyId, rewrites_));
-    return 1;
+    List<GearHistoryRewrite> rewrites_, {
+    required bool alsoLogged,
+    bool notify = true,
+  }) async {
+    rewrites.add((assemblyId, rewrites_, alsoLogged));
+    return const ['dive'];
   }
 }
 
@@ -128,15 +132,15 @@ void main() {
     Future<ComponentsIndex>? index,
     List<EquipmentItem>? gear,
     EquipmentComponent? replacing,
-    _FakeEquipmentRepository? equipment,
+    _DiveCount? count,
     _FakeDiveRepository? dives,
   }) => ProviderScope(
     overrides: [
       equipmentComponentRepositoryProvider.overrideWithValue(repo),
-      equipmentRepositoryProvider.overrideWithValue(
-        equipment ?? _FakeEquipmentRepository(),
+      equipmentRepositoryProvider.overrideWithValue(_FakeEquipmentRepository()),
+      diveRepositoryProvider.overrideWithValue(
+        (dives ?? _FakeDiveRepository())..count = count ?? _DiveCount(),
       ),
-      diveRepositoryProvider.overrideWithValue(dives ?? _FakeDiveRepository()),
       activeEquipmentProvider.overrideWith((ref) async => gear ?? active),
       settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
       equipmentComponentsIndexProvider.overrideWith(
@@ -178,6 +182,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     expect(find.text('Miflex XT · S/N X1'), findsOneWidget);
     expect(find.text('Miflex XT · S/N X2'), findsOneWidget);
   });
@@ -185,6 +190,7 @@ void main() {
   testWidgets('hides self, ancestors, and current parts', (tester) async {
     await tester.pumpWidget(build(_FakeComponentRepository()));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     expect(find.text('Name hose'), findsOneWidget);
     expect(find.text('Name fins'), findsOneWidget);
     expect(find.text('Name reg'), findsNothing);
@@ -198,6 +204,7 @@ void main() {
     final repo = _FakeComponentRepository();
     await tester.pumpWidget(build(repo));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     expect(find.text('Add'), findsOneWidget);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
@@ -215,13 +222,10 @@ void main() {
     final repo = _FakeComponentRepository();
     final dives = _FakeDiveRepository();
     await tester.pumpWidget(
-      build(
-        repo,
-        equipment: _FakeEquipmentRepository()..diveCount = 3,
-        dives: dives,
-      ),
+      build(repo, count: _DiveCount()..diveCount = 3, dives: dives),
     );
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Name fins'));
@@ -245,6 +249,7 @@ void main() {
         const GearPartAdded('fins'),
       ]),
     );
+    expect(dives.rewrites.single.$3, isTrue);
   });
 
   testWidgets('a failed dive count is reported, and adds nothing', (
@@ -254,11 +259,11 @@ void main() {
     await tester.pumpWidget(
       build(
         repo,
-        equipment: _FakeEquipmentRepository()
-          ..throwOnCount = StateError('no database'),
+        count: _DiveCount()..throwOnCount = StateError('no database'),
       ),
     );
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Add 1'));
@@ -279,10 +284,9 @@ void main() {
     // The saved part stops being a candidate, so leaving it selected would
     // count a row the diver can no longer see or untick.
     final repo = _FakeComponentRepository()..throwCycleAfter = 1;
-    await tester.pumpWidget(
-      build(repo, equipment: _FakeEquipmentRepository()..diveCount = 0),
-    );
+    await tester.pumpWidget(build(repo, count: _DiveCount()..diveCount = 0));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Name fins'));
@@ -304,13 +308,10 @@ void main() {
     final repo = _FakeComponentRepository()..throwCycleAfter = 1;
     final dives = _FakeDiveRepository();
     await tester.pumpWidget(
-      build(
-        repo,
-        equipment: _FakeEquipmentRepository()..diveCount = 2,
-        dives: dives,
-      ),
+      build(repo, count: _DiveCount()..diveCount = 2, dives: dives),
     );
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Name fins'));
@@ -327,17 +328,16 @@ void main() {
     );
   });
 
-  testWidgets('from now on adds without touching past dives', (tester) async {
+  testWidgets('from now on adds and rewrites planned dives only', (
+    tester,
+  ) async {
     final repo = _FakeComponentRepository();
     final dives = _FakeDiveRepository();
     await tester.pumpWidget(
-      build(
-        repo,
-        equipment: _FakeEquipmentRepository()..diveCount = 3,
-        dives: dives,
-      ),
+      build(repo, count: _DiveCount()..diveCount = 3, dives: dives),
     );
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Add 1'));
@@ -345,17 +345,18 @@ void main() {
     await tester.tap(find.text('From now on'));
     await tester.pumpAndSettle();
     expect(repo.added, [('reg', 'hose')]);
-    expect(dives.rewrites, isEmpty);
+    expect(dives.rewrites, hasLength(1));
+    expect(dives.rewrites.single.$2, const [GearPartAdded('hose')]);
+    expect(dives.rewrites.single.$3, isFalse);
   });
 
   testWidgets('cancelling the question keeps the sheet open, nothing added', (
     tester,
   ) async {
     final repo = _FakeComponentRepository();
-    await tester.pumpWidget(
-      build(repo, equipment: _FakeEquipmentRepository()..diveCount = 3),
-    );
+    await tester.pumpWidget(build(repo, count: _DiveCount()..diveCount = 3));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Add 1'));
@@ -377,11 +378,12 @@ void main() {
       build(
         repo,
         replacing: row,
-        equipment: _FakeEquipmentRepository()..diveCount = 1,
+        count: _DiveCount()..diveCount = 1,
         dives: dives,
       ),
     );
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     expect(find.text('Replace with'), findsOneWidget);
     expect(find.text('Replace'), findsOneWidget);
     await tester.tap(find.text('Name hose'));
@@ -422,6 +424,7 @@ void main() {
     expect(find.byType(CheckboxListTile), findsNothing);
     pending.complete(ComponentsIndex.fromRows(edges));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('Name hose'), findsOneWidget);
     expect(find.text('Name reg'), findsNothing);
@@ -433,6 +436,7 @@ void main() {
     final repo = _FakeComponentRepository()..throwOther = StateError('boom');
     await tester.pumpWidget(build(repo));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Add 1'));
@@ -446,6 +450,7 @@ void main() {
     final repo = _FakeComponentRepository()..gate = Completer<void>();
     await tester.pumpWidget(build(repo));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Add 1'));
@@ -495,6 +500,7 @@ void main() {
     );
     await tester.tap(find.text('PAGE BENEATH'));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Add 1'));
@@ -516,6 +522,7 @@ void main() {
     final repo = _FakeComponentRepository()..throwCycle = true;
     await tester.pumpWidget(build(repo));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
     await tester.tap(find.text('Name hose'));
     await tester.pump();
     await tester.tap(find.text('Add 1'));
@@ -533,10 +540,54 @@ void main() {
     // it follows Fins, so neither order can produce the result.
     await tester.pumpWidget(build(_FakeComponentRepository()));
     await tester.pumpAndSettle();
+    await openFoldedGroups(tester);
 
     expect(
       tester.getTopLeft(find.text('Fins')).dy,
       lessThan(tester.getTopLeft(find.text('Hose')).dy),
     );
+  });
+
+  group('foldable groups (#3364)', () {
+    Finder typeHeader(EquipmentType type) =>
+        find.byKey(ValueKey('equipment-type-fold-type:${type.name}'));
+
+    testWidgets('several types start closed', (tester) async {
+      await tester.pumpWidget(build(_FakeComponentRepository()));
+      await tester.pumpAndSettle();
+      expect(typeHeader(EquipmentType.hose), findsOneWidget);
+      expect(typeHeader(EquipmentType.fins), findsOneWidget);
+      expect(find.text('Name hose'), findsNothing);
+      expect(find.text('Name fins'), findsNothing);
+    });
+
+    testWidgets('one type starts open', (tester) async {
+      await tester.pumpWidget(
+        build(
+          _FakeComponentRepository(),
+          gear: [
+            item('reg', EquipmentType.regulator),
+            item('hose', EquipmentType.hose),
+          ],
+          index: Future.value(ComponentsIndex.empty),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Name hose'), findsOneWidget);
+    });
+
+    testWidgets('ticking then folding shows 1 of N selected', (tester) async {
+      await tester.pumpWidget(build(_FakeComponentRepository()));
+      await tester.pumpAndSettle();
+      await tester.tap(typeHeader(EquipmentType.hose));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Name hose'));
+      await tester.pumpAndSettle();
+      await tester.tap(typeHeader(EquipmentType.hose));
+      await tester.pumpAndSettle();
+      expect(find.text('1 of 1 selected'), findsOneWidget);
+      // The tick survives the fold.
+      expect(find.text('Add 1'), findsOneWidget);
+    });
   });
 }

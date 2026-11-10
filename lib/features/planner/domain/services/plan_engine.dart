@@ -24,6 +24,7 @@ import 'package:submersion/features/planner/domain/services/air_break_runs.dart'
 import 'package:submersion/features/planner/domain/services/diluent_switch_time.dart';
 import 'package:submersion/features/planner/domain/services/issue_onset.dart';
 import 'package:submersion/features/planner/domain/services/segment_chain.dart';
+import 'package:submersion/features/planner/domain/services/same_mix_share.dart';
 import 'package:submersion/features/planner/domain/services/segment_rate_split.dart';
 import 'package:submersion/features/planner/domain/services/setpoint_switch_split.dart';
 import 'package:submersion/features/planner/domain/services/tank_mod.dart';
@@ -711,15 +712,32 @@ class PlanEngine {
   /// The water and surface conditions [plan] is computed in. Shared with
   /// every caller that must charge gas at the same ambient pressure the
   /// deco schedule used (the DPV mission's per-diver gas, issue #2086).
+  /// Conditions are read as [environmentForConditions] describes.
+  static DiveEnvironment environmentFor(domain.DivePlan plan) =>
+      environmentForConditions(
+        altitude: plan.altitude,
+        waterType: plan.waterType,
+        salinityPpt: plan.salinityPpt,
+      );
+
+  /// [environmentFor] from a plan's raw conditions, for callers holding
+  /// planner state rather than a [domain.DivePlan].
   ///
-  /// Altitude <= 0 is treated as unset (legacy 1.0 bar surface), matching
-  /// the rest of the planner: a literal 0 must not switch to barometric
-  /// sea-level pressure and subtly change the deco math.
-  static DiveEnvironment environmentFor(domain.DivePlan plan) {
+  /// An unset or zero altitude keeps the legacy 1.0 bar surface: a literal 0
+  /// must not switch to barometric sea-level pressure and subtly change the
+  /// deco math. A negative altitude is a dive below sea level, which the
+  /// planner and the deco calculator both accept, so it takes its barometric
+  /// surface pressure like any other altitude (#4314). Null water type is
+  /// salt, the planner default; a custom salinity overrides either.
+  static DiveEnvironment environmentForConditions({
+    double? altitude,
+    WaterType? waterType,
+    double? salinityPpt,
+  }) {
     return DiveEnvironment.forConditions(
-      altitudeMeters: (plan.altitude ?? 0) > 0 ? plan.altitude : null,
-      waterType: plan.waterType ?? WaterType.salt,
-      salinityPpt: plan.salinityPpt,
+      altitudeMeters: altitude == 0 ? null : altitude,
+      waterType: waterType ?? WaterType.salt,
+      salinityPpt: salinityPpt,
     );
   }
 
@@ -1315,7 +1333,7 @@ class PlanEngine {
         );
       }
       depth = stop.depthMeters;
-      phase = AscentPhase.betweenStops;
+      phase = phase.afterStop(gasSwitchOnly: stop.isGasSwitchOnly);
     }
     if (depth > 0) {
       final legSeconds = policy.ascentSeconds(
@@ -1659,6 +1677,53 @@ class PlanEngine {
     String? ascentTankFor(AscentGas gas) =>
         loopSupplyTankId ?? _tankForGas(plan.tanks, gas.fO2, gas.fHe);
 
+    // The computed ascent picks a cylinder by mix; every cylinder carrying
+    // that mix shares the draw, balanced so they end at the same fraction,
+    // rather than the first taking all of it (#4138). A loop's supply is the
+    // one cylinder feeding it, so it shares nothing.
+    late final capacityById = {
+      for (final tank in plan.tanks)
+        tank.id: fillCapacityLiters(tank, config.gasModel),
+    };
+    void chargeAscent(
+      String? tankId,
+      double amount, {
+      required int atRuntime,
+      required int seconds,
+    }) {
+      final group = loopSupplyTankId == null
+          ? sameMixShareGroup(plan.tanks, tankId)
+          : const <DiveTank>[];
+      if (group.length < 2) {
+        charge(tankId, amount, atRuntime: atRuntime, seconds: seconds);
+        return;
+      }
+      final phases = balancedDrawPhases(amount, [
+        for (final tank in group)
+          (
+            id: tank.id,
+            capacityLiters: capacityById[tank.id]!,
+            usedLiters: liters[tank.id] ?? 0.0,
+          ),
+      ]);
+      // Each phase its own stretch of the draw, so a cylinder that joins once
+      // the levels meet is not timed as drawing from the start, and its
+      // reserve and gas-out markers land where it really reaches them.
+      var covered = 0.0;
+      for (var i = 0; i < phases.length; i++) {
+        final from = (covered * seconds).round();
+        covered += phases[i].fraction;
+        final to = i == phases.length - 1
+            ? seconds
+            : (covered * seconds).round();
+        for (final MapEntry(key: id, value: part) in phases[i].liters.entries) {
+          if (part > 0) {
+            charge(id, part, atRuntime: atRuntime + from, seconds: to - from);
+          }
+        }
+      }
+    }
+
     final ascentMode = loopSupplyTankId == null
         ? domain.PlanMode.oc
         : _modeFor(plan, legs.last.segment);
@@ -1721,7 +1786,7 @@ class PlanEngine {
         toDepth: to,
         seconds: seconds,
       )) {
-        charge(
+        chargeAscent(
           ascentTankFor(ascentPlan.gasForDepth(span.fromDepth)),
           ascentLiters(
             span.seconds,
@@ -1753,14 +1818,14 @@ class PlanEngine {
       );
       final stopPressure = environment.pressureAtDepth(stop.depthMeters);
       final primarySeconds = stop.durationSeconds - stop.airBreakSeconds;
-      charge(
+      chargeAscent(
         stop.tankId,
         ascentLiters(primarySeconds, stopPressure),
         atRuntime: stop.arrivalRuntimeSeconds,
         seconds: primarySeconds,
       );
       if (stop.airBreakSeconds > 0) {
-        charge(
+        chargeAscent(
           stop.airBreakTankId,
           ascentLiters(stop.airBreakSeconds, stopPressure),
           atRuntime: stop.arrivalRuntimeSeconds + primarySeconds,
@@ -1768,7 +1833,7 @@ class PlanEngine {
         );
       }
       depth = stop.depthMeters;
-      phase = AscentPhase.betweenStops;
+      phase = phase.afterStop(gasSwitchOnly: stop.isGasSwitchOnly);
     }
     if (depth > 0) {
       final legSeconds = policy.ascentSeconds(
@@ -2134,7 +2199,11 @@ class PlanEngine {
         }
       }
 
-      final end = segment.gasMix.end(deeperEnd, o2Narcotic: config.o2Narcotic);
+      final end = segment.gasMix.end(
+        deeperEnd,
+        o2Narcotic: config.o2Narcotic,
+        environment: environment,
+      );
       if (end > config.endLimitMeters) {
         issues.add(
           PlanIssue(
@@ -2145,7 +2214,11 @@ class PlanEngine {
                 '${config.endLimitMeters.toStringAsFixed(0)} m',
             atRuntime: onset(
               (d) =>
-                  segment.gasMix.end(d, o2Narcotic: config.o2Narcotic) >
+                  segment.gasMix.end(
+                    d,
+                    o2Narcotic: config.o2Narcotic,
+                    environment: environment,
+                  ) >
                   config.endLimitMeters,
             ),
             atDepth: deeperEnd,
@@ -2502,6 +2575,10 @@ class PlanEngine {
       ascentPlan,
       fromDepth: fromDepth,
       stopDepths: [for (final stop in stops) stop.depthMeters],
+      gasSwitchOnlyDepths: {
+        for (final stop in stops)
+          if (stop.isGasSwitchOnly) stop.depthMeters,
+      },
     )) {
       while (nextStop < stops.length &&
           stops[nextStop].depthMeters >= span.fromDepth) {
@@ -2834,18 +2911,19 @@ class PlanEngine {
                 _tankForGas(plan.tanks, breakFO2, breakFHe, isCcr: isCcr),
           ),
           arrivalRuntimeSeconds: arrival,
+          isGasSwitchOnly: stop.isGasSwitchOnly,
         ),
       );
       arrival += stop.durationSeconds;
       depth = stop.depthMeters;
-      phase = AscentPhase.betweenStops;
+      phase = phase.afterStop(gasSwitchOnly: stop.isGasSwitchOnly);
     }
     return stops;
   }
 
   /// Two gas fractions closer than this are the same gas for the purpose of
   /// marking a switch on the table.
-  static const double _gasFractionEpsilon = 0.0005;
+  static const double gasFractionEpsilon = 0.0005;
 
   /// The dive as table lines: the authored legs, then the computed ascent as
   /// the leg to the first stop, every stop, and the leg to the surface. Travel
@@ -2923,8 +3001,8 @@ class PlanEngine {
       final switched =
           lastFO2 == null ||
           lastFHe == null ||
-          (fO2 - lastFO2).abs() > _gasFractionEpsilon ||
-          (fHe - lastFHe).abs() > _gasFractionEpsilon;
+          (fO2 - lastFO2).abs() > gasFractionEpsilon ||
+          (fHe - lastFHe).abs() > gasFractionEpsilon;
       final pDepth = physicsDepth ?? depth;
       rows.add(
         PlanScheduleRow(
@@ -2945,10 +3023,11 @@ class PlanEngine {
           // printed at 3 m on a 7/70 diluent), so the floor is 0 m.
           endMeters: math.max(
             0.0,
-            GasMix(
-              o2: fO2 * 100,
-              he: fHe * 100,
-            ).end(pDepth, o2Narcotic: config.o2Narcotic),
+            GasMix(o2: fO2 * 100, he: fHe * 100).end(
+              pDepth,
+              o2Narcotic: config.o2Narcotic,
+              environment: environment,
+            ),
           ),
           foldedTravel: foldedTravel,
         ),
@@ -3100,7 +3179,7 @@ class PlanEngine {
             : const [],
       );
       depth = stop.depthMeters;
-      phase = AscentPhase.betweenStops;
+      phase = phase.afterStop(gasSwitchOnly: stop.isGasSwitchOnly);
     }
     if (depth > 0) {
       final travel = _policyFor(plan).ascentSeconds(
@@ -3132,23 +3211,15 @@ class PlanEngine {
     bool isCcr = false,
   }) {
     DiveTank? match;
-    for (final tank in tanks) {
+    for (final tank in sameMixTanks(tanks, fO2: fO2, fHe: fHe)) {
       if (isCcr &&
           tank.role != TankRole.diluent &&
           tank.role != TankRole.oxygenSupply) {
         continue;
       }
-      final tankFO2 = tank.gasMix.o2 / 100.0;
-      final tankFHe = tank.gasMix.he / 100.0;
-      if ((tankFO2 - fO2).abs() < 0.005 && (tankFHe - fHe).abs() < 0.005) {
-        final isDeco =
-            tank.role == TankRole.deco || tank.role == TankRole.stage;
-        if (match == null ||
-            (isDeco &&
-                match.role != TankRole.deco &&
-                match.role != TankRole.stage)) {
-          match = tank;
-        }
+      if (match == null ||
+          (isDecoClassRole(tank.role) && !isDecoClassRole(match.role))) {
+        match = tank;
       }
     }
     return match?.id;

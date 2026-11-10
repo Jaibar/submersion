@@ -6,6 +6,7 @@ import 'package:submersion/core/constants/enums.dart' hide Visibility;
 import 'package:submersion/core/constants/enums.dart' as enums;
 import 'package:submersion/core/services/export/models/currency_backup_data.dart';
 import 'package:submersion/core/services/export/models/export_service_record.dart';
+import 'package:submersion/core/services/export/uddf/uddf_sighting_amount.dart';
 import 'package:submersion/core/services/export/uddf/uddf_certification_currency.dart';
 import 'package:submersion/core/services/export/uddf/uddf_computer_tissue.dart';
 import 'package:submersion/core/services/export/uddf/uddf_visibility_range.dart';
@@ -21,6 +22,7 @@ import 'package:submersion/core/services/export/uddf/uddf_service_clock_writers.
 import 'package:submersion/core/services/export/uddf/uddf_site_classification_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_site_feature_writers.dart';
 import 'package:submersion/core/services/export/uddf/uddf_source_attribution.dart';
+import 'package:submersion/core/services/export/uddf/uddf_streamed_sections.dart';
 import 'package:submersion/core/services/export/uddf/uddf_tag_writers.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart';
 import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
@@ -299,6 +301,11 @@ class UddfExportBuilders {
             if (dive.isPlanned) {
               builder.element('isplanned', nest: 'true');
             }
+            // Draft dive flag (issue #637): restored without it, a draft
+            // would count in the totals with no readings.
+            if (dive.isDraft) {
+              builder.element('isdraft', nest: 'true');
+            }
             buildDiverRole(builder, dive);
             // Course associations, one link per course (#2515)
             for (final courseId in dive.courseIds) {
@@ -474,7 +481,7 @@ class UddfExportBuilders {
                       'sighting',
                       attributes: {
                         'speciesref': 'species_${sighting.speciesId}',
-                        'count': sighting.count.toString(),
+                        ...UddfSightingAmount.attributes(sighting.amount),
                       },
                       nest: () {
                         if (sighting.notes.isNotEmpty) {
@@ -729,6 +736,11 @@ class UddfExportBuilders {
     // The dives whose visibility range goes in the <visibilityranges> block
     // (issue #3226); a dive without one writes none.
     List<Dive>? visibilityRangeDives,
+    // A streamed backup (issue #4249) has already written the sections that
+    // carry the dives' recordings: the computer tissue, the data sources and
+    // the attribution blocks. When given, those go in as its slots, and
+    // [computerTissueDives], [dataSources] and [attributedDives] are not read.
+    UddfStreamedSections? streamed,
     // A file shared with other people carries no purchase date, price or
     // currency on its items; a backup keeps them.
     bool omitPurchaseDetails = false,
@@ -795,7 +807,8 @@ class UddfExportBuilders {
           dives: attributedDives,
           pressures: diveTankPressures,
           sources: dataSources ?? const [],
-        );
+        ) ||
+        (streamed?.hasApplicationData ?? false);
 
     if (!hasData) return;
 
@@ -1456,10 +1469,14 @@ class UddfExportBuilders {
 
             // The tissue state each dive's computer reported, which no
             // standard element holds.
-            UddfComputerTissue.write(
-              builder,
-              computerTissueDives ?? const <Dive>[],
-            );
+            if (streamed != null) {
+              streamed.writeSlot(builder, UddfStreamedSections.computerTissue);
+            } else {
+              UddfComputerTissue.write(
+                builder,
+                computerTissueDives ?? const <Dive>[],
+              );
+            }
 
             // Each band-picked dive's visibility range, which the standard
             // <visibility> element cannot hold.
@@ -1701,20 +1718,31 @@ class UddfExportBuilders {
               }
             }
 
-            // Per-source provenance for the dumps in <divecomputercontrol>.
-            buildDataSources(
-              builder,
-              dataSources ?? const [],
-              dataSourceDumps,
-              includeIdentity: includeSourceIdentity,
-            );
-            // Which of those sources recorded each tank and its pressures.
-            UddfSourceAttribution.write(
-              builder,
-              dives: attributedDives,
-              pressures: diveTankPressures,
-              sources: dataSources ?? const [],
-            );
+            if (streamed != null) {
+              for (final section in const [
+                UddfStreamedSections.dataSources,
+                UddfStreamedSections.tankSources,
+                UddfStreamedSections.tankPressureSeries,
+                UddfStreamedSections.sourceProfiles,
+              ]) {
+                streamed.writeSlot(builder, section);
+              }
+            } else {
+              // Per-source provenance for the dumps in <divecomputercontrol>.
+              buildDataSources(
+                builder,
+                dataSources ?? const [],
+                dataSourceDumps,
+                includeIdentity: includeSourceIdentity,
+              );
+              // Which of those sources recorded each tank and its pressures.
+              UddfSourceAttribution.write(
+                builder,
+                dives: attributedDives,
+                pressures: diveTankPressures,
+                sources: dataSources ?? const [],
+              );
+            }
           },
         );
       },
@@ -2030,9 +2058,10 @@ class UddfExportBuilders {
   ///
   /// Null for a dive with no tanks, whose starting gas is unknown. Naming air
   /// there was a guess that a restore turned into a cylinder the diver never
-  /// logged (issue #1878).
+  /// logged (issue #1878). A suit inflation bottle is never the starting
+  /// gas (issue #4243).
   static String? startMixId(Dive dive) {
-    final tank = dive.tanks.firstOrNull;
+    final tank = dive.breathingTanks.firstOrNull;
     return tank == null ? null : UddfGasMixWriters.mixId(tank.gasMix);
   }
 

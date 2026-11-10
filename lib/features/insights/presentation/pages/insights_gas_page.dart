@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:submersion/core/icons/mdi_icons.dart';
 import 'package:submersion/core/providers/provider.dart';
 
-import 'package:submersion/core/accessibility/semantic_helpers.dart';
 import 'package:submersion/core/constants/gas_consumption_display.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/insights/presentation/info/insights_card_info.dart';
 import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
 import 'package:submersion/features/insights/domain/focus/focus_metric.dart';
 import 'package:submersion/features/insights/domain/focus/focus_selection.dart';
@@ -15,12 +14,15 @@ import 'package:submersion/features/insights/presentation/providers/insights_pro
 import 'package:submersion/features/insights/presentation/providers/trend_chart_settings_provider.dart';
 import 'package:submersion/features/insights/presentation/widgets/ccr_gas_use_section.dart';
 import 'package:submersion/features/insights/presentation/widgets/ranking_list.dart';
+import 'package:submersion/features/insights/presentation/widgets/role_consumption_section.dart';
 import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
 import 'package:submersion/features/insights/presentation/widgets/tank_configuration_card.dart';
 import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
 import 'package:submersion/features/insights/presentation/widgets/horizontal_category_bar_chart.dart';
 import 'package:submersion/features/insights/presentation/widgets/trend_chart_section.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/info_sheet/dive_terms.dart';
+import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
 
 class InsightsGasPage extends ConsumerWidget {
   final bool embedded;
@@ -47,7 +49,7 @@ class InsightsGasPage extends ConsumerWidget {
           const SizedBox(height: 16),
           const TankConfigurationCard(),
           const SizedBox(height: 16),
-          _buildSacByRoleSection(context, ref, units),
+          const RoleConsumptionSection(),
           const SizedBox(height: 16),
           const CcrGasUseSection(),
           _buildSacRecordsSection(context, ref, units),
@@ -111,6 +113,8 @@ class InsightsGasPage extends ConsumerWidget {
       chartId: TrendChartIds.sac,
       onDiveSelected: (diveId) => context.push('/dives/$diveId'),
       title: context.l10n.insights_gas_sacTrend_title,
+      infoSummary: context.l10n.info_insights_sacTrend_summary,
+      infoTerms: gasLaneTerms(isRmv: isRmv),
       subtitle: context.l10n.insights_gas_sacTrend_subtitle,
       pointsAsync: ref.watch(sacTrendProvider),
       errorMessage: context.l10n.insights_gas_sacTrend_error,
@@ -127,6 +131,17 @@ class InsightsGasPage extends ConsumerWidget {
 
     return StatSectionCard(
       title: context.l10n.insights_gas_gasMix_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_gas_gasMix_title,
+        summary: context.l10n.info_insights_gasMix_summary,
+        terms: const [
+          DiveTerm.nitrox,
+          DiveTerm.trimix,
+          DiveTerm.gasMixCounting,
+        ],
+      ),
       subtitle: context.l10n.insights_gas_gasMix_subtitle,
       child: gasMixAsync.when(
         // Bars rather than a pie (issue #3048): a dive breathing more than
@@ -159,99 +174,6 @@ class InsightsGasPage extends ConsumerWidget {
     );
   }
 
-  Widget _buildSacByRoleSection(
-    BuildContext context,
-    WidgetRef ref,
-    UnitFormatter units,
-  ) {
-    final sacByRoleAsync = ref.watch(sacByTankRoleProvider);
-    final lane = ref.watch(insightsGasLaneProvider);
-    final isRmv = lane == GasConsumptionLane.rmv;
-    String format(double v) => isRmv ? units.formatRmv(v) : units.formatSac(v);
-
-    // Map tank role keys to display names
-    String getRoleDisplayName(String role) {
-      return switch (role) {
-        'backGas' => context.l10n.insights_gas_tankRole_backGas,
-        'twinSet' => context.l10n.insights_gas_tankRole_twinSet,
-        'stage' => context.l10n.insights_gas_tankRole_stage,
-        'deco' => context.l10n.insights_gas_tankRole_deco,
-        'bailout' => context.l10n.insights_gas_tankRole_bailout,
-        'sidemountLeft' => context.l10n.insights_gas_tankRole_sidemountLeft,
-        'sidemountRight' => context.l10n.insights_gas_tankRole_sidemountRight,
-        'pony' => context.l10n.insights_gas_tankRole_pony,
-        'diluent' => context.l10n.insights_gas_tankRole_diluent,
-        'oxygenSupply' => context.l10n.insights_gas_tankRole_oxygenSupply,
-        _ => role,
-      };
-    }
-
-    return StatSectionCard(
-      title: context.l10n.insights_gas_sacByRole_title,
-      subtitle: context.l10n.insights_gas_sacByRole_subtitle,
-      child: sacByRoleAsync.when(
-        data: (data) {
-          if (data.isEmpty) {
-            return StatEmptyState(
-              icon: MdiIcons.divingScubaTank,
-              message: context.l10n.insights_gas_sacByRole_empty,
-            );
-          }
-
-          return Column(
-            children: data.entries.map((entry) {
-              final role = entry.key;
-              final sac = entry.value;
-              final isFirst = entry.key == data.keys.first;
-              final displayName = getRoleDisplayName(role);
-              final sacValue = format(sac);
-
-              return Semantics(
-                label: statLabel(name: displayName, value: sacValue),
-                child: Padding(
-                  padding: EdgeInsets.only(top: isFirst ? 0 : 8),
-                  child: Row(
-                    children: [
-                      ExcludeSemantics(
-                        child: Icon(
-                          MdiIcons.divingScubaTank,
-                          size: 20,
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          displayName,
-                          style: Theme.of(context).textTheme.bodyMedium,
-                        ),
-                      ),
-                      Text(
-                        sacValue,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            }).toList(),
-          );
-        },
-        loading: () => const SizedBox(
-          height: 100,
-          child: Center(child: CircularProgressIndicator()),
-        ),
-        error: (_, _) => StatEmptyState(
-          icon: Icons.error_outline,
-          message: context.l10n.insights_gas_sacByRole_error,
-        ),
-      ),
-    );
-  }
-
   Widget _buildSacRecordsSection(
     BuildContext context,
     WidgetRef ref,
@@ -267,6 +189,13 @@ class InsightsGasPage extends ConsumerWidget {
 
     return StatSectionCard(
       title: context.l10n.insights_gas_sacRecords_title,
+      info: (context) => termsInfo(
+        context.l10n,
+        infoUnits(context),
+        title: context.l10n.insights_gas_sacRecords_title,
+        summary: context.l10n.info_insights_sacRecords_summary,
+        terms: gasLaneTerms(isRmv: isRmv),
+      ),
       subtitle: context.l10n.insights_gas_sacRecords_subtitle,
       // Only with records to rank: with none, Dive focus would open empty.
       trailing: hasRecords

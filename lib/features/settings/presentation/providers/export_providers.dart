@@ -18,7 +18,7 @@ import 'package:submersion/core/services/export/excel/maintenance_excel_export_s
 import 'package:submersion/core/services/export/csv/codec/csv_export_units.dart';
 import 'package:submersion/core/services/export/export_service.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dive_relations.dart';
-import 'package:submersion/core/services/export/uddf/uddf_export_profiles.dart';
+import 'package:submersion/core/services/export/uddf/uddf_dive_chunk.dart';
 import 'package:submersion/core/services/export/uddf/uddf_equipment_tag_source.dart';
 import 'package:submersion/core/services/export/uddf/uddf_site_classification_source.dart';
 import 'package:submersion/core/services/export/uddf/uddf_source_fetch.dart';
@@ -31,6 +31,7 @@ import 'package:submersion/core/services/pdf_templates/pdf_localization.dart';
 import 'package:submersion/core/services/pdf_templates/pdf_template_factory.dart';
 import 'package:submersion/features/signatures/data/services/signature_storage_service.dart';
 import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
+import 'package:submersion/features/dive_log/data/services/dive_sightings_hydration.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_computer_providers.dart';
 import 'package:submersion/features/dive_sites/domain/entities/site_feature.dart';
@@ -428,17 +429,13 @@ class ExportNotifier extends StateNotifier<ExportState>
     return (kinds: kinds, schedulesByItem: schedulesByItem);
   }
 
-  /// [_validatedDiverDives] with each dive's recorded profile, for the full
-  /// UDDF backup. The dive list leaves profiles out, and the backup writes its
-  /// samples and tank pressures from them (issue #1874); the workbook draws no
-  /// profile, so it keeps the lean list.
-  Future<List<Dive>> _validatedDiverDivesWithProfiles() async {
-    final dives = await _validatedDiverDives();
-    state = state.copyWith(
-      message: _l10n.settings_export_progress_loadingProfiles,
-    );
-    return attachMergedProfiles(_ref.read(diveRepositoryProvider), dives);
-  }
+  /// Reads the full UDDF backup's dives a run at a time as it is written:
+  /// each dive's recorded profile, tank pressures and data source rows. The
+  /// dive list leaves profiles out, and the backup writes its samples and
+  /// tank pressures from them (issue #1874); reading them all up front held
+  /// every sample of the logbook at once (issue #4249).
+  UddfDiveChunkLoader _uddfDiveChunks(UddfExportOptions options) =>
+      _ref.read(uddfDiveChunksProvider)(options);
 
   /// The active diver's dives for the full UDDF export and the workbook,
   /// through the validated diver id like their gear and check-ins. [divesProvider] follows the raw
@@ -463,7 +460,6 @@ class ExportNotifier extends StateNotifier<ExportState>
         tagRepository: _ref.read(tagRepositoryProvider),
         diveRepository: _ref.read(diveRepositoryProvider),
         diveComputerRepository: _ref.read(diveComputerRepositoryProvider),
-        tankPressureRepository: _ref.read(tankPressureRepositoryProvider),
         dives: dives,
       );
 
@@ -642,12 +638,20 @@ class ExportNotifier extends StateNotifier<ExportState>
     List<Dive> dives, {
     required DateTime generatedAt,
   }) async {
+    // The detailed logbook prints marine life, which the dive list does not
+    // load (issue #4337 follow-up).
+    final exported = exportOptions.template == PdfTemplate.detailed
+        ? await hydrateMarineSightings(
+            dives,
+            repository: _ref.read(speciesRepositoryProvider),
+          )
+        : dives;
     // Load signatures for all dives
     state = state.copyWith(
       message: _l10n.settings_export_progress_loadingSignatures,
     );
     final diveSignatures = await SignatureStorageService()
-        .getSignaturesForDives([for (final dive in dives) dive.id]);
+        .getSignaturesForDives([for (final dive in exported) dive.id]);
 
     // Load certifications if requested
     List<Certification>? certifications;
@@ -677,7 +681,7 @@ class ExportNotifier extends StateNotifier<ExportState>
       // in memory at once, which is exactly what the thinning exists to avoid.
       const chunkSize = 50;
       final repository = _ref.read(diveRepositoryProvider);
-      final ids = dives.map((d) => d.id).toList();
+      final ids = exported.map((d) => d.id).toList();
       final thinned = <String, PdfProfileSeries>{};
 
       for (final chunk in seriesIdChunks(ids, size: chunkSize)) {
@@ -718,7 +722,7 @@ class ExportNotifier extends StateNotifier<ExportState>
 
     return builder.buildPdf(
       generatedAt: generatedAt,
-      dives: dives,
+      dives: exported,
       // The logbook is a document a human reads, so gear follows the diver's
       // arrangement (#1486, #1576).
       gearArrangement: gearArrangement,
@@ -761,7 +765,7 @@ class ExportNotifier extends StateNotifier<ExportState>
       message: _l10n.settings_export_progress_uddf,
     );
     try {
-      final dives = await _validatedDiverDivesWithProfiles();
+      final dives = await _validatedDiverDives();
 
       // Collect all data for comprehensive export
       state = state.copyWith(
@@ -881,11 +885,7 @@ class ExportNotifier extends StateNotifier<ExportState>
         diveWeights: relations.diveWeights,
         diveGasSwitches: relations.diveGasSwitches,
         diveProfileEvents: relations.diveProfileEvents,
-        diveTankPressures: relations.diveTankPressures,
-        dataSources: await _ref.read(uddfSourceFetchProvider)(
-          dives.map((d) => d.id).toList(growable: false),
-          exportOptions,
-        ),
+        loadDiveChunk: _uddfDiveChunks(exportOptions),
         options: exportOptions,
       );
       state = state.copyWith(
@@ -1527,7 +1527,7 @@ class ExportNotifier extends StateNotifier<ExportState>
       message: _l10n.settings_export_progress_preparingUddf,
     );
     try {
-      final dives = await _validatedDiverDivesWithProfiles();
+      final dives = await _validatedDiverDives();
 
       // Collect all data for comprehensive export
       state = state.copyWith(
@@ -1645,11 +1645,7 @@ class ExportNotifier extends StateNotifier<ExportState>
         diveWeights: relations.diveWeights,
         diveGasSwitches: relations.diveGasSwitches,
         diveProfileEvents: relations.diveProfileEvents,
-        diveTankPressures: relations.diveTankPressures,
-        dataSources: await _ref.read(uddfSourceFetchProvider)(
-          dives.map((d) => d.id).toList(growable: false),
-          exportOptions,
-        ),
+        loadDiveChunk: _uddfDiveChunks(exportOptions),
         options: exportOptions,
       );
 
