@@ -1,15 +1,15 @@
 name: Private upstream sync
 
-# Fork-only. Every 3 days (or by hand from the Actions tab) merges
+# Fork-only. Every Monday (or by hand from the Actions tab) merges
 # submersion-app/submersion main into custom/v1.8 and, when something new came
 # in, lets private-test.yml build the Windows zip and Android APK.
 #
 # - Read-only towards upstream: it only fetches. Everything is pushed to THIS
 #   fork's custom/v1.8.
 # - A merge conflict fails the job (nothing is pushed, the merge is aborted);
-#   GitHub emails the failure. Resolve it by asking Claude to update the branch.
+#   GitHub emails the failure. Resolve it by merging upstream/main by hand.
 # - Scheduled workflows only run from the fork's DEFAULT branch, so this only
-#   fires nightly once custom/v1.8 is set as the fork's default branch.
+#   fires on schedule once custom/v1.8 is set as the fork's default branch.
 # - Pushing with the built-in token can not touch .github/workflows and does not
 #   start other workflows. With a fork secret SYNC_TOKEN (a fine-grained token
 #   with Contents + Workflows write on this fork) both limits go away; without
@@ -17,7 +17,7 @@ name: Private upstream sync
 
 on:
   schedule:
-    - cron: '0 3 */3 * *'
+    - cron: '0 3 * * 1'
   workflow_dispatch:
 
 permissions:
