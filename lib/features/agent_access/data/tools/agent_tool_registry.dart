@@ -50,8 +50,9 @@ class AgentToolRegistry {
 
   /// Profiles, query, every record, the SQL window for whatever those miss,
   /// the planner, and the write tools. [followOf] reads a logged dive as a
-  /// plan following it does, and [planCaveat] is the planner's caveat in
-  /// the app's language.
+  /// plan following it does, [planCaveat] is the planner's caveat in the
+  /// app's language, and [prepareQueryCaches] brings the caches of engine
+  /// verdicts a query reads up to date before it runs.
   static AgentToolRegistry standard({
     required DiverContextLoader loader,
     required DiverRepository divers,
@@ -61,12 +62,18 @@ class AgentToolRegistry {
     required AgentWriteServices writes,
     required SeriesFollowReader followOf,
     required String Function() planCaveat,
+    Future<void> Function(String diverId, Set<String> tables)?
+    prepareQueryCaches,
   }) {
     final catalog = RecordCatalog(records);
     return AgentToolRegistry(
       tools: [
         ListDiversTool(loader: loader, divers: divers, settings: settings),
-        QueryTool(loader: loader, catalog: catalog),
+        QueryTool(
+          loader: loader,
+          catalog: catalog,
+          prepareCaches: prepareQueryCaches,
+        ),
         GetRecordsTool(loader: loader, catalog: catalog),
         ListRecordsTool(loader: loader, catalog: catalog),
         SqlQueryTool(runner: sql),
@@ -74,6 +81,7 @@ class AgentToolRegistry {
           loader: loader,
           settings: settings,
           followOf: followOf,
+          records: records,
           caveat: planCaveat,
         ),
         PreviewChangesTool(
@@ -83,11 +91,7 @@ class AgentToolRegistry {
           writes: writes.catalog,
         ),
         ApplyChangesTool(store: writes.plans, applier: writes.applier),
-        RevertOperationTool(
-          revert: writes.revert,
-          changeLog: writes.changeLog,
-          rearmDocuments: writes.rearmDocuments,
-        ),
+        RevertOperationTool(revert: writes.revert, changeLog: writes.changeLog),
       ],
       resources: [
         QueryLanguageResource(),

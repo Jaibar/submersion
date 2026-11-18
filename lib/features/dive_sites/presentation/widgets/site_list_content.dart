@@ -47,6 +47,8 @@ import 'package:submersion/features/dive_sites/presentation/providers/site_provi
 import 'package:submersion/features/dive_sites/presentation/utils/site_group_by_display.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_group_by_selector.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_picker/grouped_site_list_view.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/catalogue_gap_notice.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/search_built_in_sites_row.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_active_filters_bar.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/compact_site_list_tile.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/dense_site_list_tile.dart';
@@ -878,6 +880,7 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
       return Column(
         children: [
           _buildSearchHeader(filter),
+          if (!filter.hasActiveFilters) const CatalogueGapNotice(),
           if (filter.hasActiveFilters) SiteActiveFiltersBar(filter: filter),
           Expanded(child: listContent),
         ],
@@ -975,6 +978,8 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
                               mode: SiteLocationLookupMode.fillMissing,
                             ),
                           );
+                        } else if (value == kCatalogueReviewMenuValue) {
+                          context.push(kCatalogueReviewRoute);
                         } else if (value == 'refresh_place_names') {
                           unawaited(
                             showSiteLocationBackfillFlow(
@@ -1043,6 +1048,7 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
                               contentPadding: EdgeInsets.zero,
                             ),
                           ),
+                          catalogueReviewMenuItem(context),
                         ];
                       },
                     ),
@@ -1127,6 +1133,7 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
 
         return Column(
           children: [
+            if (!filter.hasActiveFilters) const CatalogueGapNotice(),
             if (filter.hasActiveFilters) SiteActiveFiltersBar(filter: filter),
             Expanded(
               child: EntityTableView<SiteWithCount, SiteField>(
@@ -1187,6 +1194,8 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
     subject: QuerySubject.sites,
     root: siteQueryEntity,
     query: filter.query,
+    // The typed words can also be taken to the built-in catalogue.
+    extraRows: sitesSearchExtraRows,
     onChanged: (query) {
       final notifier = ref.read(siteFilterProvider.notifier);
       // Read at write time, so a change made during the debounce survives.
@@ -1281,6 +1290,8 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
                     mode: SiteLocationLookupMode.fillMissing,
                   ),
                 );
+              } else if (value == kCatalogueReviewMenuValue) {
+                context.push(kCatalogueReviewRoute);
               } else if (value == 'refresh_place_names') {
                 unawaited(
                   showSiteLocationBackfillFlow(
@@ -1341,6 +1352,7 @@ class _SiteListContentState extends ConsumerState<SiteListContent> {
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
+                catalogueReviewMenuItem(context),
               ];
             },
           ),

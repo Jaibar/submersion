@@ -4,10 +4,12 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:submersion/core/app/app_exit_guard.dart';
 import 'package:submersion/features/rules/presentation/run_rules_flow.dart';
 import 'package:submersion/features/rules/domain/rule_subject.dart';
 import 'package:submersion/core/router/section_navigation.dart';
 import 'package:submersion/core/router/pushed_route.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/deco_analysis_progress.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/search/dive_search_action.dart';
 import 'package:submersion/core/services/export/csv/codec/csv_export_units.dart';
 import 'package:submersion/core/services/export/uddf/uddf_dives_extras.dart';
@@ -204,6 +206,10 @@ class DiveListContent extends ConsumerStatefulWidget {
 }
 
 class _DiveListContentState extends ConsumerState<DiveListContent> {
+  /// Moved when opening a row was refused (issue #4527), so the keyboard
+  /// cursor goes back to the dive that stayed open.
+  final _refusedOpen = ValueNotifier<int>(0);
+
   /// The bulk-selection state machine for this list: the page's when it
   /// passes one, otherwise this list's own.
   ///
@@ -308,6 +314,7 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
 
   @override
   void dispose() {
+    _refusedOpen.dispose();
     _positionRestorer.dispose();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -1095,8 +1102,9 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
           diver = await ref.read(currentDiverProvider.future);
           // The portrait travels with the diver: passing one without the
           // other leaves the Detailed front matter on its placeholder frame.
-          diverPhoto = await ref.read(diverPhotoLoaderProvider)(
-            diver?.photoPath,
+          diverPhoto = await diverPortrait(
+            diver,
+            ref.read(diverPhotoLoaderProvider),
           );
         } catch (_) {
           // Keep the export going without the personalization.
@@ -1321,7 +1329,18 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
   /// Opens [dive] the way a list tap does outside selection mode. The search
   /// row's jump list calls this directly: its rows may not be in the list
   /// at all, so selecting them would do nothing visible.
-  void _openDive(DiveSummary dive) {
+  Future<void> _openDive(DiveSummary dive) async {
+    // Opening another dive leaves the one the pane shows: unsaved changes
+    // there are asked about before the highlight moves (issue #4527). The
+    // dive already open leaves nothing behind.
+    if (dive.id != widget.selectedId) {
+      final left = await ref.read(appExitGuardProvider).mayLeave();
+      if (!mounted) return;
+      if (!left) {
+        _refusedOpen.value++;
+        return;
+      }
+    }
     // In map mode, call onItemTapForMap instead of navigating
     if (widget.isMapMode && widget.onItemTapForMap != null) {
       // Also update the visual selection highlight
@@ -1481,7 +1500,9 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                     paginatedState,
                     filter.hasActiveFilters,
                   ),
-            loading: () => const Center(child: CircularProgressIndicator()),
+            // A deco filter waits for the dive analysis, which says how far
+            // it has got (#4461).
+            loading: () => const DecoAnalysisProgress(),
             error: (error, stack) => _buildErrorState(context, error),
           );
           // The search row sits OUTSIDE the loading and empty states, so a
@@ -2100,7 +2121,7 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
     final diveTypeLabelResolver = watchDiveTypeLabelResolver(ref, context.l10n);
 
     return divesAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
+      loading: () => const DecoAnalysisProgress(),
       error: (e, s) => _buildErrorState(context, e),
       data: (dives) {
         if (dives.isEmpty) {
@@ -2301,6 +2322,7 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
           Expanded(
             child: KeyboardListNavigator(
               keys: navStops.keys,
+              resync: _refusedOpen,
               currentKey:
                   widget.selectedId ?? ref.watch(highlightedDiveIdProvider),
               onLoadRest: _loadRestOfList,
@@ -2650,7 +2672,11 @@ class _DiveListContentState extends ConsumerState<DiveListContent> {
                 onLogManually: () {
                   if (ResponsiveBreakpoints.isMasterDetail(context)) {
                     final routerState = GoRouterState.of(context);
-                    context.goInPlace('${routerState.uri.path}?mode=new');
+                    // A filter can empty the list while the pane still
+                    // shows a dive: its unsaved work is asked about first.
+                    context.goInPlaceGuarded(
+                      '${routerState.uri.path}?mode=new',
+                    );
                   } else {
                     context.push('/dives/new');
                   }

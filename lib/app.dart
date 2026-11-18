@@ -12,6 +12,7 @@ import 'package:submersion/features/dive_import/presentation/health_auto_import_
 import 'package:submersion/features/dive_log/data/services/derived_metrics_scheduler.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/stale_open_draft_prompt.dart';
 import 'package:submersion/features/documents/presentation/providers/equipment_file_conversion_provider.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_catalogue_providers.dart';
 import 'package:submersion/features/equipment/data/services/sensor_summary_scheduler.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/core/app/app_exit.dart';
@@ -26,6 +27,7 @@ import 'package:submersion/core/theme/display_zoom.dart';
 import 'package:submersion/core/theme/display_zoom_shortcuts.dart';
 import 'package:submersion/core/router/app_router.dart';
 import 'package:submersion/features/gps_log/presentation/dive_mark_action_bridge.dart';
+import 'package:submersion/features/notifications/presentation/providers/notification_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/storage_gc_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/display_zoom_menu_channel.dart';
 import 'package:submersion/features/settings/presentation/providers/display_zoom_provider.dart';
@@ -44,13 +46,14 @@ import 'package:submersion/features/cylinder_passports/presentation/services/pas
 import 'package:submersion/features/cylinder_passports/presentation/services/recent_passport_tags.dart';
 import 'package:submersion/features/cylinder_passports/presentation/utils/scan_cylinder_tag.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
-import 'package:submersion/features/query/presentation/providers/service_status_keeper.dart';
+import 'package:submersion/features/query/presentation/providers/query_caches_keeper.dart';
 import 'package:submersion/features/media_store/presentation/providers/media_origin_republish_provider.dart';
 import 'package:submersion/features/nav_track/presentation/pages/nav_track_import_review_page.dart';
 import 'package:submersion/core/services/suunto_cloud/suunto_json_file_reader.dart';
 import 'package:submersion/features/import_wizard/presentation/suunto_file_import_navigation.dart';
 import 'package:submersion/features/media_store/presentation/providers/media_store_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+import 'package:submersion/features/species_id/presentation/providers/species_id_providers.dart';
 import 'package:submersion/features/agent_access/presentation/providers/agent_access_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/nearby_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/sync_providers.dart';
@@ -72,6 +75,7 @@ import 'package:submersion/features/import_wizard/presentation/widgets/backgroun
 import 'package:submersion/features/demo_mode/data/demo_mode_gate.dart';
 import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
 import 'package:submersion/features/demo_mode/presentation/demo_seal_guard.dart';
+import 'package:submersion/features/demo_mode/presentation/widgets/demo_mode_ribbon.dart';
 
 const Locale _defaultFallbackLocale = Locale('en');
 const Set<String> _invalidSystemLocaleLanguageCodes = {'c', 'posix'};
@@ -190,11 +194,14 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
       _hasDivers = (next.value ?? 0) > 0;
       _updateNavigationReady();
     }, fireImmediately: true);
-    // The serviceDue query field reads a cache of the service engine's
-    // verdicts, and any list can reach it through a relation (a dive's
-    // gear.serviceDue). The keeper runs the cache writer while a filter
-    // names it, and leaves the clocks idle otherwise (#2365).
-    ref.listenManual(serviceStatusKeeperProvider, (_, _) {});
+    // The serviceDue and deco query fields read caches of engine verdicts
+    // (the service clocks, the dive analysis), and any list can reach them
+    // through a relation. The keeper runs each cache writer while a filter
+    // names its field, and leaves the engines idle otherwise (#2365, #4461).
+    ref.listenManual(queryCachesKeeperProvider, (_, _) {});
+    // A delete that takes a diver's current medical clearance, on any path,
+    // hands its reminders back to the one it superseded (#4609).
+    ref.listenManual(clearanceDeleteRearmProvider, (_, _) {});
     // Nearby Bluetooth sync (issue #3731): the switch re-decides whether the
     // radio is on.
     ref.listenManual<bool>(
@@ -213,6 +220,12 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
       _resumeMediaTransfers();
       _republishOwnedMedia();
       _convertGearFiles();
+      _importSiteCatalogue();
+      unawaited(
+        sweepIdentificationOrphansAtLaunch(
+          ref.read(identificationCleanupProvider),
+        ),
+      );
       _fileShareHandler.initialize();
       _passportLinks.start();
       _buddyCardLinks.start();
@@ -334,6 +347,14 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
   /// callback later still.
   void _resumeMediaTransfers() {
     unawaited(ref.read(mediaTransferResumeProvider)());
+  }
+
+  /// Loads the bundled site catalogue into the local cache when its version
+  /// changed (once per app update). Not awaited: built-in sites appear in
+  /// the picker and on the map when it finishes. Same database timing
+  /// argument as [_resumeMediaTransfers].
+  void _importSiteCatalogue() {
+    unawaited(ref.read(siteCatalogueImportProvider)());
   }
 
   /// Runs the storage cleanup coordinator (issue #3396) once [syncs] end:
@@ -796,35 +817,42 @@ class _SubmersionAppState extends ConsumerState<SubmersionApp>
         // outside the zoom scope so the barrier stays a full-screen, unscaled
         // overlay. LockBarrier sits OUTSIDE RestoreBarrier so the App Lock
         // re-lock overlay covers restore UI too.
+        // The demo ribbon goes over every screen, dialogs included, and
+        // outside the zoom scope so it keeps its size in the corner. The lock
+        // overlay still covers it.
         final app = LockBarrier(
-          child: RestoreBarrier(
-            child: Consumer(
-              builder: (context, ref, _) {
-                // Watched here rather than in build() so dragging the zoom
-                // slider rebuilds only this subtree, not all of MaterialApp.
-                final zoom = ref.watch(displayZoomNotifierProvider);
-                final notifier = ref.read(displayZoomNotifierProvider.notifier);
-                final useMeta =
-                    defaultTargetPlatform == TargetPlatform.macOS ||
-                    defaultTargetPlatform == TargetPlatform.iOS;
+          child: DemoModeRibbon(
+            child: RestoreBarrier(
+              child: Consumer(
+                builder: (context, ref, _) {
+                  // Watched here rather than in build() so dragging the zoom
+                  // slider rebuilds only this subtree, not all of MaterialApp.
+                  final zoom = ref.watch(displayZoomNotifierProvider);
+                  final notifier = ref.read(
+                    displayZoomNotifierProvider.notifier,
+                  );
+                  final useMeta =
+                      defaultTargetPlatform == TargetPlatform.macOS ||
+                      defaultTargetPlatform == TargetPlatform.iOS;
 
-                return CallbackShortcuts(
-                  bindings: displayZoomShortcuts(
-                    onZoomIn: () => notifier.stepBy(1),
-                    onZoomOut: () => notifier.stepBy(-1),
-                    onReset: notifier.reset,
-                    useMetaModifier: useMeta,
-                  ),
-                  // CallbackShortcuts only fires for keystrokes inside its
-                  // focused subtree, and nothing has focus on desktop
-                  // cold-start, so the shortcuts would otherwise be dead until
-                  // the user clicks something.
-                  child: Focus(
-                    autofocus: true,
-                    child: DisplayZoomScope(zoom: zoom, child: child!),
-                  ),
-                );
-              },
+                  return CallbackShortcuts(
+                    bindings: displayZoomShortcuts(
+                      onZoomIn: () => notifier.stepBy(1),
+                      onZoomOut: () => notifier.stepBy(-1),
+                      onReset: notifier.reset,
+                      useMetaModifier: useMeta,
+                    ),
+                    // CallbackShortcuts only fires for keystrokes inside its
+                    // focused subtree, and nothing has focus on desktop
+                    // cold-start, so the shortcuts would otherwise be dead until
+                    // the user clicks something.
+                    child: Focus(
+                      autofocus: true,
+                      child: DisplayZoomScope(zoom: zoom, child: child!),
+                    ),
+                  );
+                },
+              ),
             ),
           ),
         );

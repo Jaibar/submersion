@@ -34,6 +34,9 @@ Map<String, Object?> diverRecordDocument(Diver d) => {
   'prior_dive_count': d.priorDiveCount,
   'prior_dive_time_s': d.priorDiveTimeSeconds,
   'diving_since_date': calendarDate(d.divingSince),
+  // Used only to estimate body fat for the weight prediction (issue #4525).
+  'sex': d.sex?.name,
+  'birth_year': d.birthYear,
 };
 
 Map<String, Object?> _contact(EmergencyContact c) => {
@@ -71,6 +74,9 @@ const kSettingUnitKeys = <String, String>{
   'planner_best_mix_end_meters': 'planner_best_mix_end_m',
   'planner_deviation_depth_delta': 'planner_deviation_depth_delta_m',
   'planner_walk_speed_mps': 'planner_walk_speed_m_s',
+  'planner_scr_injection_rate': 'planner_scr_injection_rate_l_min',
+  'planner_scr_vo2': 'planner_scr_vo2_l_min',
+  'planner_pscr_vo2': 'planner_pscr_vo2_l_min',
   'planner_reserve_pressure': 'planner_reserve_pressure_bar',
 };
 

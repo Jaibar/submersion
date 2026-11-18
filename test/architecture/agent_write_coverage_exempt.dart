@@ -42,6 +42,14 @@ final exempt = <String, String>{
       'a cache',
   'lib/features/insights/data/repositories/deco_classification_cache.dart:*':
       'a cache',
+  'lib/features/insights/data/repositories/vertical_distance_cache.dart:*':
+      'a cache',
+  'lib/features/insights/data/repositories/dive_deco_status_repository.dart:*':
+      'verdicts derived from dive analysis, recomputed from the dives',
+  'lib/features/species_id/data/repositories/media_identification_repository.dart:*':
+      'what the on-device model found; derived by the app, never the diver',
+  'lib/features/species_id/data/repositories/identification_embedding_repository.dart:*':
+      'a cache',
   'lib/features/insights/data/repositories/observation_dismissals_repository.dart:*':
       'the state of derived findings, recomputed from records',
   'lib/features/data_quality/data/repositories/quality_findings_repository.dart:*':
@@ -107,6 +115,11 @@ final exempt = <String, String>{
     'lib/features/dive_log/data/repositories/dive_computer_repository_impl.dart:clearEventsForDive',
     'lib/features/dive_log/data/repositories/dive_computer_repository_impl.dart:clearSourceAndProfiles',
     'lib/features/dive_log/data/repositories/dive_computer_repository_impl.dart:insertTanks',
+    // Restores the computer links a deleted computer's downloads lost, from
+    // their serial and model snapshots (issue #4465).
+    'lib/features/dive_log/data/repositories/dive_computer_repository_impl.dart:relinkOrphanedSources',
+    'lib/features/dive_log/data/repositories/tank_computer_links.dart:setTankComputerLinks',
+    'lib/features/dive_log/data/repositories/tank_pressure_series_repository.dart:relinkSources',
     'lib/features/dive_log/data/repositories/dive_computer_repository_impl.dart:updateLastDownload',
     'lib/features/dive_log/data/repositories/dive_computer_repository_impl.dart:updateLastFingerprint',
     'lib/features/dive_log/data/repositories/dive_fill_if_empty_repository.dart:addCustomFieldsIfMissing',
@@ -129,6 +142,7 @@ final exempt = <String, String>{
     'lib/features/dive_log/data/repositories/stored_tank_serial_fill.dart:writeStoredTankSerial',
     'lib/features/dive_sites/data/repositories/site_repository_impl.dart:applyImportedMetadata',
     'lib/features/dive_sites/data/repositories/site_repository_impl.dart:applyLocationDetails',
+    'lib/features/dive_sites/data/repositories/site_repository_impl.dart:fillSiteAltitudeIfEmpty',
     'lib/features/dive_sites/data/repositories/site_repository_impl.dart:updateSiteAltitude',
     'lib/features/dive_sites/data/repositories/site_repository_impl.dart:updateSiteCoordinates',
     'lib/features/dive_sites/data/repositories/site_repository_impl.dart:updateSiteWithImportedMetadata',
@@ -165,6 +179,20 @@ final exempt = <String, String>{
   ])
     method:
         'written by an import, a download, a device or the app\'s own derivation, not a diver\'s edit',
+  // A site's editing sitting stamps its library edit once it has committed
+  // (issue #4527): the same stamp updateSite makes after its own write.
+  'lib/features/dive_sites/data/repositories/'
+          'site_repository_impl.dart:stampLibraryEdit':
+      'shared library bookkeeping after a site write, which sites covers '
+      'through updateSite; it changes no record of the diver\'s diving',
+  // Filling an existing site from the built-in catalogue (issue #4514).
+  for (final method in const ['applyFill', 'updateAnswers'])
+    'lib/features/dive_sites/data/repositories/'
+            'site_catalogue_fill_repository.dart:$method':
+        'a shortcut that fills a site\'s empty fields, which sites covers '
+        'as fields through updateSite; the catalogue link and the answers '
+        'it also writes are the app\'s bookkeeping about a built-in '
+        'record, not a record of the diver\'s diving',
   // Bulk shortcuts.
   for (final method in const [
     'lib/features/buddies/data/repositories/buddy_merge_repository.dart:bulkDeleteBuddies',
@@ -187,6 +215,7 @@ final exempt = <String, String>{
     'lib/features/dive_log/data/repositories/dive_repository_impl.dart:setSingleWeightAmount',
     'lib/features/dive_log/data/repositories/dive_repository_impl.dart:setTankRoles',
     'lib/features/dive_log/data/repositories/dive_repository_impl.dart:updateTankRecordPressures',
+    'lib/features/dive_log/data/repositories/duplicate_cylinder_repository.dart:mergeInto',
     'lib/features/dive_sites/data/repositories/site_repository_impl.dart:bulkDeleteSites',
     'lib/features/marine_life/data/repositories/species_repository.dart:bulkAddSightings',
     'lib/features/marine_life/data/repositories/species_repository.dart:bulkReplaceSightings',
@@ -270,6 +299,20 @@ final exempt = <String, String>{
   ])
     method:
         'an inner step of another write, run by the repository an agent write calls',
+  'lib/features/dive_log/data/repositories/dive_repository_impl.dart:unlinkSetFromLoggedDives':
+      'the set editor\'s "From now on" answer: logged dives keep their gear '
+      'and stop naming the set (issue #4500); an agent\'s set edit leaves '
+      'logged dives alone (issue #4283)',
+  'lib/features/documents/data/repositories/document_repository.dart:setDiveOwner':
+      'the dive page files documents under the dive at Save (issue #4527): '
+      'one added there was just created, as an agent creates one with '
+      'owner_kind dive; owner_kind and owner_id are create-only for an '
+      'agent, so moving an existing document between owners is done in '
+      'the app',
+  'lib/features/documents/data/repositories/document_repository.dart:setOwner':
+      'a record page (a dive, a site) files documents under the record at '
+      'Save (issue #4527, phase 2), as setDiveOwner, which calls it; '
+      'owner_kind and owner_id are create-only for an agent',
   // Planned dives.
   for (final method in const [
     'lib/features/dive_log/data/repositories/dive_repository_impl.dart:createPlannedDive',
@@ -398,6 +441,9 @@ final exempt = <String, String>{
     'lib/features/media/data/repositories/media_repository.dart:unlinkFromEquipment',
     'lib/features/media/data/repositories/media_repository.dart:unlinkFromSite',
     'lib/features/media/data/repositories/media_repository.dart:updateMedia',
+    // A gear item's cover photo is picked from its photos (issue #3355).
+    'lib/features/equipment/data/repositories/gear_photo_repository.dart:clearCoversNaming',
+    'lib/features/equipment/data/repositories/gear_photo_repository.dart:setCover',
   ])
     method:
         'media is attached, linked to gear or a site, and captioned in the app; an agent edits what the media writer lists',

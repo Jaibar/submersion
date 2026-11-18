@@ -47,5 +47,28 @@ extension BeforeOpenSettingsColumns on AppDatabase {
 
     // v351 backstop: diver_settings.equipment_collapsed_groups (issue #4184).
     await _assertEquipmentCollapsedGroupsColumn();
+
+    // v359 backstop: diver_settings.pin_profile_on_scroll (issue #4423).
+    await _assertPinProfileOnScrollColumn();
+
+    // v360 backstop: diver_settings.show_country_flags (issue #4426).
+    await _assertShowCountryFlagsColumn();
+
+    // v365 backstop: diver_settings.recent_equipment_colors (issue #4537).
+    await _assertRecentEquipmentColorsColumn();
+
+    // v366 backstop: diver_settings.default_show_counterdiffusion (issue
+    // #4530).
+    await _assertDefaultShowCounterdiffusionColumn();
+
+    // v370 backstop: diver_settings.default_show_buoyancy (issue #4593).
+    await _assertDefaultShowBuoyancyColumn();
+
+    // v371 backstop: diver_settings.favourite_dive_type_ids (issue #4413).
+    await _assertFavouriteDiveTypeIdsColumn();
+
+    // v374 backstop: the planner's SCR injection rate and VO2 columns on
+    // dive_plans and diver_settings (issue #4660).
+    await _assertScrFlowColumns();
   }
 }

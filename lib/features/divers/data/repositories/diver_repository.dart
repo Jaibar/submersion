@@ -44,6 +44,7 @@ import 'package:submersion/features/documents/domain/document_ids.dart';
 import 'package:submersion/features/documents/domain/entities/document.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_location_center_links.dart';
 import 'package:submersion/features/trips/data/repositories/side_trip_links.dart';
+import 'package:submersion/core/constants/enums.dart';
 
 /// Result returned by [DiverRepository.deleteDiverWithReassignment].
 ///
@@ -307,6 +308,8 @@ class DiverRepository {
                 divingSince: Value(diver.divingSince?.year),
                 socialHandle: Value(diver.socialHandle),
                 buddyCardShare: Value(diver.buddyCardShare),
+                sex: Value(diver.sex?.name),
+                birthYear: Value(diver.birthYear),
               ),
             );
 
@@ -408,6 +411,8 @@ class DiverRepository {
           divingSince: Value(diver.divingSince?.year),
           socialHandle: Value(diver.socialHandle),
           buddyCardShare: Value(diver.buddyCardShare),
+          sex: Value(diver.sex?.name),
+          birthYear: Value(diver.birthYear),
         ),
       );
       await _syncRepository.markRecordPending(
@@ -1182,7 +1187,8 @@ class DiverRepository {
   }
 
   /// Overlays each diver's insurance (their primary insurance document) and
-  /// medical clearance (their latest clearance document's expiry).
+  /// medical clearance (the expiry of their current clearance document, the
+  /// one that reminds).
   Future<List<domain.Diver>> _withDocuments(
     List<domain.Diver> divers, {
     String? diverId,
@@ -1241,6 +1247,9 @@ class DiverRepository {
       divingSince: row.divingSince != null ? DateTime(row.divingSince!) : null,
       socialHandle: row.socialHandle,
       buddyCardShare: row.buddyCardShare,
+      // A name a newer build wrote reads as not given.
+      sex: DiverSex.values.asNameMap()[row.sex],
+      birthYear: row.birthYear,
     );
   }
 }

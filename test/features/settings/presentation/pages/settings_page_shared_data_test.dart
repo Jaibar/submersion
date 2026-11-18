@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric.dart';
 import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric_color_overrides.dart';
+import 'package:submersion/features/dive_types/domain/favourite_dive_types.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/features/insights/domain/trend_gap_threshold.dart';
@@ -263,6 +264,17 @@ class _MockSettingsNotifier extends StateNotifier<AppSettings>
         catalog,
         id,
         hidden,
+      ),
+    );
+  }
+
+  @override
+  Future<void> setDiveTypeFavourite(String id, bool favourite) async {
+    state = state.copyWith(
+      favouriteDiveTypeIds: withDiveTypeFavourite(
+        state.favouriteDiveTypeIds,
+        id,
+        favourite,
       ),
     );
   }
@@ -594,6 +606,15 @@ class _MockSettingsNotifier extends StateNotifier<AppSettings>
   Future<void> setPlannerWalkSpeedMps(double value) async =>
       state = state.copyWith(plannerWalkSpeedMps: value);
   @override
+  Future<void> setPlannerScrInjectionRate(double value) async =>
+      state = state.copyWith(plannerScrInjectionRate: value);
+  @override
+  Future<void> setPlannerScrVo2(double value) async =>
+      state = state.copyWith(plannerScrVo2: value);
+  @override
+  Future<void> setPlannerPscrVo2(double value) async =>
+      state = state.copyWith(plannerPscrVo2: value);
+  @override
   Future<void> setPlannerTurnPressureRule(
     domain.TurnPressureRule? value,
   ) async => state = state.copyWith(
@@ -767,6 +788,9 @@ class _MockSettingsNotifier extends StateNotifier<AppSettings>
   Future<void> setShowMapBackgroundOnSiteCards(bool value) async =>
       state = state.copyWith(showMapBackgroundOnSiteCards: value);
   @override
+  Future<void> setShowCountryFlags(bool value) async =>
+      state = state.copyWith(showCountryFlags: value);
+  @override
   Future<void> setTissueColorScheme(TissueColorScheme scheme) async =>
       state = state.copyWith(tissueColorScheme: scheme);
   @override
@@ -775,6 +799,9 @@ class _MockSettingsNotifier extends StateNotifier<AppSettings>
   @override
   Future<void> setShowMaxDepthMarker(bool value) async =>
       state = state.copyWith(showMaxDepthMarker: value);
+  @override
+  Future<void> setPinProfileOnScroll(bool value) async =>
+      state = state.copyWith(pinProfileOnScroll: value);
   @override
   Future<void> setShowPressureThresholdMarkers(bool value) async =>
       state = state.copyWith(showPressureThresholdMarkers: value);
@@ -883,8 +910,20 @@ class _MockSettingsNotifier extends StateNotifier<AppSettings>
       state = state.copyWith(defaultShowO2CellMv: value);
 
   @override
+  Future<void> setDefaultShowCounterdiffusion(bool value) async =>
+      state = state.copyWith(defaultShowCounterdiffusion: value);
+
+  @override
+  Future<void> setDefaultShowBuoyancy(bool value) async =>
+      state = state.copyWith(defaultShowBuoyancy: value);
+
+  @override
   Future<void> setO2CellUnit(O2CellUnit value) async =>
       state = state.copyWith(o2CellUnit: value);
+
+  @override
+  Future<void> setCounterdiffusionShowAll(bool value) async =>
+      state = state.copyWith(counterdiffusionShowAll: value);
 
   @override
   Future<void> setDefaultShowGtr(bool value) async =>

@@ -68,8 +68,9 @@ class ExploreField {
   /// The model's tokens when they differ from the registry's enum names.
   final List<String>? tokens;
 
-  /// A count said with a strict word: "more than twice" is at least three,
-  /// where a measured value's "more than 20 m" stays at least 20.
+  /// A count said with a strict word: "more than twice" is at least three.
+  /// A measured value's "more than 20 m" stays strict, read as shown
+  /// (issue #4398).
   final bool strictCount;
 
   /// A value computed over all of a row's dives (a count, a first or last
@@ -173,6 +174,8 @@ const List<ExploreField> kExploreFields = [
     tokens: kWeekdayTokens,
   ),
   ExploreField('diveType', ['types', 'name'], ExploreValueKind.typeName),
+  // The diver's own roles by name (#4409), through the `myRole` relation.
+  ExploreField('myRole', ['myRole', 'name'], ExploreValueKind.typeName),
   ExploreField(
     'sac',
     ['sac'],

@@ -1,14 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/intl.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_color_providers.dart';
 import 'package:submersion/features/equipment/presentation/utils/equipment_attribute_l10n.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_attribute_form_section.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
+
+import '../../../../helpers/mock_providers.dart';
 
 void main() {
   final l10n = lookupAppLocalizations(const Locale('en'));
@@ -20,20 +24,29 @@ void main() {
     void Function(String)? onCleared,
     AttributeGroup group = AttributeGroup.spec,
   }) async {
+    // The colour field reads the diver's recent colours (issue #4537).
     await tester.pumpWidget(
-      MaterialApp(
-        locale: const Locale('en'),
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(
-          body: SingleChildScrollView(
-            child: EquipmentAttributeFormSection(
-              type: type,
-              group: group,
-              values: values,
-              units: const UnitFormatter(AppSettings()),
-              onChanged: onChanged,
-              onCleared: onCleared ?? (_) {},
+      ProviderScope(
+        overrides: [
+          settingsProvider.overrideWith((ref) => MockSettingsNotifier()),
+          equipmentGearColorsProvider.overrideWith(
+            (ref) => Future.value(const <String>[]),
+          ),
+        ],
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: EquipmentAttributeFormSection(
+                type: type,
+                group: group,
+                values: values,
+                units: const UnitFormatter(AppSettings()),
+                onChanged: onChanged,
+                onCleared: onCleared ?? (_) {},
+              ),
             ),
           ),
         ),
@@ -516,6 +529,41 @@ void main() {
       // Emptying the field clears the attribute.
       await tester.enterText(thickness, '   ');
       expect(cleared, contains('thickness_mm'));
+    },
+  );
+
+  testWidgets(
+    'a cylinder volume in cubic feet reads the working pressure on the form '
+    '(issue #4534)',
+    (tester) async {
+      EquipmentAttribute? changed;
+      await pumpSection(
+        tester,
+        type: EquipmentType.tank,
+        values: {
+          EquipmentAttrKeys.workingPressureBar: EquipmentAttribute.curated(
+            equipmentId: '',
+            key: EquipmentAttrKeys.workingPressureBar,
+            valueNum: 206.843,
+          ),
+        },
+        onChanged: (a) => changed = a,
+      );
+      await tester.tap(find.byKey(const ValueKey('attr-unit-volume_l')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('cuft').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.descendant(
+          of: find.byKey(const ValueKey('attr-field-volume_l')),
+          matching: find.byType(EditableText),
+        ),
+        '77.4',
+      );
+
+      expect(changed?.key, EquipmentAttrKeys.volumeL);
+      expect(changed?.valueNum, 11.1);
+      expect(changed?.valueUnit, 'cubicFeet');
     },
   );
 }

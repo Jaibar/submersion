@@ -1,12 +1,14 @@
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
-import 'package:submersion/features/dive_sites/data/services/dive_site_api_service.dart';
+import 'package:submersion/features/dive_sites/data/services/catalogue_adoption_service.dart';
 import 'package:submersion/features/dive_sites/data/services/site_matching_service.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/domain/matching/site_match_sensitivity.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_suggestion_providers.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
+
+import '../../../../helpers/fake_site_catalogue.dart';
 
 /// Records apply calls instead of touching a database. The base constructor
 /// only stores its dependencies, so zero-arg repositories are safe here.
@@ -14,7 +16,8 @@ class FakeMatchingService extends SiteMatchingService {
   FakeMatchingService()
     : super(
         siteRepository: SiteRepository(),
-        apiService: DiveSiteApiService(),
+        catalogue: FakeSiteCatalogue(),
+        adoption: CatalogueAdoptionService(siteRepository: SiteRepository()),
         diveRepository: DiveRepository(),
         mediaRepository: MediaRepository(),
         diverId: 'diver-1',
@@ -35,6 +38,41 @@ class FakeMatchingService extends SiteMatchingService {
   Future<DiveSite> createAndLink(String diveId, DiveSite site) async {
     created.add(site);
     return site.copyWith(id: 'created');
+  }
+
+  /// Candidates resolved without a link, as (dive, candidate).
+  final resolved = <ConfirmedMatch>[];
+
+  /// What [resolveCandidate] answers, by candidate id.
+  final resolvesTo = <String, DiveSite>{};
+
+  /// What [resolveCandidate] reports as created, by candidate id.
+  final createdBy = <String, List<String>>{};
+
+  /// Sites made with no link.
+  final createdUnlinked = <DiveSite>[];
+
+  /// When set, every write throws it.
+  Object? failWith;
+
+  @override
+  Future<({DiveSite site, List<String> createdSiteIds})> resolveCandidate(
+    String diveId,
+    String candidateId,
+  ) async {
+    if (failWith case final error?) throw error;
+    resolved.add(ConfirmedMatch(diveId, candidateId));
+    return (
+      site: resolvesTo[candidateId] ?? DiveSite(id: candidateId, name: 'Site'),
+      createdSiteIds: createdBy[candidateId] ?? const <String>[],
+    );
+  }
+
+  @override
+  Future<DiveSite> createSite(DiveSite site) async {
+    if (failWith case final error?) throw error;
+    createdUnlinked.add(site);
+    return site.copyWith(id: 'made');
   }
 }
 

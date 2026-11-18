@@ -17,9 +17,13 @@ import 'package:submersion/features/site_types/domain/entities/site_type_entity.
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/shared/models/entity_card_view_config.dart';
 import 'package:submersion/shared/providers/entity_card_config_providers.dart';
+import 'package:submersion/shared/widgets/country_flag.dart';
+import 'package:submersion/shared/widgets/entity_card/entity_card_stat.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 import '../../../../helpers/mock_providers.dart';
 import '../../../../helpers/test_app.dart';
+import '../../../../helpers/record_chevron_expectations.dart';
 
 const _defaultConfig = EntityCardViewConfig<SiteField>(
   slots: [
@@ -450,16 +454,18 @@ void main() {
       final lastBadge = tester.getRect(
         find.widgetWithText(DiveTypeBadge, 'Wall'),
       );
-      final chevron = tester.getRect(find.byIcon(Icons.chevron_right));
+      final chevron = tester.getRect(find.byType(RecordListChevron));
 
       expect(
         lastBadge.center.dy,
         moreOrLessEquals(stat.center.dy, epsilon: 1),
         reason: 'the badges share the stat line, as on a dive card',
       );
+      // The chevron has a column of its own at the end of the card (#4639),
+      // so the content edge is where that column starts.
       expect(
         lastBadge.right,
-        moreOrLessEquals(chevron.right, epsilon: 0.5),
+        moreOrLessEquals(chevron.left, epsilon: 0.5),
         reason: 'the badges are right-aligned to the content edge',
       );
     });
@@ -517,5 +523,240 @@ void main() {
         );
       }
     });
+  });
+
+  group('country flag (issue #4426)', () {
+    testWidgets('a stored code shows its flag for unread text', (tester) async {
+      final korea = SiteWithDiveCount(
+        site: _richEntry.site.copyWith(country: 'Korea', countryCode: 'KR'),
+        diveCount: 1,
+      );
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          locale: const Locale('en'),
+          child: SiteListTile(entry: korea, onTap: () {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<CountryFlag>(find.byType(CountryFlag)).code, 'KR');
+    });
+
+    Future<void> pumpTile(
+      WidgetTester tester, {
+      EntityCardViewConfig<SiteField> config = _defaultConfig,
+      bool flags = true,
+    }) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: [
+            ...await _overrides(config: config),
+            showCountryFlagsProvider.overrideWithValue(flags),
+          ],
+          locale: const Locale('en'),
+          child: SiteListTile(entry: _richEntry, onTap: () {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the location line carries the country flag', (tester) async {
+      await pumpTile(tester);
+      final flag = tester.widget<CountryFlag>(find.byType(CountryFlag));
+      expect(flag.code, 'EG');
+    });
+
+    testWidgets('no flag when flags are off', (tester) async {
+      await pumpTile(tester, flags: false);
+      expect(find.byType(CountryFlag), findsNothing);
+      expect(find.textContaining('Egypt'), findsOneWidget);
+    });
+
+    testWidgets('no flag when the subtitle shows something else', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        config: const EntityCardViewConfig<SiteField>(
+          slots: [
+            EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
+            EntityCardSlotConfig(
+              slotId: 'subtitle',
+              field: SiteField.depthRange,
+            ),
+            EntityCardSlotConfig(slotId: 'stat1', field: SiteField.diveCount),
+            EntityCardSlotConfig(slotId: 'stat2', field: SiteField.rating),
+          ],
+        ),
+      );
+      expect(find.byType(CountryFlag), findsNothing);
+    });
+
+    testWidgets('a country-only subtitle carries the flag too', (tester) async {
+      await pumpTile(
+        tester,
+        config: const EntityCardViewConfig<SiteField>(
+          slots: [
+            EntityCardSlotConfig(slotId: 'title', field: SiteField.siteName),
+            EntityCardSlotConfig(slotId: 'subtitle', field: SiteField.country),
+            EntityCardSlotConfig(slotId: 'stat1', field: SiteField.diveCount),
+            EntityCardSlotConfig(slotId: 'stat2', field: SiteField.rating),
+          ],
+        ),
+      );
+      expect(find.byType(CountryFlag), findsOneWidget);
+    });
+  });
+
+  group('water type sits on the stat line (issue #4469)', () {
+    const salt = SiteWithDiveCount(
+      site: DiveSite(
+        id: 'site-5',
+        name: 'Salt reef',
+        minDepth: 5,
+        maxDepth: 50,
+        waterType: WaterType.salt,
+      ),
+      diveCount: 14,
+    );
+
+    Future<void> pumpEntries(
+      WidgetTester tester,
+      List<SiteWithDiveCount> entries,
+    ) async {
+      await tester.pumpWidget(
+        testApp(
+          overrides: await _overrides(),
+          locale: const Locale('en'),
+          child: Column(
+            children: [
+              for (final entry in entries)
+                SiteListTile(key: ValueKey(entry.site.id), entry: entry),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('the water type follows the dive count on its line', (
+      tester,
+    ) async {
+      await pumpEntries(tester, [salt]);
+
+      final count = tester.getRect(find.text('14 dives'));
+      final water = tester.getRect(find.text('Salt Water'));
+      expect(
+        water.center.dy,
+        moreOrLessEquals(count.center.dy, epsilon: 1),
+        reason: 'the water type shares the dive count line',
+      );
+      expect(
+        water.left,
+        greaterThan(count.right),
+        reason: 'the water type sits to the right of the dive count',
+      );
+    });
+
+    testWidgets('a water type alone adds no line to the card', (tester) async {
+      final noWater = SiteWithDiveCount(
+        site: salt.site.copyWith(id: 'site-6', clearWaterType: true),
+        diveCount: 14,
+      );
+      await pumpEntries(tester, [salt, noWater]);
+
+      // The chip is a little taller than the stat text, so the stat line may
+      // grow by a few pixels; it must not grow by a whole chip line.
+      final chip = tester.getSize(
+        find
+            .ancestor(of: find.text('Salt Water'), matching: find.byType(Row))
+            .first,
+      );
+      final withWater = tester.getSize(find.byKey(const ValueKey('site-5')));
+      final without = tester.getSize(find.byKey(const ValueKey('site-6')));
+      expect(
+        withWater.height - without.height,
+        lessThan(chip.height),
+        reason: 'the water type no longer takes a line of its own',
+      );
+    });
+
+    testWidgets('a hidden zero dive count leaves no double gap', (
+      tester,
+    ) async {
+      const unvisited = SiteWithDiveCount(
+        site: DiveSite(
+          id: 'site-7',
+          name: 'Unvisited',
+          minDepth: 5,
+          maxDepth: 50,
+          waterType: WaterType.fresh,
+        ),
+        diveCount: 0,
+      );
+      const visited = SiteWithDiveCount(
+        site: DiveSite(
+          id: 'site-8',
+          name: 'Visited',
+          minDepth: 5,
+          maxDepth: 50,
+        ),
+        diveCount: 2,
+      );
+      await pumpEntries(tester, [unvisited, visited]);
+
+      // Each stat is an icon and text, and the chip pads its label, so
+      // measure the widgets themselves: the gap after the depth stat must be
+      // the single stat gap the visited card shows before its dive count.
+      Rect statRect(Finder text) => tester.getRect(
+        find
+            .ancestor(
+              of: text,
+              matching: find.byWidgetPredicate((w) => w is EntityCardStat),
+            )
+            .first,
+      );
+      final depths = find.text('5-50m');
+      final chip = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('Fresh Water'),
+              matching: find.byWidgetPredicate(
+                (w) =>
+                    w is Container &&
+                    w.decoration is BoxDecoration &&
+                    (w.decoration! as BoxDecoration).border != null,
+              ),
+            )
+            .first,
+      );
+      expect(
+        chip.left - statRect(depths.at(0)).right,
+        moreOrLessEquals(
+          statRect(find.text('2 dives')).left - statRect(depths.at(1)).right,
+          epsilon: 0.5,
+        ),
+        reason: 'the missing count does not leave two stat gaps',
+      );
+    });
+  });
+
+  testWidgets('chevron ends one card padding from the edge (#4639)', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      testApp(
+        overrides: await _overrides(),
+        child: SiteListTile(entry: _richEntry, onTap: () {}),
+      ),
+    );
+    await tester.pump();
+
+    expectChevronAtEndPadding(
+      tester,
+      bounds: recordCardBounds(tester),
+      padding: kRecordCardDetailedPadding,
+    );
   });
 }

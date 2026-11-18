@@ -407,12 +407,36 @@ void main() {
       );
     });
 
+    testWidgets(
+      'on Windows points at the Garmin entry in the USB list (#4223)',
+      (tester) async {
+        await openHelp(tester, const Locale('en'));
+
+        expect(
+          find.text(
+            'Garmin watches are not downloaded over Bluetooth. Connect one '
+            'by cable and choose Garmin in the USB list, or import their '
+            'dives from Transfer > File Import or Transfer > Cloud.',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text(
+            'Garmin watches are not downloaded here. Import their dives from '
+            'Transfer > File Import or Transfer > Cloud.',
+          ),
+          findsNothing,
+        );
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.windows),
+    );
+
     testWidgets('fills each import path into its own slot', (tester) async {
       await openHelp(tester, const Locale('de'));
 
       expect(
         find.text(
-          'Garmin-Uhren werden hier nicht heruntergeladen. Importieren Sie '
+          'Garmin-Uhren werden hier nicht heruntergeladen. Importiere '
           'ihre Tauchgänge über Übertragung > Dateiimport oder '
           'Übertragung > Cloud.',
         ),

@@ -6,6 +6,7 @@ import 'package:submersion/features/dive_log/domain/services/source_name_resolve
 import 'package:submersion/features/dive_log/presentation/widgets/collapsible_section.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/shared/widgets/record_editing/record_operation_gate.dart';
 
 part 'data_source_comparison_grid.dart';
 
@@ -84,6 +85,12 @@ class DataSourcesSection extends StatefulWidget {
   /// separate dive" (confirmation happens in the caller).
   final void Function(String readingId)? onSplit;
 
+  /// Called with the reading ID when the user chooses "Remove source"
+  /// (confirmation happens in the caller). Offered only on a multi-source
+  /// dive, like Split (issue #4393).
+  /// The name is the source's label as its card shows it, for the dialog.
+  final void Function(String readingId, String sourceName)? onRemove;
+
   /// Called when the user chooses "Separate combined dives" (confirmation
   /// happens in the caller). Null hides the action.
   ///
@@ -101,6 +108,11 @@ class DataSourcesSection extends StatefulWidget {
   /// multi-source dives). Null hides the action.
   final VoidCallback? onCompareIn3d;
 
+  /// Why set primary, split, remove and separate are unavailable on a page
+  /// that offers editing (each acts on the whole dive at once, issue #4527),
+  /// or null when they are. They are listed disabled under it.
+  final String? operationReason;
+
   const DataSourcesSection({
     super.key,
     required this.dataSources,
@@ -110,9 +122,11 @@ class DataSourcesSection extends StatefulWidget {
     this.viewedSourceId,
     this.onSetPrimary,
     this.onSplit,
+    this.onRemove,
     this.onSeparate,
     this.onTapSource,
     this.onCompareIn3d,
+    required this.operationReason,
   });
 
   @override
@@ -143,6 +157,7 @@ class _DataSourcesSectionState extends State<DataSourcesSection> {
               key: DataSourcesSection.sectionMenuKey,
               onCompareIn3d: onCompare,
               onSeparate: widget.onSeparate,
+              operationReason: widget.operationReason,
             )
           : null,
       child: Column(
@@ -151,6 +166,12 @@ class _DataSourcesSectionState extends State<DataSourcesSection> {
       ),
     );
   }
+
+  bool _sharesComputer(DiveDataSource source) =>
+      source.computerId != null &&
+      widget.dataSources.any(
+        (s) => s.id != source.id && s.computerId == source.computerId,
+      );
 
   List<Widget> _buildChildren(bool isMultiSource) {
     if (widget.dataSources.isEmpty) {
@@ -186,9 +207,21 @@ class _DataSourcesSectionState extends State<DataSourcesSection> {
           onSplit: widget.onSplit != null && isMultiSource
               ? () => widget.onSplit!(source.id)
               : null,
+          // Two sources of one computer cannot be told apart, so removal
+          // refuses them; the menu does not offer it.
+          onRemove:
+              widget.onRemove != null &&
+                  isMultiSource &&
+                  !_sharesComputer(source)
+              ? () => widget.onRemove!(
+                  source.id,
+                  resolveSourceName(source, _labelsOf(context)),
+                )
+              : null,
           onTap: widget.onTapSource != null
               ? () => widget.onTapSource!(source.id)
               : null,
+          operationReason: widget.operationReason,
         ),
       );
     }
@@ -205,9 +238,15 @@ enum _SectionMenuAction { compareIn3d, separate }
 
 /// One entry of the section or card menu: a leading icon and a label with
 /// the tile's own padding removed, since the popup supplies its own.
-PopupMenuItem<T> _menuItem<T>(T value, IconData icon, String label) {
+PopupMenuItem<T> _menuItem<T>(
+  T value,
+  IconData icon,
+  String label, {
+  bool enabled = true,
+}) {
   return PopupMenuItem<T>(
     value: value,
+    enabled: enabled,
     child: ListTile(
       leading: Icon(icon),
       title: Text(label),
@@ -219,10 +258,16 @@ PopupMenuItem<T> _menuItem<T>(T value, IconData icon, String label) {
 /// The header menu holding the section-wide actions. Built only when at
 /// least one applies, so it never opens onto an empty menu.
 class _SectionMenu extends StatelessWidget {
-  const _SectionMenu({super.key, this.onCompareIn3d, this.onSeparate});
+  const _SectionMenu({
+    super.key,
+    this.onCompareIn3d,
+    this.onSeparate,
+    required this.operationReason,
+  });
 
   final VoidCallback? onCompareIn3d;
   final VoidCallback? onSeparate;
+  final String? operationReason;
 
   @override
   Widget build(BuildContext context) {
@@ -251,12 +296,16 @@ class _SectionMenu extends StatelessWidget {
             Icons.view_in_ar,
             l10n.diveLog_sources_compareIn3d,
           ),
-        if (onSeparate != null)
+        if (onSeparate != null) ...[
+          if (operationReason case final reason?)
+            recordOperationCaption<_SectionMenuAction>(context, reason),
           _menuItem(
             _SectionMenuAction.separate,
             Icons.call_split,
             l10n.diveLog_sources_menu_separate,
+            enabled: operationReason == null,
           ),
+        ],
       ],
     );
   }
@@ -319,7 +368,7 @@ class _ManualEntryCard extends StatelessWidget {
 // Data Source Card
 // ---------------------------------------------------------------------------
 
-enum _SourceMenuAction { setPrimary, split }
+enum _SourceMenuAction { setPrimary, split, remove }
 
 /// Card for a single [DiveDataSource]: identity, status chips and the
 /// per-source menu. On a single-source dive it also carries the provenance
@@ -332,7 +381,9 @@ class _DataSourceCard extends StatelessWidget {
   final bool isViewing;
   final VoidCallback? onSetPrimary;
   final VoidCallback? onSplit;
+  final VoidCallback? onRemove;
   final VoidCallback? onTap;
+  final String? operationReason;
 
   const _DataSourceCard({
     required this.source,
@@ -341,7 +392,9 @@ class _DataSourceCard extends StatelessWidget {
     required this.isViewing,
     this.onSetPrimary,
     this.onSplit,
+    this.onRemove,
     this.onTap,
+    required this.operationReason,
   });
 
   @override
@@ -365,7 +418,8 @@ class _DataSourceCard extends StatelessWidget {
     // nothing (#2974).
     final canSetPrimary = !source.isPrimary && onSetPrimary != null;
     final canSplit = onSplit != null;
-    final hasOverflowMenu = canSetPrimary || canSplit;
+    final canRemove = onRemove != null;
+    final hasOverflowMenu = canSetPrimary || canSplit || canRemove;
 
     final chips = <Widget>[
       if (isMultiSource && source.isPrimary)
@@ -449,20 +503,36 @@ class _DataSourceCard extends StatelessWidget {
                               onSetPrimary?.call();
                             case _SourceMenuAction.split:
                               onSplit?.call();
+                            case _SourceMenuAction.remove:
+                              onRemove?.call();
                           }
                         },
                         itemBuilder: (context) => [
+                          if (operationReason case final reason?)
+                            recordOperationCaption<_SourceMenuAction>(
+                              context,
+                              reason,
+                            ),
                           if (canSetPrimary)
                             _menuItem(
                               _SourceMenuAction.setPrimary,
                               Icons.star_outline,
                               context.l10n.diveLog_sources_menu_setPrimary,
+                              enabled: operationReason == null,
                             ),
                           if (canSplit)
                             _menuItem(
                               _SourceMenuAction.split,
                               Icons.call_split,
                               context.l10n.diveLog_sources_menu_split,
+                              enabled: operationReason == null,
+                            ),
+                          if (canRemove)
+                            _menuItem(
+                              _SourceMenuAction.remove,
+                              Icons.delete_outline,
+                              context.l10n.diveLog_sources_menu_remove,
+                              enabled: operationReason == null,
                             ),
                         ],
                       ),

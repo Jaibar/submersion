@@ -3,6 +3,7 @@ import 'package:submersion/core/models/sort_state.dart';
 import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/providers/provider.dart';
 
+import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart'
     as domain;
 import 'package:submersion/features/dive_log/presentation/providers/dive_data_retention.dart';
@@ -36,8 +37,21 @@ final buddyRepositoryProvider = Provider<BuddyRepository>((ref) {
 /// again but debounced. A buddy link written by a sync pull touches only
 /// `dive_buddies` and never restamps the parent dive (#1769/#1915), so
 /// watching plain `dives` alone missed it (#2084).
-void invalidateOnBuddyDiveChanges(Ref ref, BuddyRepository repository) {
-  ref.invalidateSelfWhen(repository.watchBuddiesChanges());
+///
+/// [readsBuddies] is for a provider that also returns the hydrated buddies,
+/// whose primary certification is derived from the certification tables:
+/// it follows those too (issue #4496). Stats and dive-id reads leave it off
+/// so a certification edit does not reload them.
+void invalidateOnBuddyDiveChanges(
+  Ref ref,
+  BuddyRepository repository, {
+  bool readsBuddies = true,
+}) {
+  ref.invalidateSelfWhen(
+    readsBuddies
+        ? repository.watchHydratedBuddiesChanges()
+        : repository.watchBuddiesChanges(),
+  );
   ref.invalidateSelfWhen(
     ref.read(diveRepositoryProvider).watchDivesChangesWithBuddyLinks(),
   );
@@ -45,8 +59,9 @@ void invalidateOnBuddyDiveChanges(Ref ref, BuddyRepository repository) {
 
 /// All buddies provider (filtered by current diver).
 ///
-/// A one-shot read that self-invalidates whenever the `buddies` table changes
-/// (a sync apply, a local create/edit/delete, ...), so list UIs refresh
+/// A one-shot read that self-invalidates whenever a buddy or a certification
+/// it is shown with changes (a sync apply, a local create/edit/delete, ...;
+/// see [BuddyRepository.watchHydratedBuddiesChanges]), so list UIs refresh
 /// automatically while imperative `ref.read(allBuddiesProvider.future)` reads
 /// still resolve.
 final allBuddiesProvider = FutureProvider<List<Buddy>>((ref) async {
@@ -55,7 +70,7 @@ final allBuddiesProvider = FutureProvider<List<Buddy>>((ref) async {
     validatedCurrentDiverIdProvider.future,
   );
 
-  ref.invalidateSelfWhen(repository.watchBuddiesChanges());
+  ref.invalidateSelfWhen(repository.watchHydratedBuddiesChanges());
 
   return repository.getAllBuddies(diverId: validatedDiverId);
 });
@@ -122,9 +137,11 @@ List<BuddyWithDiveCount> applyBuddyWithDiveCountSorting(
   SortState<BuddySortField> sort,
 ) {
   final sorted = List<BuddyWithDiveCount>.from(buddies);
+  // Folds each name once for the whole sort, not once per comparison.
+  final collator = TextCollator();
 
   int byNameAscending(BuddyWithDiveCount a, BuddyWithDiveCount b) =>
-      a.buddy.name.toLowerCase().compareTo(b.buddy.name.toLowerCase());
+      collator.compare(a.buddy.name, b.buddy.name);
 
   sorted.sort((a, b) {
     switch (sort.field) {
@@ -195,6 +212,7 @@ List<Buddy> applyBuddySorting(
   SortState<BuddySortField> sort,
 ) {
   final sorted = List<Buddy>.from(buddies);
+  final collator = TextCollator();
 
   sorted.sort((a, b) {
     // Every field compares names here: the plain Buddy entity carries neither
@@ -202,7 +220,7 @@ List<Buddy> applyBuddySorting(
     // alphabet. Only the direction differs between the fields, so that is all
     // the switch decides. It stays exhaustive, so a new BuddySortField has to
     // be considered in this function too.
-    final comparison = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    final comparison = collator.compare(a.name, b.name);
     final invertForText = switch (sort.field) {
       // For text fields, invert direction (user expects descending = A→Z)
       BuddySortField.name => true,
@@ -226,17 +244,22 @@ final buddyByIdProvider = FutureProvider.family<Buddy?, String>((
   id,
 ) async {
   final repository = ref.watch(buddyRepositoryProvider);
-  ref.invalidateSelfWhen(repository.watchBuddiesChanges());
+  ref.invalidateSelfWhen(repository.watchHydratedBuddiesChanges());
   return repository.getBuddyById(id);
 });
 
-/// Buddies for a dive provider
+/// Buddies for a dive provider.
+///
+/// Follows the certification tables as well as the dive detail (which
+/// already covers `buddies`): each buddy carries its derived primary
+/// certification, which the dive detail exports write out (issue #4496).
 final buddiesForDiveProvider =
     FutureProvider.family<List<BuddyWithRole>, String>((ref, diveId) async {
       final repository = ref.watch(buddyRepositoryProvider);
       ref.invalidateSelfWhen(
         ref.watch(diveRepositoryProvider).watchDiveDetailChanges(),
       );
+      ref.invalidateSelfWhen(repository.watchPrimaryCertificationChanges());
       return repository.getBuddiesForDive(diveId);
     });
 
@@ -252,7 +275,7 @@ final buddySearchProvider = FutureProvider.family<List<Buddy>, String>((
     return ref.watch(allBuddiesProvider).value ?? [];
   }
   final repository = ref.watch(buddyRepositoryProvider);
-  ref.invalidateSelfWhen(repository.watchBuddiesChanges());
+  ref.invalidateSelfWhen(repository.watchHydratedBuddiesChanges());
   return repository.searchBuddies(query, diverId: validatedDiverId);
 });
 
@@ -267,7 +290,7 @@ final buddyStatsProvider = FutureProvider.family<BuddyStats, String>((
   buddyId,
 ) async {
   final repository = ref.watch(buddyRepositoryProvider);
-  invalidateOnBuddyDiveChanges(ref, repository);
+  invalidateOnBuddyDiveChanges(ref, repository, readsBuddies: false);
   return repository.getBuddyStats(buddyId);
 });
 
@@ -281,7 +304,7 @@ final diveIdsForBuddyProvider = FutureProvider.family<List<String>, String>((
   buddyId,
 ) async {
   final repository = ref.watch(buddyRepositoryProvider);
-  invalidateOnBuddyDiveChanges(ref, repository);
+  invalidateOnBuddyDiveChanges(ref, repository, readsBuddies: false);
   return repository.getDiveIdsForBuddy(buddyId);
 });
 
@@ -361,10 +384,11 @@ class BuddyListNotifier extends StateNotifier<AsyncValue<List<Buddy>>> {
       }
     });
 
-    // Reload when the `buddies` table changes (e.g. a sync writes rows
-    // directly) so surfaces watching this notifier (e.g. the buddy summary)
-    // refresh too.
-    final tableChangeSub = _repository.watchBuddiesChanges().listen(
+    // Reload when a buddy or its certifications change (e.g. a sync writes
+    // rows directly, or the edit form commits certs after the buddy row,
+    // issue #4496) so surfaces watching this notifier (e.g. the buddy
+    // summary) refresh too.
+    final tableChangeSub = _repository.watchHydratedBuddiesChanges().listen(
       (_) => _silentReloadBuddies(),
     );
     _ref.onDispose(tableChangeSub.cancel);

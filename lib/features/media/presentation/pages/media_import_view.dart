@@ -13,22 +13,20 @@ import 'package:submersion/features/media/domain/value_objects/media_attach_targ
 import 'package:submersion/features/media/presentation/pages/media_import_review_page.dart';
 import 'package:submersion/features/media/presentation/pages/photo_picker_page.dart';
 import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
-import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/features/media/presentation/helpers/asset_import_candidate.dart';
 import 'package:submersion/features/media/presentation/helpers/offer_site_review_after_import.dart';
 
-/// The Import console section: launches the three-tab picker with no dive
-/// context, then hands the picked assets to [MediaImportReviewPage]. Nothing
-/// is written until the user confirms, and only assets resolved to a dive or
-/// a site are imported.
-class MediaImportView extends ConsumerWidget {
-  const MediaImportView({super.key, this.launchOverride});
-
-  /// Test seam: returns the picked assets instead of driving the platform
-  /// picker (which flutter_test cannot).
-  @visibleForTesting
-  final Future<List<AssetInfo>> Function(BuildContext context)? launchOverride;
-
+/// The dive-less import, started by the Media section's Import button
+/// (#4587) and by files dropped on the app window with no dive or site to
+/// go to (importDroppedMedia): launches the three-tab picker with
+/// no dive context, then hands the picked assets to [MediaImportReviewPage].
+/// Nothing is written until the user confirms, and only assets resolved to a
+/// dive or a site are imported.
+///
+/// Statics only: the Import tab this once rendered is now a button. The name
+/// stays so its callers (the drop import, the species import) need no
+/// rename.
+abstract final class MediaImportView {
   /// Lower bound of the gallery tab's date window for a dive-less import.
   ///
   /// The mobile picker turns this into a hard photo_manager
@@ -79,6 +77,7 @@ class MediaImportView extends ConsumerWidget {
     final byId = {for (final a in assets) a.id: a};
     final byDive = <String, List<AssetInfo>>{};
     final bySite = <String, List<AssetInfo>>{};
+    final byEquipment = <EquipmentAttachTarget, List<AssetInfo>>{};
     for (final MapEntry(:key, :value) in targets.entries) {
       final asset = byId[key];
       if (asset == null) continue;
@@ -87,6 +86,8 @@ class MediaImportView extends ConsumerWidget {
           byDive.putIfAbsent(diveId, () => []).add(asset);
         case SiteAttachTarget(:final siteId):
           bySite.putIfAbsent(siteId, () => []).add(asset);
+        case EquipmentAttachTarget():
+          byEquipment.putIfAbsent(value, () => []).add(asset);
       }
     }
 
@@ -129,6 +130,20 @@ class MediaImportView extends ConsumerWidget {
         final result = await service.importPhotosForSite(
           selectedAssets: value,
           siteId: key,
+        );
+        linked += result.imported.length;
+        importedIds.addAll(result.imported.map((m) => m.id));
+        failures.addAll(result.failures);
+      } catch (e) {
+        failGroup(value, e);
+      }
+    }
+    for (final MapEntry(:key, :value) in byEquipment.entries) {
+      try {
+        final result = await service.importPhotosForEquipment(
+          selectedAssets: value,
+          equipmentId: key.equipmentId,
+          observationId: key.observationId,
         );
         linked += result.imported.length;
         importedIds.addAll(result.imported.map((m) => m.id));
@@ -185,29 +200,6 @@ class MediaImportView extends ConsumerWidget {
             }
             return result;
           },
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.add_photo_alternate_outlined, size: 48),
-            const SizedBox(height: 12),
-            Text(context.l10n.media_import_intro, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              icon: const Icon(Icons.add_photo_alternate),
-              label: Text(context.l10n.media_import_launch),
-              onPressed: () => launchImport(context, ref, pick: launchOverride),
-            ),
-          ],
         ),
       ),
     );

@@ -66,6 +66,14 @@ class Divers extends Table {
   IntColumn get priorDiveTimeSeconds => integer().nullable()();
   IntColumn get divingSince => integer().nullable()(); // year, e.g. 1990
 
+  /// v364 body composition inputs (issue #4525), used only to estimate
+  /// body fat for the weight prediction. DiverSex.name, or null when not
+  /// given.
+  TextColumn get sex => text().nullable()();
+
+  /// Year of birth, e.g. 1984, or null when not given.
+  IntColumn get birthYear => integer().nullable()();
+
   /// v324 buddy card swap (issue #3728): a handle shared on the diver's
   /// card, and which fields the diver shares, as JSON (null = defaults).
   TextColumn get socialHandle => text().nullable()();
@@ -338,11 +346,19 @@ class DiverSettings extends Table {
       real().withDefault(const Constant(0.6))();
   BoolColumn get showMapBackgroundOnSiteCards =>
       boolean().withDefault(const Constant(false))();
+
+  /// A small flag beside site locations and trips (v360, issue #4426).
+  BoolColumn get showCountryFlags =>
+      boolean().withDefault(const Constant(true))();
   // Dive profile markers
   BoolColumn get showMaxDepthMarker =>
       boolean().withDefault(const Constant(true))();
   BoolColumn get showPressureThresholdMarkers =>
       boolean().withDefault(const Constant(false))();
+  // Dive details pins a thin profile strip once the profile card scrolls
+  // away (v359, issue #4423).
+  BoolColumn get pinProfileOnScroll =>
+      boolean().withDefault(const Constant(true))();
   // Dive list view mode (v51)
   TextColumn get diveListViewMode =>
       text().withDefault(const Constant('detailed'))();
@@ -420,6 +436,10 @@ class DiverSettings extends Table {
   /// #4184). Null or empty means every group open.
   TextColumn get equipmentCollapsedGroups => text().nullable()();
 
+  /// v365: the custom colours the diver picked for their gear, a JSON list,
+  /// most recent first (issue #4537). Null or empty means none remembered.
+  TextColumn get recentEquipmentColors => text().nullable()();
+
   /// v323: the clock the arrangement columns above, the list view modes and
   /// [groupTripsInDiveList] sync under (`SyncFactGroups`), so a sort tap
   /// never restamps [hlc] and republishes the diver's other settings.
@@ -488,6 +508,17 @@ class DiverSettings extends Table {
   // v161: default visibility for the per-cell O2 mV traces (issue #1235).
   BoolColumn get defaultShowO2CellMv =>
       boolean().withDefault(const Constant(false))();
+  // v366: default visibility for the isobaric counterdiffusion overlay on the
+  // dive profile (issue #4530).
+  BoolColumn get defaultShowCounterdiffusion =>
+      boolean().withDefault(const Constant(false))();
+  // v370: default visibility for the net buoyancy line on the dive profile
+  // (issue #4593).
+  BoolColumn get defaultShowBuoyancy =>
+      boolean().withDefault(const Constant(false))();
+  // v371: the dive types this diver starred to list first in the pickers, a
+  // sorted JSON list of ids (issue #4413). Null means none.
+  TextColumn get favouriteDiveTypeIds => text().nullable()();
   // v163: whether synthesized ("(est.)") tank pressure lines are drawn on the
   // profile chart at all (issue #731). Defaults to true, preserving the
   // behavior estimates shipped with. Ignored for coverage for the reason
@@ -649,6 +680,19 @@ class DiverSettings extends Table {
       real().withDefault(const Constant(1.0 / 3.0))();
   RealColumn get plannerWalkSpeedMps =>
       real().withDefault(const Constant(0.8))();
+
+  /// Planner default CMF supply injection rate, surface L/min (v374, issue
+  /// #4660; each loop default is the figure every plan used before).
+  RealColumn get plannerScrInjectionRate =>
+      // Drift copies a default's expression verbatim into database.g.dart, so
+      // these three are literals mirroring ScrCalculator's defaults.
+      real().withDefault(const Constant(12.0))();
+
+  /// Planner default diver VO2 on a CMF loop, surface L/min.
+  RealColumn get plannerScrVo2 => real().withDefault(const Constant(1.3))();
+
+  /// Planner default diver VO2 on a passive (pSCR) loop, surface L/min.
+  RealColumn get plannerPscrVo2 => real().withDefault(const Constant(0.72))();
   // v307: planner air-break and turn-pressure global defaults (issue
   // #3552). Nullable, unlike the v304 columns above: null means "no
   // policy"/"no rule", matching today's behaviour for every diver who has

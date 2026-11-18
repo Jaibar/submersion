@@ -186,6 +186,46 @@ void main() {
     });
   });
 
+  group('BuoyancyTwinAssembler.isModelable', () {
+    test('false with no tanks and no suit', () {
+      expect(BuoyancyTwinAssembler.isModelable(diveWith()), isFalse);
+    });
+
+    test('true with a tank', () {
+      expect(
+        BuoyancyTwinAssembler.isModelable(diveWith(tanks: [tank('t1')])),
+        isTrue,
+      );
+    });
+
+    test('false when an Avelo Hydrotank is breathed (#4657)', () {
+      // Its pressure is the water pumped in, not gas, and the water ballast
+      // that sets the diver's buoyancy is not modelled: no line rather than
+      // a wrong one, as for the dive's SAC.
+      final hydrotank = tank(
+        'h',
+      ).copyWith(role: TankRole.hydrotank, presetName: null);
+      final dive = diveWith(tanks: [hydrotank], equipment: [wetsuit]);
+      expect(BuoyancyTwinAssembler.isModelable(dive), isFalse);
+      expect(
+        BuoyancyTwinAssembler.assemble(
+          dive: dive,
+          tankPressures: const {},
+          model: emptyModel(),
+          bodyWeightKg: null,
+        ),
+        isNull,
+      );
+    });
+
+    test('true with an exposure suit and no tank', () {
+      expect(
+        BuoyancyTwinAssembler.isModelable(diveWith(equipment: [wetsuit])),
+        isTrue,
+      );
+    });
+  });
+
   group('BuoyancyTwinAssembler.droppableLeadKg', () {
     test('sums only belt and integrated rows', () {
       final dive = diveWith(
@@ -205,6 +245,25 @@ void main() {
         ],
       );
       expect(BuoyancyTwinAssembler.droppableLeadKg(dive), closeTo(5.0, 1e-9));
+    });
+
+    // A negative legacy scalar is no lead in the carried total (issue
+    // #4442), so it cannot be droppable lead either: the ditch check would
+    // otherwise read less than nothing.
+    test('a non-positive legacy scalar is no droppable lead', () {
+      final input = BuoyancyTwinAssembler.assemble(
+        dive: diveWith(
+          tanks: [tank('t1')],
+          equipment: [wetsuit],
+          weightAmount: -5.0,
+          weightType: WeightType.belt,
+        ),
+        tankPressures: const {},
+        model: emptyModel(),
+        bodyWeightKg: 75,
+      );
+      expect(input!.leadKg, closeTo(0.0, 1e-9));
+      expect(input.droppableLeadKg, closeTo(0.0, 1e-9));
     });
   });
 
@@ -545,6 +604,46 @@ void main() {
     test('omits the term without any height', () {
       final rig = compose(emptyModel());
       expect(rig.staticTerms.any((t) => t.label == 'bmi'), isFalse);
+    });
+
+    test('labels a measured body fat term bodyFat (issue #4525)', () {
+      final rig = BuoyancyTwinAssembler.composeRigTerms(
+        items: const [wetsuit],
+        tanks: const [],
+        model: emptyModel(),
+        waterType: WaterType.salt,
+        bodyWeightKg: 80,
+        bodyFatPercent: 30,
+      );
+      final term = rig.staticTerms.singleWhere((t) => t.label == 'bodyFat');
+      expect(
+        term.kg,
+        closeTo(
+          BodyComposition.leadTermKg(
+            bodyMassKg: 80,
+            heightCm: null,
+            bodyFatPercent: 30,
+          ),
+          1e-9,
+        ),
+      );
+      expect(rig.staticTerms.any((t) => t.label == 'bmi'), isFalse);
+    });
+
+    test('falls back to the body fat, sex and age the model was fitted '
+        'with (issue #4525)', () {
+      final model = WeightPredictionEngine.fit(
+        observations: const [],
+        gearById: (_) => null,
+        bodyWeightKg: 80,
+        heightCm: 175,
+        ageYears: 40,
+        sex: DiverSex.male,
+      );
+      final term = compose(
+        model,
+      ).staticTerms.singleWhere((t) => t.label == 'bmi');
+      expect(term.kg, closeTo(-80 * 0.2 * 5.4 / 100, 1e-9));
     });
   });
 

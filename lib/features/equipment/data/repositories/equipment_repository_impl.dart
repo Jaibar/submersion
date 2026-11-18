@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:submersion/core/data/repositories/sync_repository.dart';
 import 'package:submersion/core/data/visibility/visibility_filter.dart';
+import 'package:submersion/core/database/cylinder_volume_repair.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/database/dive_source_stamp.dart';
 import 'package:submersion/core/services/change_log/change_log_scope.dart';
@@ -12,11 +13,13 @@ import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
 import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_location_move_repository.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_share_repository.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_tag_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_color_queries.dart';
 import 'package:submersion/features/equipment/data/repositories/equipment_visibility_queries.dart';
 import 'package:submersion/features/equipment/data/repositories/service_schedule_repository.dart';
 import 'package:submersion/features/equipment/data/repositories/dive_gear_usage_sql.dart';
@@ -95,6 +98,7 @@ class EquipmentRepository {
   AppDatabase get _db => DatabaseService.instance.database;
   final SyncRepository _syncRepository = SyncRepository();
   EquipmentVisibilityQueries get _visibility => EquipmentVisibilityQueries(_db);
+  EquipmentColorQueries get _colors => EquipmentColorQueries(_db);
   final _uuid = const Uuid();
   final _log = LoggerService.forClass(EquipmentRepository);
 
@@ -338,6 +342,11 @@ class EquipmentRepository {
   /// The subset of [ids] visible to [diverId] (owned or shared).
   Future<Set<String>> visibleIdsAmong(Iterable<String> ids, String diverId) =>
       _visibility.visibleIdsAmong(ids, diverId);
+
+  /// The off-palette colours on [diverId]'s own gear, newest first (issue
+  /// #4537); see [EquipmentColorQueries.gearColors].
+  Future<List<String>> getGearColors(String? diverId) =>
+      _colors.gearColors(diverId);
 
   /// Create new equipment. With [notify] false the caller notifies sync once
   /// its own transaction commits, as [createEquipmentWithTags] does.
@@ -1049,6 +1058,7 @@ class EquipmentRepository {
                 key: a.key,
                 valueText: a.valueText,
                 valueNum: a.valueNum,
+                valueUnit: a.valueUnit,
               ),
           EquipmentAttribute.curated(
             equipmentId: '',
@@ -1184,7 +1194,7 @@ class EquipmentRepository {
     String? diverId,
   }) async {
     try {
-      final searchTerm = '%${query.toLowerCase()}%';
+      final searchTerm = '%${foldForSearch(query)}%';
       // Qualified: tags has a diver_id and a name column too. Owned or
       // shared with [diverId] (issue #2046).
       final visibility = VisibilityFilter.equipmentSqlFragment(
@@ -1205,11 +1215,11 @@ class EquipmentRepository {
         SELECT DISTINCT e.* FROM equipment e
         LEFT JOIN equipment_tags et ON et.equipment_id = e.id
         LEFT JOIN tags t ON t.id = et.tag_id
-        WHERE (unicode_lower(e.name) LIKE ?
-           OR unicode_lower(e.brand) LIKE ?
-           OR unicode_lower(e.model) LIKE ?
-           OR unicode_lower(e.serial_number) LIKE ?
-           OR unicode_lower(t.name) LIKE ?)
+        WHERE (search_fold(e.name) LIKE ?
+           OR search_fold(e.brand) LIKE ?
+           OR search_fold(e.model) LIKE ?
+           OR search_fold(e.serial_number) LIKE ?
+           OR search_fold(t.name) LIKE ?)
         ${visibility.whereClause}
         ORDER BY e.is_active DESC, e.type ASC, e.name COLLATE NOCASE ASC
       ''', variables: variables).get();
@@ -2003,6 +2013,7 @@ class EquipmentRepository {
           ? (jsonDecode(row.customReminderDays!) as List<dynamic>).cast<int>()
           : null,
       parentEquipmentId: row.parentEquipmentId,
+      coverMediaId: row.coverMediaId,
       createdAt: DateTime.fromMillisecondsSinceEpoch(row.createdAt),
     );
   }
@@ -2033,6 +2044,7 @@ class EquipmentRepository {
         isCustom: row.isCustom,
         valueText: row.valueText,
         valueNum: row.valueNum,
+        valueUnit: row.valueUnit,
         sortOrder: row.sortOrder,
       );
 
@@ -2085,7 +2097,7 @@ class EquipmentRepository {
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
 
-    final normalized = desired.where((a) => a.hasValue).map((a) {
+    final normalized = desired.where((a) => a.hasContent).map((a) {
       if (a.isCustom) {
         return a.copyWith(
           equipmentId: equipmentId,
@@ -2095,6 +2107,10 @@ class EquipmentRepository {
       return a.copyWith(
         equipmentId: equipmentId,
         id: EquipmentAttribute.curatedId(equipmentId, a.key),
+        // A cylinder this large was entered on purpose, never typed as water
+        // cubic feet: the stamp keeps the v368 repair, which repeats after
+        // every sync apply, away from it (issue #4534).
+        valueUnit: stampedCylinderVolumeUnit(a.key, a.valueNum, a.valueUnit),
       );
     }).toList();
 
@@ -2129,6 +2145,7 @@ class EquipmentRepository {
             existing.attrKey == attr.key &&
             existing.valueText == attr.valueText &&
             existing.valueNum == attr.valueNum &&
+            existing.valueUnit == attr.valueUnit &&
             existing.sortOrder == attr.sortOrder;
         if (unchanged) continue;
 
@@ -2142,6 +2159,7 @@ class EquipmentRepository {
                 isCustom: Value(attr.isCustom),
                 valueText: Value(attr.valueText),
                 valueNum: Value(attr.valueNum),
+                valueUnit: Value(attr.valueUnit),
                 sortOrder: Value(attr.sortOrder),
                 createdAt: Value(existing?.createdAt ?? now),
                 updatedAt: Value(now),

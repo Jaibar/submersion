@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/presentation/widgets/trip_country_flags.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/selection/selection_checkbox_slot.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 /// Single-row flat tile for the trip list (maximum density).
 ///
@@ -66,7 +68,10 @@ class DenseTripListTile extends ConsumerWidget {
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(
+              horizontal: kRecordRowDenseHorizontalPadding,
+              vertical: 10,
+            ),
             child: Row(
               children: [
                 SelectionCheckboxSlot(
@@ -87,6 +92,7 @@ class DenseTripListTile extends ConsumerWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      TripCountryFlags(tripId: trip.id, maxFlags: 3, gap: 6),
                       if (nestingNote != null) ...[
                         const SizedBox(width: 8),
                         Flexible(
@@ -138,12 +144,9 @@ class DenseTripListTile extends ConsumerWidget {
                     textAlign: TextAlign.right,
                   ),
                 ),
-                ExcludeSemantics(
-                  child: Icon(
-                    Icons.chevron_right,
-                    color: secondaryTextColor,
-                    size: 18,
-                  ),
+                RecordListChevron(
+                  size: RecordListChevron.denseSize,
+                  color: secondaryTextColor,
                 ),
               ],
             ),

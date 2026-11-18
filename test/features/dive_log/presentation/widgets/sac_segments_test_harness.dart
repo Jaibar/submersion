@@ -70,6 +70,7 @@ Future<void> pumpSacSegmentsView(
   List<SacSegment>? gases,
   SacRateDisplay? rates,
   int? selectedTimestamp,
+  ValueChanged<int?>? onCursorSeconds,
   Widget? laneSelector,
   double width = 342,
   Locale locale = const Locale('en'),
@@ -83,16 +84,20 @@ Future<void> pumpSacSegmentsView(
       home: MediaQuery(
         data: MediaQueryData(textScaler: textScaler),
         child: Scaffold(
-          body: Center(
-            child: SizedBox(
-              width: width,
-              child: SacSegmentsView(
-                timeSegments: time ?? sacTimeSegments,
-                phaseSegments: phases ?? sacPhaseSegments,
-                gasSegments: gases ?? sacGasSegments,
-                rates: rates ?? sacRates(),
-                selectedTimestamp: selectedTimestamp,
-                laneSelector: laneSelector,
+          // The page scrolls, as the dive detail page does.
+          body: SingleChildScrollView(
+            child: Center(
+              child: SizedBox(
+                width: width,
+                child: SacSegmentsView(
+                  timeSegments: time ?? sacTimeSegments,
+                  phaseSegments: phases ?? sacPhaseSegments,
+                  gasSegments: gases ?? sacGasSegments,
+                  rates: rates ?? sacRates(),
+                  selectedTimestamp: selectedTimestamp,
+                  onCursorSeconds: onCursorSeconds,
+                  laneSelector: laneSelector,
+                ),
               ),
             ),
           ),

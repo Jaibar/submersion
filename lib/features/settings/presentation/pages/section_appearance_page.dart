@@ -611,6 +611,17 @@ class SectionAppearancePage extends ConsumerWidget {
         },
       ),
       SwitchListTile(
+        title: Text(context.l10n.settings_appearance_pinProfileOnScroll),
+        subtitle: Text(
+          context.l10n.settings_appearance_pinProfileOnScroll_subtitle,
+        ),
+        secondary: const Icon(Icons.vertical_align_top),
+        value: settings.pinProfileOnScroll,
+        onChanged: (value) {
+          ref.read(settingsProvider.notifier).setPinProfileOnScroll(value);
+        },
+      ),
+      SwitchListTile(
         title: Text(context.l10n.settings_appearance_pressureThresholdMarkers),
         subtitle: Text(
           context
@@ -802,6 +813,7 @@ class SectionAppearancePage extends ConsumerWidget {
       ProfileRightAxisMetric.cns => l10n.enum_profileMetric_cns,
       ProfileRightAxisMetric.otu => l10n.enum_profileMetric_otu,
       ProfileRightAxisMetric.o2CellMv => l10n.enum_profileMetric_o2CellMv,
+      ProfileRightAxisMetric.buoyancy => l10n.enum_profileMetric_buoyancy,
     };
   }
 
@@ -844,6 +856,8 @@ class SectionAppearancePage extends ConsumerWidget {
     settings.defaultShowPpHe,
     settings.defaultShowGasDensity,
     settings.defaultShowO2CellMv,
+    settings.defaultShowCounterdiffusion,
+    settings.defaultShowBuoyancy,
     settings.defaultShowGf,
     settings.defaultShowSurfaceGf,
     settings.defaultShowMeanDepth,

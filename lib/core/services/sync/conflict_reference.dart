@@ -106,6 +106,7 @@ class ConflictReferenceResolver {
     'observationId': 'equipmentObservations',
     'scooterEquipmentId': 'equipment',
     'setId': 'equipmentSets',
+    'includedSetId': 'equipmentSets',
     'equipmentSetId': 'equipmentSets',
     'configId': 'cylinderConfigs',
     'computerId': 'diveComputers',
@@ -128,6 +129,8 @@ class ConflictReferenceResolver {
     'speciesId': 'species',
     'sightingId': 'sightings',
     'mediaId': 'media',
+    // An item's cover photo (issue #3355).
+    'coverMediaId': 'media',
     'subscriptionId': 'mediaSubscriptions',
     'connectorAccountId': 'connectedAccounts',
     // Soft links with no Drift constraint (#694): the dialog would otherwise
@@ -163,6 +166,7 @@ class ConflictReferenceResolver {
     'dives': {'diveType': 'diveTypes'},
     'diveBuddies': {'role': 'diveRoles'},
     'weightPresetEntries': {'presetId': 'weightPresets'},
+    'equipmentSetWeightPresets': {'presetId': 'weightPresets'},
     'divePlanSegments': {'tankId': 'divePlanTanks'},
     'preDiveSessions': {'templateId': 'preDiveChecklistTemplates'},
     'preDiveChecklistTemplateItems': {

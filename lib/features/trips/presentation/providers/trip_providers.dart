@@ -5,7 +5,10 @@ import 'package:submersion/core/models/sort_state_codec.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/query/domain/query_node.dart';
 import 'package:submersion/core/text/text_sort.dart';
+import 'package:submersion/core/utils/stream_debounce.dart';
 
+import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart'
+    show DiveRepository;
 import 'package:submersion/features/dive_log/data/repositories/dive_times_sql.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart'
     as domain;
@@ -19,7 +22,10 @@ import 'package:submersion/features/query/presentation/providers/narrow_by_ids.d
 import 'package:submersion/features/query/presentation/providers/query_id_set_providers.dart';
 import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
 import 'package:submersion/features/trips/domain/constants/trip_field.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
+import 'package:submersion/features/trips/data/repositories/trip_country_queries.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/domain/entities/trip_country.dart';
 import 'package:submersion/features/trips/query/trip_filter_query.dart';
 import 'package:submersion/shared/models/entity_card_view_config.dart';
 import 'package:submersion/shared/models/entity_table_config.dart';
@@ -78,6 +84,11 @@ void setTripQuery(WidgetRef ref, QueryNode? query) {
   );
 }
 
+/// Drops every axis of the trip list's filter: the list's Clear all, and the
+/// Trips overview's (issue #4414).
+void clearTripFilter(WidgetRef ref) =>
+    ref.read(tripFilterProvider.notifier).state = const TripFilterState();
+
 /// Repository provider
 final tripRepositoryProvider = Provider<TripRepository>((ref) {
   return TripRepository();
@@ -111,6 +122,31 @@ final allTripsWithStatsProvider = FutureProvider<List<TripWithStats>>((
   invalidateOnTripListChanges(ref);
   return repository.getAllTripsWithStats(diverId: validatedDiverId);
 });
+
+/// Every trip's countries, for the flags beside trips (issue #4426): one
+/// read for the whole list, scoped like the trips' dive counts.
+final tripCountryQueriesProvider = Provider<TripCountryQueries>(
+  (ref) => TripCountryQueries(),
+);
+
+/// Auto-disposed: with no trip screen showing flags it stops, so dive and
+/// site writes elsewhere do not keep re-running its query.
+final tripCountriesProvider =
+    FutureProvider.autoDispose<Map<String, List<TripCountry>>>((ref) async {
+      final queries = ref.watch(tripCountryQueriesProvider);
+      final validatedDiverId = await ref.watch(
+        validatedCurrentDiverIdProvider.future,
+      );
+      // Covers trips and every dives write (a dive moved to another site
+      // included).
+      invalidateOnTripListChanges(ref);
+      // A site's country edited changes the flags without touching the trips
+      // or dives tables.
+      ref.invalidateSelfWhen(
+        ref.read(siteRepositoryProvider).watchSitesChanges(),
+      );
+      return queries.getTripCountries(diverId: validatedDiverId);
+    });
 
 /// Rebuilds [ref]'s provider whenever [allTripsWithStatsProvider] would
 /// refresh, for a read of some of the same entries (Global Search's rows,
@@ -255,9 +291,10 @@ final tripByIdProvider = FutureProvider.family<Trip?, String>((ref, id) async {
 /// Self-invalidates on `dives` table writes for the same reason
 /// [TripListNotifier] subscribes to them: `getTripWithStats` LEFT JOINs the
 /// dives table, so a merge/consolidate or a sync apply changes the counts
-/// without touching the trip row. The trip detail page renders this through
-/// `TripStatStrip` directly above the itinerary that [divesForTripProvider]
-/// feeds, so leaving it stale would show "5 dives" over a list of 4.
+/// without touching the trip row. The trip detail page renders this as the
+/// Trip page's totals directly above the day lines that
+/// [divesForTripProvider] feeds, so leaving it stale would show "5 dives"
+/// over days that add up to 4.
 ///
 /// Watches BOTH tables because `getTripWithStats` reads both: it calls
 /// `getTripById` before running the dives aggregate, and the page renders the
@@ -330,6 +367,16 @@ final divesForTripProvider = FutureProvider.family<List<domain.Dive>, String>((
   ref.invalidateSelfWhen(diveRepository.watchTables(measuredRuntimeTables));
   // And a side trip linked or unlinked (issue #3658).
   ref.invalidateSelfWhen(tripRepository.watchTripsChanges());
+  // Each dive carries its site, whose name and location the day lines show.
+  // A site edited writes only the site row, never the dives at it (#4624).
+  // Debounced like the dive ticks: a catalogue fill or a sync pull writes
+  // many sites at once, and one reload covers them all.
+  ref.invalidateSelfWhen(
+    ref
+        .read(siteRepositoryProvider)
+        .watchSitesChanges()
+        .debounce(DiveRepository.changeTickDebounce),
+  );
 
   final diveIds = await tripRepository.getDiveIdsForTrip(
     tripId,

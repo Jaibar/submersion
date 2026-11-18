@@ -1,6 +1,7 @@
 import 'package:equatable/equatable.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/features/dive_sites/domain/entities/site_catalogue_answers.dart';
 
 /// Site difficulty levels
 enum SiteDifficulty {
@@ -43,6 +44,10 @@ class DiveSite extends Equatable {
   final SiteDifficulty? difficulty; // Site difficulty level
   final WaterType? waterType; // Salt / fresh / brackish
   final String? country;
+
+  /// The country's ISO 3166-1 alpha-2 code (issue #4426): the geocoder's,
+  /// or read from [country]. Null when neither named one.
+  final String? countryCode;
   final String? region;
   final String? city;
   final String? island;
@@ -69,6 +74,17 @@ class DiveSite extends Equatable {
   /// personal site.
   final String? sharedLibraryId;
 
+  /// The id of the built-in catalogue record this site was adopted from;
+  /// null for a site the diver made by hand. It records where the site came
+  /// from: written when the site is created, never by an ordinary edit.
+  final String? catalogueId;
+
+  /// What the diver has settled about catalogue records for this site:
+  /// records it also stands for, records that are a different place, and
+  /// details turned down. Like [catalogueId], never written by an
+  /// ordinary edit.
+  final SiteCatalogueAnswers catalogueAnswers;
+
   const DiveSite({
     required this.id,
     this.diverId,
@@ -80,6 +96,7 @@ class DiveSite extends Equatable {
     this.difficulty,
     this.waterType,
     this.country,
+    this.countryCode,
     this.region,
     this.city,
     this.island,
@@ -96,10 +113,21 @@ class DiveSite extends Equatable {
     this.exitMethods = const [],
     this.isShared = false,
     this.sharedLibraryId,
+    this.catalogueId,
+    this.catalogueAnswers = SiteCatalogueAnswers.empty,
   });
 
   /// Whether this site belongs to a shared site library (issue #2567).
   bool get isLibrarySite => sharedLibraryId != null;
+
+  /// Whether the site has anything about getting in and out: parking,
+  /// access notes, a mooring, or entry and exit methods.
+  bool get hasAccessInfo =>
+      (parkingInfo?.isNotEmpty ?? false) ||
+      (accessNotes?.isNotEmpty ?? false) ||
+      (mooringNumber?.isNotEmpty ?? false) ||
+      entryMethods.isNotEmpty ||
+      exitMethods.isNotEmpty;
 
   /// The site's entry method when it lists exactly one, else null: with
   /// several there is no telling which one a given dive used.
@@ -161,6 +189,7 @@ class DiveSite extends Equatable {
     SiteDifficulty? difficulty,
     WaterType? waterType,
     String? country,
+    String? countryCode,
     String? region,
     String? city,
     String? island,
@@ -178,6 +207,9 @@ class DiveSite extends Equatable {
     bool? isShared,
     String? sharedLibraryId,
     bool clearSharedLibraryId = false,
+    String? catalogueId,
+    bool clearCatalogueId = false,
+    SiteCatalogueAnswers? catalogueAnswers,
     bool clearRating = false,
     bool clearLocation = false,
     bool clearMinDepth = false,
@@ -185,6 +217,7 @@ class DiveSite extends Equatable {
     bool clearDifficulty = false,
     bool clearWaterType = false,
     bool clearCountry = false,
+    bool clearCountryCode = false,
     bool clearRegion = false,
     bool clearCity = false,
     bool clearIsland = false,
@@ -193,6 +226,7 @@ class DiveSite extends Equatable {
     bool clearAccessNotes = false,
     bool clearMooringNumber = false,
     bool clearParkingInfo = false,
+    bool clearAltitude = false,
   }) {
     return DiveSite(
       id: id ?? this.id,
@@ -205,6 +239,10 @@ class DiveSite extends Equatable {
       difficulty: clearDifficulty ? null : difficulty ?? this.difficulty,
       waterType: clearWaterType ? null : waterType ?? this.waterType,
       country: clearCountry ? null : country ?? this.country,
+      // A code names its country: clearing the country clears it too.
+      countryCode: clearCountry || clearCountryCode
+          ? null
+          : countryCode ?? this.countryCode,
       region: clearRegion ? null : region ?? this.region,
       city: clearCity ? null : city ?? this.city,
       island: clearIsland ? null : island ?? this.island,
@@ -218,13 +256,15 @@ class DiveSite extends Equatable {
           ? null
           : mooringNumber ?? this.mooringNumber,
       parkingInfo: clearParkingInfo ? null : parkingInfo ?? this.parkingInfo,
-      altitude: altitude ?? this.altitude,
+      altitude: clearAltitude ? null : altitude ?? this.altitude,
       entryMethods: entryMethods ?? this.entryMethods,
       exitMethods: exitMethods ?? this.exitMethods,
       isShared: isShared ?? this.isShared,
       sharedLibraryId: clearSharedLibraryId
           ? null
           : (sharedLibraryId ?? this.sharedLibraryId),
+      catalogueId: clearCatalogueId ? null : (catalogueId ?? this.catalogueId),
+      catalogueAnswers: catalogueAnswers ?? this.catalogueAnswers,
     );
   }
 
@@ -240,6 +280,7 @@ class DiveSite extends Equatable {
     difficulty,
     waterType,
     country,
+    countryCode,
     region,
     city,
     island,
@@ -256,6 +297,8 @@ class DiveSite extends Equatable {
     exitMethods,
     isShared,
     sharedLibraryId,
+    catalogueId,
+    catalogueAnswers,
   ];
 }
 

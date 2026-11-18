@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -183,6 +184,15 @@ class BackupService {
   /// Moves a browser's other tabs onto the restored library and deletes the
   /// one it replaced.
   final Future<void> Function(String replacedPath) _retireLibrary;
+
+  /// How long a prune waits for the cloud backup folder's listing before it
+  /// carries on without one (issue #4572). Injectable for tests.
+  final Duration _cloudListingTimeout;
+
+  /// The default for [_cloudListingTimeout]: generous for a slow mobile
+  /// network, and well inside the 10 minutes Android gives a background
+  /// worker after its upload.
+  static const Duration defaultCloudListingTimeout = Duration(seconds: 60);
   final _log = LoggerService.forClass(BackupService);
   final _uuid = const Uuid();
 
@@ -213,6 +223,7 @@ class BackupService {
     })?
     restoreImage,
     Future<void> Function(String replacedPath)? retireLibrary,
+    Duration cloudListingTimeout = defaultCloudListingTimeout,
   }) : _dbAdapter = dbAdapter,
        _preferences = preferences,
        _cloudProvider = cloudProvider,
@@ -229,7 +240,8 @@ class BackupService {
        _extraCopies = List.unmodifiable(extraCopies),
        _restoreImage = restoreImage ?? DatabaseService.instance.restoreImage,
        _retireLibrary =
-           retireLibrary ?? DatabaseService.instance.retireWebLibrary;
+           retireLibrary ?? DatabaseService.instance.retireWebLibrary,
+       _cloudListingTimeout = cloudListingTimeout;
 
   // ===========================================================================
   // Backup
@@ -244,9 +256,13 @@ class BackupService {
   /// [note] is the diver's optional description: it is stamped into the file
   /// and kept on the record. An automatic backup never carries one, so it is
   /// ignored when [isAutomatic] is set.
+  ///
+  /// [pin] records the backup pinned from the start, so no prune, this one's
+  /// included, can remove it (issue #4535). Ignored for an automatic backup.
   Future<BackupRecord> performBackup({
     bool isAutomatic = false,
     String? note,
+    bool pin = false,
   }) async {
     DemoModeGate.instance.ensureNotDemo(DemoSealedFeature.backup);
     _log.info('Starting backup (automatic: $isAutomatic)');
@@ -265,6 +281,7 @@ class BackupService {
         lease.target,
         isAutomatic: isAutomatic,
         note: isAutomatic ? null : normalizeBackupNote(note),
+        pin: pin && !isAutomatic,
         toChosenFolder: toChosenFolder,
       );
     } finally {
@@ -277,6 +294,7 @@ class BackupService {
     required bool isAutomatic,
     required bool toChosenFolder,
     String? note,
+    bool pin = false,
   }) async {
     final filename = await _generateFilename();
     final encKey = await _activeBackupKey();
@@ -386,6 +404,7 @@ class BackupService {
       cloudAccountId: cloudFileId == null ? null : uploadAccountId,
       localPath: ref,
       isAutomatic: isAutomatic,
+      pinned: pin,
       note: note,
       extraCloudCopies: extras.copies,
     );
@@ -415,6 +434,12 @@ class BackupService {
           : LastBackupDestination.device,
       cloudAccountId: offDevice ? reachedAccountId : null,
     );
+
+    // Other devices see a pin only through its marker (issue #3503). Written
+    // after the bookkeeping above, which a slow upload must not hold up, and
+    // before the prune, whose marker reconcile then finds it in place. Never
+    // throws; reconciliation repairs a marker that did not land.
+    if (pin) await _writePinMarker(record);
 
     // Prune old backups
     await pruneOldBackups(settings.retentionCount);

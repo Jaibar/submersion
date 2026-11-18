@@ -85,14 +85,23 @@ void main() {
     );
   });
 
-  test('a delete copy only table gets one trigger', () {
+  test('a delete copy only table gets a delete and an opt-in update '
+      'trigger', () {
     final statements = buildChangeLogTriggers(
       _specFor(db, 'dive_profile_series'),
       ChangeLogClass.deleteCopyOnly,
       schemaVersion: 1,
     );
-    expect(statements, hasLength(1));
-    expect(statements.single, contains('AFTER DELETE'));
+    expect(statements, hasLength(2));
+    expect(statements.where((s) => s.contains('AFTER DELETE')), hasLength(1));
+    final update = statements.singleWhere((s) => s.contains('AFTER UPDATE'));
+    expect(
+      update,
+      contains(
+        "o.label IN ('remove_duplicate_cylinders', 'remove_source', "
+        "'update_planned_dives')",
+      ),
+    );
   });
 
   test('an excluded table gets none', () {
@@ -126,6 +135,28 @@ void main() {
     expect(
       changeLogTriggersHash(first),
       isNot(changeLogTriggersHash(first.skip(1).toList())),
+    );
+  });
+
+  String updateTriggerOf(String table) => buildChangeLogTriggers(
+    _specFor(db, table),
+    changeLogTables[table]!,
+    schemaVersion: 1,
+  ).singleWhere((s) => s.contains('AFTER UPDATE'));
+
+  test('a finding gets an opt-in update trigger that compares only '
+      'dismissed_at', () {
+    final update = updateTriggerOf('dive_safety_findings');
+    expect(update, contains('OLD."dismissed_at" IS NOT NEW."dismissed_at"'));
+    expect(update, isNot(contains('"severity"')));
+    expect(update, isNot(contains('"value"')));
+    expect(update, isNot(contains('"engine_version"')));
+  });
+
+  test('the opt-in clause matches a sitting by its label prefix', () {
+    expect(
+      updateTriggerOf('dive_profile_series'),
+      contains("substr(o.label, 1, 12) = 'record_edit:'"),
     );
   });
 

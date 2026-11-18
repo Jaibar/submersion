@@ -23,9 +23,11 @@ import 'package:submersion/core/services/export/uddf/uddf_sighting_amount.dart';
 import 'package:submersion/core/services/export/uddf/uddf_sighting_species.dart';
 import 'package:submersion/core/services/export/uddf/uddf_source_attribution.dart';
 import 'package:submersion/core/services/export/uddf/uddf_tank_ref_router.dart';
+import 'package:submersion/core/utils/dive_rating_scale.dart';
 import 'package:submersion/core/utils/off_isolate.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/services/transmitter_serial.dart';
+import 'package:submersion/features/media/domain/services/dive_media_clock.dart';
 import 'package:submersion/features/universal_import/data/csv/transforms/dive_type_mapper.dart';
 
 /// Handles comprehensive UDDF import including all application data.
@@ -1683,6 +1685,14 @@ class UddfFullImportService {
       if (gasSwitchesEdited?.toLowerCase() == 'true') {
         diveData['gasSwitchesEdited'] = true;
       }
+      final mediaTimeOffset = int.tryParse(
+        UddfImportParsers.getElementText(afterElement, 'mediatimeoffset') ?? '',
+      );
+      // A value no camera could be out by is a damaged file, not a shift.
+      if (mediaTimeOffset != null &&
+          DiveMediaClock.isValidOffset(mediaTimeOffset)) {
+        diveData['mediaTimeOffsetSeconds'] = mediaTimeOffset;
+      }
 
       // Parse additional weights (app-specific, beyond single weight)
       final weightsElement = afterElement.findElements('weights').firstOrNull;
@@ -2967,16 +2977,18 @@ class UddfFullImportService {
         }
       }
 
-      // Parse rating
+      // Parse rating. UDDF rates on 1 to 10, which Diving Log writes with 0
+      // for an unrated dive; Submersion's own files have always written the
+      // 1 to 5 star count (issue #4415).
       final ratingElement = afterElement.findElements('rating').firstOrNull;
       if (ratingElement != null) {
-        final ratingValue = UddfImportParsers.getElementText(
-          ratingElement,
-          'ratingvalue',
+        final ratingValue = UddfImportParsers.parseUddfInt(
+          UddfImportParsers.getElementText(ratingElement, 'ratingvalue'),
         );
-        if (ratingValue != null) {
-          diveData['rating'] = UddfImportParsers.parseUddfInt(ratingValue);
-        }
+        final stars = UddfImportParsers.writtenBySubmersion(diveElement)
+            ? DiveRatingScale.normalize(ratingValue)
+            : DiveRatingScale.fromUddf(ratingValue);
+        if (stars != null) diveData['rating'] = stars;
       }
 
       // Parse notes (try nested <para> first, then direct text content)

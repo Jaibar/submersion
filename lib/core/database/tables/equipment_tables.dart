@@ -54,6 +54,12 @@ class Equipment extends Table {
     #id,
     onDelete: KeyAction.setNull,
   )();
+
+  /// The media row chosen to represent this item in the equipment list and
+  /// page header; null shows the type icon (v352, issue #3355). No foreign
+  /// key: a peer can delete the photo, and a reader treats an id with no
+  /// row as none.
+  TextColumn get coverMediaId => text().nullable()();
   IntColumn get createdAt => integer()();
   IntColumn get updatedAt => integer()();
 
@@ -79,6 +85,11 @@ class EquipmentAttributes extends Table {
   BoolColumn get isCustom => boolean().withDefault(const Constant(false))();
   TextColumn get valueText => text().nullable()();
   RealColumn get valueNum => real().nullable()();
+
+  /// The unit this item's number is read in (an AttributeUnit name such as
+  /// psi, pounds or dual), or null to follow the diver's settings, while
+  /// value_num stays metric
+  TextColumn get valueUnit => text().nullable()();
   IntColumn get sortOrder => integer().withDefault(const Constant(0))();
   IntColumn get createdAt => integer()();
   IntColumn get updatedAt => integer()();

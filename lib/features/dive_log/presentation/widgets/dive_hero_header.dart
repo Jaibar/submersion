@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/dive_log/presentation/formatters/dive_title.dart';
 import 'package:submersion/features/dive_log/presentation/formatters/dive_type_label.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_locations_map.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_mode_badge.dart';
@@ -13,6 +14,7 @@ import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.
 import 'package:submersion/features/dive_types/presentation/providers/dive_type_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/utils/ink_centered_text_style.dart';
+import 'package:submersion/shared/widgets/country_flag.dart';
 import 'package:submersion/features/shared_library/presentation/widgets/library_site_badge.dart';
 
 /// A dive's hero header: map backdrop, number badge, name and site, entry and
@@ -46,6 +48,10 @@ class DiveHeroHeader extends ConsumerWidget {
   /// card is a button; when null the map is purely decorative.
   final VoidCallback? onSiteTap;
 
+  /// Drawn at the end of the title row, such as the header card's pencil
+  /// on a dive page that offers editing.
+  final Widget? titleTrailing;
+
   const DiveHeroHeader({
     required this.dive,
     required this.units,
@@ -55,6 +61,7 @@ class DiveHeroHeader extends ConsumerWidget {
     this.bottomTimeText,
     this.belowTitle,
     this.onSiteTap,
+    this.titleTrailing,
     super.key,
   });
 
@@ -141,9 +148,7 @@ class DiveHeroHeader extends ConsumerWidget {
                           children: [
                             Flexible(
                               child: Text(
-                                dive.effectiveName ??
-                                    dive.site?.name ??
-                                    context.l10n.diveLog_listPage_unknownSite,
+                                diveTitle(context, dive),
                                 style: Theme.of(context).textTheme.titleLarge,
                               ),
                             ),
@@ -151,6 +156,7 @@ class DiveHeroHeader extends ConsumerWidget {
                             // name it shows as (issue #2567).
                             if (dive.effectiveName == null && dive.site != null)
                               LibrarySiteBadge(site: dive.site!),
+                            ?titleTrailing,
                           ],
                         ),
                         ?belowTitle,
@@ -170,10 +176,16 @@ class DiveHeroHeader extends ConsumerWidget {
                             ],
                           ),
                         if (dive.site?.locationString.isNotEmpty == true)
-                          Text(
-                            dive.site!.locationString,
-                            style: Theme.of(context).textTheme.bodyMedium
-                                ?.copyWith(color: colorScheme.onSurfaceVariant),
+                          LocationWithFlag(
+                            country: dive.site!.country,
+                            countryCode: dive.site!.countryCode,
+                            text: Text(
+                              dive.site!.locationString,
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(
+                                    color: colorScheme.onSurfaceVariant,
+                                  ),
+                            ),
                           ),
                         Text(
                           '${context.l10n.diveLog_detail_label_entry} ${units.formatDateTimeBullet(dive.effectiveEntryTime)}',

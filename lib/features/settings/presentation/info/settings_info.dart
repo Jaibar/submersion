@@ -18,6 +18,7 @@ enum SettingsInfoSection {
   plannerGas,
   plannerContingency,
   plannerDpvTeam,
+  plannerRebreather,
   safetyReviewRules,
   conditionThresholds,
   sensorSummaries,
@@ -106,6 +107,12 @@ InfoContent settingsSectionInfo(
       'dpvTeam',
       l10n.settings_decompression_header_plannerDpvTeam,
     ),
+    SettingsInfoSection.plannerRebreather => _plannerDefaultInfo(
+      l10n,
+      units,
+      'scr',
+      l10n.settings_decompression_header_plannerRebreather,
+    ),
     SettingsInfoSection.safetyReviewRules => termsInfo(
       l10n,
       units,
@@ -118,6 +125,8 @@ InfoContent settingsSectionInfo(
         DiveTerm.sawtooth,
         DiveTerm.surfaceGf,
         DiveTerm.lateGasSwitch,
+        DiveTerm.isobaricCounterdiffusion,
+        DiveTerm.counterdiffusionProfile,
       ],
     ),
     SettingsInfoSection.conditionThresholds => termsInfo(

@@ -6,6 +6,7 @@ import 'package:submersion/features/dive_log/presentation/profile_colors/profile
 import 'package:submersion/features/dive_log/presentation/profile_colors/profile_metric_palette.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_legend_provider.dart';
 import 'package:submersion/features/dive_log/presentation/utils/gas_switch_format.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/counterdiffusion_overlay.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/gas_colors.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/legend_candidates.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/o2_cell_readout.dart';
@@ -19,7 +20,14 @@ class ActiveLegendEntry {
   final String label;
   final Color color;
 
-  const ActiveLegendEntry({required this.label, required this.color});
+  /// The second colour of a line drawn in two (the buoyancy line, #4593).
+  final Color? secondColor;
+
+  const ActiveLegendEntry({
+    required this.label,
+    required this.color,
+    this.secondColor,
+  });
 }
 
 /// The metrics currently drawn on the chart, in the order the options dialog
@@ -54,9 +62,17 @@ List<ActiveLegendEntry> activeLegendEntries(
   );
 
   /// A metric drawn only for the active source.
-  void add(bool present, bool active, String label, Color color) {
+  void add(
+    bool present,
+    bool active,
+    String label,
+    Color color, {
+    Color? secondColor,
+  }) {
     if (present && active) {
-      entries.add(ActiveLegendEntry(label: label, color: color));
+      entries.add(
+        ActiveLegendEntry(label: label, color: color, secondColor: secondColor),
+      );
     }
   }
 
@@ -151,6 +167,14 @@ List<ActiveLegendEntry> activeLegendEntries(
     l10n.diveLog_legend_label_sacRate,
     palette.colorOf(ProfileMetric.sac),
   );
+  // One entry for the two-coloured line (#4593).
+  add(
+    config.hasBuoyancyLine,
+    state.showBuoyancy,
+    l10n.diveLog_legend_label_buoyancy,
+    ProfileMetricColors.buoyancyBuoyant,
+    secondColor: ProfileMetricColors.buoyancyHeavy,
+  );
   add(
     config.hasAscentRates,
     state.showAscentRateColors,
@@ -188,6 +212,12 @@ List<ActiveLegendEntry> activeLegendEntries(
     state.showLateGasSwitches,
     l10n.diveLog_legend_label_lateGasSwitches,
     lateSwitchLegendColor,
+  );
+  add(
+    config.hasCounterdiffusion,
+    state.showCounterdiffusion,
+    l10n.diveLog_legend_label_counterdiffusion,
+    counterdiffusionIcdColor,
   );
   add(
     config.hasPhotoMarkers,

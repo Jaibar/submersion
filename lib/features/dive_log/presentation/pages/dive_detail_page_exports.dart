@@ -389,23 +389,36 @@ mixin _DiveDetailPageExports on ConsumerState<DiveDetailPage> {
       //
       // Best-effort: these enrich the document rather than define it, so a
       // failed lookup degrades to a plainer export instead of no export.
-      var exportDive = dive;
-      List<Certification>? certifications;
-      Diver? diver;
-      Uint8List? diverPhoto;
-      try {
-        final buddies = await ref.read(buddiesForDiveProvider(dive.id).future);
-        if (buddies.isNotEmpty) exportDive = dive.copyWith(buddies: buddies);
-        if (pdfOptions.includeCertificationCards) {
-          certifications = await ref.read(allCertificationsProvider.future);
-        }
-        diver = await ref.read(currentDiverProvider.future);
+      // The dive's owner, as this page's Buddies card shows: a sibling dive
+      // from another profile is theirs, not the active diver's (#4458).
+      // Independent reads, so they run together, and each fails on its own:
+      // a failed owner lookup must not drop the buddies, nor the reverse.
+      final (buddies, owner) = await (
+        _valueOrNull(ref.read(buddiesForDiveProvider(dive.id).future)),
+        // Held with a listener: nothing on this page need be watching the
+        // owner (a dive with no roles of the diver's own), and a paused
+        // provider whose active-diver dependency settles mid-load would
+        // otherwise never complete (#3807).
+        _valueOrNull(
+          ref.container.awaitFuture(diveOwnerProvider(dive.diverId).future),
+        ),
+      ).wait;
+      final exportDive = buddies != null && buddies.isNotEmpty
+          ? dive.copyWith(buddies: buddies)
+          : dive;
+      // The owner's cards and portrait depend on the owner but not on each
+      // other, so they load together too.
+      final (certifications, diverPhoto) = await (
+        pdfOptions.includeCertificationCards
+            ? _ownerCertifications(owner?.id ?? dive.diverId)
+            : Future<List<Certification>?>.value(),
         // The portrait travels with the diver: passing one without the other
-        // leaves the Detailed front matter on its placeholder frame.
-        diverPhoto = await ref.read(diverPhotoLoaderProvider)(diver?.photoPath);
-      } catch (_) {
-        // Export the dive as loaded.
-      }
+        // leaves the Detailed front matter on its placeholder frame. An
+        // unreadable portrait still keeps the diver.
+        _valueOrNull<Uint8List?>(
+          diverPortrait(owner, ref.read(diverPhotoLoaderProvider)),
+        ),
+      ).wait;
       // Awaited, not read from the page's snapshot: an export started while
       // the types load would otherwise print every name rebuilt from its id.
       final diveTypesById = await diveTypesByIdOrEmpty(
@@ -422,7 +435,7 @@ mixin _DiveDetailPageExports on ConsumerState<DiveDetailPage> {
         options: pdfOptions,
         profiles: profiles,
         certifications: certifications,
-        diver: diver,
+        diver: owner,
         diverPhoto: diverPhoto,
         diveTypesById: diveTypesById,
         diveRolesById: await diveRoleMapOrEmpty(
@@ -474,6 +487,33 @@ mixin _DiveDetailPageExports on ConsumerState<DiveDetailPage> {
         );
       }
     }
+  }
+
+  /// The certification cards of the dive's owner [ownerId] for its PDF, or
+  /// null when they cannot be read.
+  ///
+  /// By id even when that diver did not resolve: falling back to the active
+  /// diver's cards would print them on another profile's dive. Only a dive
+  /// with no owner is the active diver's. The active diver's own cards come
+  /// from the cached provider the app already keeps, rather than a fresh read.
+  Future<List<Certification>?> _ownerCertifications(String? ownerId) async {
+    if (ownerId != null) {
+      // Held with a listener, like the owner: an unwatched read of a provider
+      // invalidated mid-load would never complete (#3807).
+      final activeId = await _valueOrNull(
+        ref.container.awaitFuture(validatedCurrentDiverIdProvider.future),
+      );
+      if (ownerId != activeId) {
+        return _valueOrNull(
+          ref.read(diverCertificationsLoaderProvider)(ownerId),
+        );
+      }
+    }
+    // Held with a listener too: it watches the active diver, so a change
+    // mid-read would otherwise leave this future pending for good (#3807).
+    return _valueOrNull(
+      ref.container.awaitFuture(allCertificationsProvider.future),
+    );
   }
 
   /// [shareAnchor] is the overflow button this sheet was opened from.
@@ -751,3 +791,13 @@ enum _ProfileExportAction { saveToPhotos, saveToFile, share }
 
 /// Actions available for PDF export
 enum _PdfExportAction { saveToFile, share }
+
+/// [future]'s value, or null when it fails: for the lookups that enrich an
+/// export rather than define it, so each one degrades on its own.
+Future<T?> _valueOrNull<T>(Future<T> future) async {
+  try {
+    return await future;
+  } catch (_) {
+    return null;
+  }
+}

@@ -98,6 +98,19 @@ class ProfileLegendConfig {
 
   /// The dive has late or missed gas switch windows to shade (#2939).
   final bool hasLateGasSwitches;
+
+  /// Helium is breathed or held in the tissues, so the counterdiffusion
+  /// overlay has something to show (#4530).
+  final bool hasCounterdiffusion;
+
+  /// The dive can be modelled (a tank or an exposure suit), so the buoyancy
+  /// line can be offered (#4593).
+  final bool hasBuoyancy;
+
+  /// A buoyancy curve the line can draw has arrived, so the legend and the
+  /// info sheet can name it. Unlike [hasBuoyancy], false while the model
+  /// is loading or if it failed (#4593).
+  final bool hasBuoyancyLine;
   final bool hasPhotoMarkers;
   final bool hasMultiTankPressure;
   final bool hasGasData;
@@ -159,6 +172,9 @@ class ProfileLegendConfig {
     this.hasPressureMarkers = false,
     this.hasGasSwitches = false,
     this.hasLateGasSwitches = false,
+    this.hasCounterdiffusion = false,
+    this.hasBuoyancy = false,
+    this.hasBuoyancyLine = false,
     this.hasPhotoMarkers = false,
     this.hasMultiTankPressure = false,
     this.hasGasData = false,
@@ -201,6 +217,8 @@ class ProfileLegendConfig {
       hasPressureMarkers ||
       hasGasSwitches ||
       hasLateGasSwitches ||
+      hasCounterdiffusion ||
+      hasBuoyancy ||
       hasPhotoMarkers ||
       hasTankListSection ||
       hasGasData ||

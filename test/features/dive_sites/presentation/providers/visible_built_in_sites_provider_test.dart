@@ -1,66 +1,333 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
-import 'package:submersion/features/dive_sites/data/services/dive_site_api_service.dart';
+import 'package:submersion/features/dive_sites/domain/entities/catalogue_bounds.dart';
+import 'package:submersion/features/dive_sites/domain/entities/catalogue_site.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/built_in_map_layers_provider.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/built_in_sites_providers.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_catalogue_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 
-ExternalDiveSite ext(String id, double lat, double lng) => ExternalDiveSite(
-  externalId: id,
+import '../../../../helpers/fake_site_catalogue.dart';
+
+CatalogueSite _at(
+  String id,
+  double lat,
+  double lng, {
+  CatalogueKind kind = CatalogueKind.site,
+}) => CatalogueSite(
+  id: id,
   name: id,
-  latitude: lat,
-  longitude: lng,
-  source: 't',
+  location: GeoPoint(lat, lng),
+  source: 'osm',
+  kind: kind,
 );
+
+SiteWithDiveCount _mine(DiveSite site) =>
+    SiteWithDiveCount(site: site, diveCount: 0);
+
+const _tropics = CatalogueBounds(south: 0, west: -80, north: 30, east: -60);
+const _north = CatalogueBounds(south: 40, west: -10, north: 60, east: 10);
+
+/// A container over [catalogue] whose overlay providers stay alive for
+/// the test, as a map on screen keeps them. Both [layers] are on unless a
+/// test is about them.
+ProviderContainer _container(
+  FakeSiteCatalogue catalogue, {
+  List<DiveSite> mine = const [],
+  BuiltInMapLayers layers = const BuiltInMapLayers(registers: true),
+}) {
+  final container = ProviderContainer(
+    overrides: [
+      siteCatalogueProvider.overrideWithValue(catalogue),
+      builtInMapLayersNotifierProvider.overrideWith(
+        (ref) => BuiltInMapLayersNotifier.unstored(layers),
+      ),
+      sitesWithCountsProvider.overrideWith(
+        (ref) async => mine.map(_mine).toList(),
+      ),
+    ],
+  );
+  addTearDown(container.dispose);
+  container.listen(visibleBuiltInSitesProvider, (_, _) {});
+  container.listen(builtInOverlayTruncatedProvider, (_, _) {});
+  return container;
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('showBuiltInSitesProvider defaults to false', () {
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-    expect(container.read(showBuiltInSitesProvider), isFalse);
+  group('layers', () {
+    final mixed = [
+      _at('site', 12, -68),
+      _at('wreck', 13, -69, kind: CatalogueKind.register),
+    ];
+
+    test('by default only dive sites are asked for and marked', () async {
+      final catalogue = FakeSiteCatalogue(mixed);
+      final container = _container(catalogue, layers: const BuiltInMapLayers());
+
+      container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+      final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+      expect(sites.map((s) => s.id), ['site']);
+      expect(catalogue.kindsAsked.last, {CatalogueKind.site});
+    });
+
+    test('with both layers on both kinds are asked for', () async {
+      final catalogue = FakeSiteCatalogue(mixed);
+      final container = _container(catalogue);
+
+      container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+      final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+      expect(sites.map((s) => s.id), ['site', 'wreck']);
+      expect(catalogue.kindsAsked.last, {
+        CatalogueKind.site,
+        CatalogueKind.register,
+      });
+    });
+
+    test('with both layers off nothing is read', () async {
+      final catalogue = FakeSiteCatalogue(mixed);
+      final container = _container(
+        catalogue,
+        layers: const BuiltInMapLayers(diveSites: false),
+      );
+
+      container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+
+      expect(await container.read(visibleBuiltInSitesProvider.future), isEmpty);
+      expect(catalogue.inBoundsCalls, 0);
+      expect(container.read(builtInOverlayTruncatedProvider), isFalse);
+    });
+
+    test('turning a layer off drops its records', () async {
+      final catalogue = FakeSiteCatalogue(mixed);
+      final container = _container(catalogue);
+      container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+      expect(
+        await container.read(visibleBuiltInSitesProvider.future),
+        hasLength(2),
+      );
+
+      await container
+          .read(builtInMapLayersNotifierProvider.notifier)
+          .setLayer(CatalogueKind.register, false);
+      final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+      expect(sites.map((s) => s.id), ['site']);
+    });
+
+    test('a view cut short by register records is not cut short with '
+        'dive sites alone', () async {
+      final catalogue = FakeSiteCatalogue([
+        _at('site', 12, -68),
+        for (var i = 0; i < kBuiltInOverlayMarkerLimit + 5; i++)
+          _at('w$i', 10 + i * 0.001, -70, kind: CatalogueKind.register),
+      ]);
+      final container = _container(catalogue, layers: const BuiltInMapLayers());
+
+      container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+      final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+      expect(sites.map((s) => s.id), ['site']);
+      expect(container.read(builtInOverlayTruncatedProvider), isFalse);
+    });
+
+    test('the limit is of markers shown, with dive sites alone', () async {
+      // Ten more dive sites than the limit, twenty of them the diver's.
+      final container = _container(
+        FakeSiteCatalogue([
+          for (var i = 0; i < kBuiltInOverlayMarkerLimit + 10; i++)
+            _at('s$i', 15 + i * 0.001, -70),
+        ]),
+        mine: [
+          for (var i = 0; i < 20; i++)
+            DiveSite(
+              id: 'mine$i',
+              name: 'mine$i',
+              location: GeoPoint(15 + i * 0.001, -70),
+              catalogueId: 's$i',
+            ),
+        ],
+        layers: const BuiltInMapLayers(),
+      );
+
+      container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+      final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+      expect(sites, hasLength(kBuiltInOverlayMarkerLimit - 10));
+      expect(container.read(builtInOverlayTruncatedProvider), isFalse);
+    });
   });
 
-  test(
-    'builtInSitesProvider loads bundled sites that all have coordinates',
-    () async {
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
+  test('with no bounds reported, nothing is read', () async {
+    final catalogue = FakeSiteCatalogue([_at('a', 12, -68)]);
+    final container = _container(catalogue);
 
-      final sites = await container.read(builtInSitesProvider.future);
-      expect(sites, isNotEmpty);
-      expect(sites.every((s) => s.hasCoordinates), isTrue);
-    },
-  );
+    expect(await container.read(visibleBuiltInSitesProvider.future), isEmpty);
+    expect(catalogue.inBoundsCalls, 0);
+    expect(container.read(builtInOverlayTruncatedProvider), isFalse);
+  });
 
-  test(
-    'visibleBuiltInSitesProvider removes built-ins matching user sites',
-    () async {
-      final container = ProviderContainer(
-        overrides: [
-          builtInSitesProvider.overrideWith(
-            (ref) async => [ext('keep', 50.0, 50.0), ext('dupe', 10.0, 20.0)],
-          ),
-          sitesWithCountsProvider.overrideWith(
-            (ref) async => [
-              const SiteWithDiveCount(
-                site: DiveSite(
-                  id: 'u',
-                  name: 'u',
-                  location: GeoPoint(10.0, 20.0),
-                ),
-                diveCount: 0,
-              ),
-            ],
-          ),
-        ],
+  test('the sites in the reported bounds are read, with the marker '
+      'limit', () async {
+    final catalogue = FakeSiteCatalogue([
+      _at('bonaire', 12, -68),
+      _at('scapa', 58.9, -3.1),
+    ]);
+    final container = _container(catalogue);
+
+    container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+    final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+    expect(sites.map((s) => s.id), ['bonaire']);
+    expect(catalogue.boundsAsked, [_tropics]);
+    expect(kBuiltInOverlayMarkerLimit, 1500);
+  });
+
+  test('new bounds read again; the same bounds do not', () async {
+    final catalogue = FakeSiteCatalogue([
+      _at('bonaire', 12, -68),
+      _at('dover', 51.1, 1.4),
+    ]);
+    final container = _container(catalogue);
+    final bounds = container.read(builtInOverlayBoundsProvider.notifier);
+
+    bounds.state = _tropics;
+    await container.read(visibleBuiltInSitesProvider.future);
+    bounds.state = const CatalogueBounds(
+      south: 0,
+      west: -80,
+      north: 30,
+      east: -60,
+    );
+    await container.read(visibleBuiltInSitesProvider.future);
+    expect(catalogue.inBoundsCalls, 1);
+
+    bounds.state = _north;
+    final sites = await container.read(visibleBuiltInSitesProvider.future);
+    expect(sites.map((s) => s.id), ['dover']);
+    expect(catalogue.inBoundsCalls, 2);
+  });
+
+  test('an imported catalogue is read again for the same bounds', () async {
+    final catalogue = FakeSiteCatalogue();
+    final container = _container(catalogue);
+    container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+    expect(await container.read(visibleBuiltInSitesProvider.future), isEmpty);
+
+    catalogue.sites = [_at('bonaire', 12, -68)];
+    container.read(siteCatalogueRevisionProvider.notifier).state++;
+
+    final sites = await container.read(visibleBuiltInSitesProvider.future);
+    expect(sites.map((s) => s.id), ['bonaire']);
+  });
+
+  test('a box holding more than the limit says so', () async {
+    final catalogue = FakeSiteCatalogue([
+      for (var i = 0; i < kBuiltInOverlayMarkerLimit + 5; i++)
+        _at('w$i', 10 + i * 0.001, -70, kind: CatalogueKind.register),
+    ]);
+    final container = _container(catalogue);
+
+    container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+    final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+    expect(sites, hasLength(kBuiltInOverlayMarkerLimit));
+    expect(container.read(builtInOverlayTruncatedProvider), isTrue);
+
+    container.read(builtInOverlayBoundsProvider.notifier).state = _north;
+    await container.read(visibleBuiltInSitesProvider.future);
+    expect(container.read(builtInOverlayTruncatedProvider), isFalse);
+  });
+
+  group('the limit is of markers shown, not of records read', () {
+    // The view's middle is 15 N, 70 W: w0 is nearest it, then w1, w2...
+    List<CatalogueSite> wrecks(int count) => [
+      for (var i = 0; i < count; i++)
+        _at('w$i', 15 + i * 0.001, -70, kind: CatalogueKind.register),
+    ];
+
+    /// The diver has adopted the [count] records nearest the middle.
+    List<DiveSite> adopted(int count) => [
+      for (var i = 0; i < count; i++)
+        DiveSite(
+          id: 'mine$i',
+          name: 'mine$i',
+          location: GeoPoint(15 + i * 0.001, -70),
+          catalogueId: 'w$i',
+        ),
+    ];
+
+    test('records the diver already has do not use up the limit', () async {
+      // Ten more than the limit in view, twenty of them the diver's own:
+      // every one of the rest fits, and none is left out.
+      final container = _container(
+        FakeSiteCatalogue(wrecks(kBuiltInOverlayMarkerLimit + 10)),
+        mine: adopted(20),
       );
-      addTearDown(container.dispose);
 
-      final result = await container.read(visibleBuiltInSitesProvider.future);
-      expect(result.map((s) => s.externalId), ['keep']);
-    },
-  );
+      container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+      final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+      expect(sites, hasLength(kBuiltInOverlayMarkerLimit - 10));
+      expect(
+        sites.map((s) => s.id),
+        contains('w${kBuiltInOverlayMarkerLimit + 9}'),
+      );
+      expect(container.read(builtInOverlayTruncatedProvider), isFalse);
+    });
+
+    test('with more left than the limit it is filled, and says so', () async {
+      final container = _container(
+        FakeSiteCatalogue(wrecks(kBuiltInOverlayMarkerLimit + 50)),
+        mine: adopted(20),
+      );
+
+      container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+      final sites = await container.read(visibleBuiltInSitesProvider.future);
+
+      expect(sites, hasLength(kBuiltInOverlayMarkerLimit));
+      expect(sites.first.id, 'w20');
+      expect(container.read(builtInOverlayTruncatedProvider), isTrue);
+    });
+  });
+
+  test('a record an unlinked site of the diver sits on is hidden', () async {
+    final container = _container(
+      FakeSiteCatalogue([_at('keep', 12.0, -68.0), _at('dupe', 10.0, -70.0)]),
+      mine: const [DiveSite(id: 'u', name: 'u', location: GeoPoint(10, -70))],
+    );
+
+    container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+    final result = await container.read(visibleBuiltInSitesProvider.future);
+
+    expect(result.map((s) => s.id), ['keep']);
+  });
+
+  test('an adopted record is hidden but not its neighbour', () async {
+    final container = _container(
+      // About 100 m apart.
+      FakeSiteCatalogue([
+        _at('east', 12.0, -68.0),
+        _at('west', 12.0009, -68.0),
+      ]),
+      mine: const [
+        DiveSite(
+          id: 'u',
+          name: 'East',
+          location: GeoPoint(12.0, -68.0),
+          catalogueId: 'east',
+        ),
+      ],
+    );
+
+    container.read(builtInOverlayBoundsProvider.notifier).state = _tropics;
+    final result = await container.read(visibleBuiltInSitesProvider.future);
+
+    expect(result.map((s) => s.id), ['west']);
+  });
 }

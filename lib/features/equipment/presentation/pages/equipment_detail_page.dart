@@ -6,6 +6,8 @@ import 'package:submersion/features/connections/domain/entities/connection_kind.
 import 'package:submersion/features/connections/domain/entities/node_ref.dart';
 import 'package:submersion/features/connections/presentation/widgets/open_in_connections.dart';
 import 'package:submersion/features/equipment/domain/services/equipment_ownership.dart';
+import 'package:submersion/features/equipment/figure/presentation/figure_position_label.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_avatar.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_delete_dialog.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_history_card.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_share_providers.dart';
@@ -32,7 +34,6 @@ import 'package:submersion/shared/widgets/master_detail/detail_scroll_retainer.d
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/router/pushed_route.dart';
 import 'package:submersion/features/equipment/presentation/utils/equipment_enum_display.dart';
-import 'package:submersion/features/equipment/presentation/utils/equipment_type_icon.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/dive_log/presentation/navigation/open_dive_list.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
@@ -54,6 +55,7 @@ import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/cylinder_configs/presentation/widgets/unit_configurations_card.dart';
 import 'package:submersion/features/media/presentation/helpers/document_open_helper.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_documents_section.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_photos_section.dart';
 import 'package:submersion/features/equipment/domain/entities/condition_trend.dart';
 import 'package:submersion/features/equipment/presentation/widgets/children_card.dart';
 import 'package:submersion/features/equipment/presentation/widgets/components_card.dart';
@@ -232,13 +234,15 @@ class _EquipmentDetailContent extends ConsumerWidget {
             headerClock,
           ),
           const SizedBox(height: 24),
+          // The device's controls (issue #3676): this item is its one entry.
+          // Downloading is what the page is opened for, so they lead, above
+          // the Details card (issue #4622). Brings its own bottom gap: it
+          // takes no room while it loads or when it fails.
+          if (equipment.type == EquipmentType.computer)
+            DiveComputerSection(equipmentId: equipmentId),
           _buildDetailsSection(context, ref, equipment, units),
           const SizedBox(height: 24),
-          // The device's controls (issue #3676): this item is its one entry.
-          if (equipment.type == EquipmentType.computer) ...[
-            DiveComputerSection(equipmentId: equipmentId),
-            const SizedBox(height: 24),
-          ] else if (equipment.type == EquipmentType.transmitter) ...[
+          if (equipment.type == EquipmentType.transmitter) ...[
             TransmitterSection(equipmentId: equipmentId),
             const SizedBox(height: 24),
           ],
@@ -282,6 +286,10 @@ class _EquipmentDetailContent extends ConsumerWidget {
             const SizedBox(height: 24),
             ChildrenCard(equipment: equipment),
           ],
+          const SizedBox(height: 24),
+          // Reference photos of the item (issue #3355), above the check-ins
+          // that carry the condition photos.
+          EquipmentPhotosSection(equipment: equipment),
           const SizedBox(height: 24),
           ObservationsCard(equipment: equipment),
           const SizedBox(height: 24),
@@ -396,18 +404,16 @@ class _EquipmentDetailContent extends ConsumerWidget {
       ),
       child: Row(
         children: [
-          CircleAvatar(
+          EquipmentAvatar(
+            item: equipment,
             radius: 20,
+            iconSize: 20,
             backgroundColor: isServiceOverdue
                 ? StatusColors.of(context).alert.container
                 : colorScheme.tertiaryContainer,
-            child: Icon(
-              equipmentTypeIcon(equipment.type),
-              size: 20,
-              color: isServiceOverdue
-                  ? StatusColors.of(context).alert.onContainer
-                  : colorScheme.onTertiaryContainer,
-            ),
+            iconColor: isServiceOverdue
+                ? StatusColors.of(context).alert.onContainer
+                : colorScheme.onTertiaryContainer,
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -514,18 +520,17 @@ class _EquipmentDetailContent extends ConsumerWidget {
           children: [
             Row(
               children: [
-                CircleAvatar(
+                // The chosen cover photo, else the type icon (#3355).
+                EquipmentAvatar(
+                  item: equipment,
                   radius: 32,
+                  iconSize: 32,
                   backgroundColor: isServiceOverdue
                       ? StatusColors.of(context).alert.container
                       : Theme.of(context).colorScheme.tertiaryContainer,
-                  child: Icon(
-                    equipmentTypeIcon(equipment.type),
-                    size: 32,
-                    color: isServiceOverdue
-                        ? StatusColors.of(context).alert.onContainer
-                        : Theme.of(context).colorScheme.onTertiaryContainer,
-                  ),
+                  iconColor: isServiceOverdue
+                      ? StatusColors.of(context).alert.onContainer
+                      : Theme.of(context).colorScheme.onTertiaryContainer,
                 ),
                 const SizedBox(width: 16),
                 Expanded(
@@ -687,7 +692,13 @@ class _EquipmentDetailContent extends ConsumerWidget {
                   _buildDetailRow(
                     context,
                     attributeLabel(context.l10n, def.key),
-                    formatAttributeValue(attr, def, units, context.l10n),
+                    formatAttributeValue(
+                      attr,
+                      def,
+                      units,
+                      context.l10n,
+                      workingPressureBar: equipment.workingPressureBar,
+                    ),
                   ),
               // The item's colour (issue #2326): its own row with a swatch,
               // only when the stored value is a colour code and the type has
@@ -699,6 +710,18 @@ class _EquipmentDetailContent extends ConsumerWidget {
                     )
                     case final code?)
                   _buildColorRow(context, code),
+              // Where the diver moved it on the figure (issue #4493), while
+              // the item still has artwork for that spot.
+              if (figurePositionLabelOf(context.l10n, equipment)
+                  case final shown?)
+                _buildDetailRow(
+                  context,
+                  attributeLabel(
+                    context.l10n,
+                    EquipmentAttrKeys.figurePosition,
+                  ),
+                  shown,
+                ),
               for (final attr
                   in keepStrayColorAsCustom(
                       equipment.type,

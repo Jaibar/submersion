@@ -33,6 +33,12 @@ class EquipmentItem extends Equatable {
   /// The item this one is installed in (v202). Null for a standalone item.
   final String? parentEquipmentId;
 
+  /// The media row chosen to represent this item in the equipment list and
+  /// page header (issue #3355); null shows the type icon. May name a row
+  /// this device does not have. Written only through the cover action, never
+  /// by the edit form's save.
+  final String? coverMediaId;
+
   /// Row creation time (null for entities built before persistence); used as
   /// the last anchor fallback for service clocks.
   final DateTime? createdAt;
@@ -57,25 +63,23 @@ class EquipmentItem extends Equatable {
     this.customReminderEnabled,
     this.customReminderDays,
     this.parentEquipmentId,
+    this.coverMediaId,
     this.createdAt,
   });
 
   /// Curated attribute lookup helpers. Legacy field names are preserved as
   /// getters so existing consumers (weight planner, CSV export, detail page)
   /// read from the attribute store transparently.
-  String? attrText(String key) {
+  EquipmentAttribute? attr(String key) {
     for (final a in attributes) {
-      if (!a.isCustom && a.key == key) return a.valueText;
+      if (!a.isCustom && a.key == key) return a;
     }
     return null;
   }
 
-  double? attrNum(String key) {
-    for (final a in attributes) {
-      if (!a.isCustom && a.key == key) return a.valueNum;
-    }
-    return null;
-  }
+  String? attrText(String key) => attr(key)?.valueText;
+
+  double? attrNum(String key) => attr(key)?.valueNum;
 
   String? get size => attrText(EquipmentAttrKeys.size);
   String? get thickness => attrText(EquipmentAttrKeys.thicknessMm);
@@ -195,6 +199,14 @@ class EquipmentItem extends Equatable {
   bool get isSuitInflationCylinder =>
       attrText(EquipmentAttrKeys.cylinderUse) == 'suit_inflation';
 
+  /// Whether this tank is a pair of manifolded cylinders kept as one item,
+  /// such as a "D12" (issue #4641): Worn as is Twin set. Like
+  /// [isSuitInflationCylinder] it is a default for a dive tank picked from
+  /// it, never the source of truth; the dive tank's role is.
+  bool get isWornAsTwinSet =>
+      type == EquipmentType.tank &&
+      attrText(EquipmentAttrKeys.wornAs) == kWornAsTwinSet;
+
   /// The catalog stores the choice key ('aluminum', 'steel',
   /// 'carbon_composite'); the enum name for the last one differs.
   TankMaterial? get tankMaterial =>
@@ -270,6 +282,8 @@ class EquipmentItem extends Equatable {
     List<int>? customReminderDays,
     String? parentEquipmentId,
     bool clearParentEquipmentId = false,
+    String? coverMediaId,
+    bool clearCoverMediaId = false,
     DateTime? createdAt,
   }) {
     return EquipmentItem(
@@ -295,6 +309,9 @@ class EquipmentItem extends Equatable {
       parentEquipmentId: clearParentEquipmentId
           ? null
           : (parentEquipmentId ?? this.parentEquipmentId),
+      coverMediaId: clearCoverMediaId
+          ? null
+          : (coverMediaId ?? this.coverMediaId),
       createdAt: createdAt ?? this.createdAt,
     );
   }
@@ -320,6 +337,7 @@ class EquipmentItem extends Equatable {
     customReminderEnabled,
     customReminderDays,
     parentEquipmentId,
+    coverMediaId,
     createdAt,
   ];
 }

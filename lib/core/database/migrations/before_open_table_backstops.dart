@@ -51,6 +51,11 @@ extension TableBackstopsFromV217 on AppDatabase {
     await _assertDerivedMetricsTable();
     // v348 backstop: its gas-use window columns (local, idempotent).
     await _assertDerivedMetricsGasUseColumns();
+    // v362 backstop: the computed deco verdicts (local, idempotent).
+    await _assertDiveDecoStatusTable();
+    // v364 backstop: what an equipment set carries besides gear (issue
+    // #4525), same restore/sync-adopt reasoning.
+    await _assertSetBundleTables();
 
     // v248 backstop: trip_equipment and its item index (idempotent).
     await _assertTripEquipmentSchema();
@@ -146,5 +151,17 @@ extension TableBackstopsFromV217 on AppDatabase {
     // v345 backstop: twin set pairings and their two columns (issue #4242;
     // idempotent).
     await _assertTwinSetSchema();
+
+    // v352 backstop: media.observation_id and equipment.cover_media_id
+    // (issue #3355; idempotent).
+    await _assertEquipmentPhotoColumns();
+
+    // v375 backstop: the marine life identification tables (issue #4668;
+    // local, idempotent).
+    await _assertMediaIdentificationTables();
+
+    // v376 backstop: the identification tables' video columns (issue
+    // #4675; local, idempotent). After the tables exist.
+    await _assertIdentificationVideoColumns();
   }
 }

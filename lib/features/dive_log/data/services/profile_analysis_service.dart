@@ -27,7 +27,10 @@ import 'package:submersion/core/deco/scr_calculator.dart';
 import 'package:submersion/core/utils/time_weighted_mean.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart'
     show GasMix;
+import 'package:submersion/features/dive_log/domain/entities/counterdiffusion_analysis.dart';
 import 'package:submersion/features/dive_log/domain/entities/profile_event.dart';
+import 'package:submersion/features/dive_log/domain/services/counterdiffusion_ranges.dart';
+import 'package:submersion/features/dive_log/domain/services/icd_switch_markers.dart';
 import 'package:submersion/features/dive_log/domain/services/deco_stop_curve.dart';
 import 'package:submersion/features/dive_log/domain/services/deco_stop_windows.dart';
 
@@ -229,6 +232,14 @@ class ProfileAnalysis {
   /// Decompression status at each point
   final List<DecoStatus> decoStatuses;
 
+  /// Seconds from the dive's zero point of each sample this analysis was
+  /// computed from, one per point of its per-sample curves ([decoStatuses]
+  /// among them). A view that puts those curves on a clock reads these, so a
+  /// retained analysis is never paired with the times of a profile that has
+  /// changed since (issue #4503). Empty for an analysis built outside
+  /// [ProfileAnalysisService.analyze].
+  final List<int> sampleTimestamps;
+
   /// Oxygen toxicity exposure
   final O2Exposure o2Exposure;
 
@@ -352,6 +363,11 @@ class ProfileAnalysis {
   /// computing it changes no other field.
   final GasSwitchEfficiency? gasSwitchEfficiency;
 
+  /// Where the tissue model shows isobaric counterdiffusion, and the gas
+  /// switches that break the rule of fifths (#4530). Read-only like
+  /// [gasSwitchEfficiency]; none when tissue loading is withheld.
+  final CounterdiffusionAnalysis counterdiffusion;
+
   const ProfileAnalysis({
     required this.ascentRates,
     required this.ascentRateStats,
@@ -360,6 +376,7 @@ class ProfileAnalysis {
     this.decoStopWindows = const [],
     required this.ceilingCurve,
     this.decoStopCurve = const [],
+    this.sampleTimestamps = const [],
     required this.ndlCurve,
     required this.decoStatuses,
     required this.o2Exposure,
@@ -391,6 +408,7 @@ class ProfileAnalysis {
     this.tissueLoadingWithheld = false,
     this.inputsFingerprint,
     this.gasSwitchEfficiency,
+    this.counterdiffusion = CounterdiffusionAnalysis.none,
   });
 
   /// Whether diver went into decompression obligation
@@ -466,6 +484,7 @@ class ProfileAnalysis {
     List<double>? decoStopCurve,
     List<int>? ndlCurve,
     List<DecoStatus>? decoStatuses,
+    List<int>? sampleTimestamps,
     O2Exposure? o2Exposure,
     List<double>? ppO2Curve,
     List<List<double?>>? o2SensorCurves,
@@ -495,6 +514,7 @@ class ProfileAnalysis {
     bool? tissueLoadingWithheld,
     String? inputsFingerprint,
     GasSwitchEfficiency? gasSwitchEfficiency,
+    CounterdiffusionAnalysis? counterdiffusion,
   }) {
     return ProfileAnalysis(
       ascentRates: ascentRates ?? this.ascentRates,
@@ -506,6 +526,7 @@ class ProfileAnalysis {
       decoStopCurve: decoStopCurve ?? this.decoStopCurve,
       ndlCurve: ndlCurve ?? this.ndlCurve,
       decoStatuses: decoStatuses ?? this.decoStatuses,
+      sampleTimestamps: sampleTimestamps ?? this.sampleTimestamps,
       o2Exposure: o2Exposure ?? this.o2Exposure,
       ppO2Curve: ppO2Curve ?? this.ppO2Curve,
       o2SensorCurves: o2SensorCurves ?? this.o2SensorCurves,
@@ -539,6 +560,7 @@ class ProfileAnalysis {
           tissueLoadingWithheld ?? this.tissueLoadingWithheld,
       inputsFingerprint: inputsFingerprint ?? this.inputsFingerprint,
       gasSwitchEfficiency: gasSwitchEfficiency ?? this.gasSwitchEfficiency,
+      counterdiffusion: counterdiffusion ?? this.counterdiffusion,
     );
   }
 
@@ -745,6 +767,7 @@ class ProfileAnalysisService {
         ceilingCurve: const [],
         ndlCurve: const [],
         decoStatuses: const [],
+        sampleTimestamps: timestamps,
         o2Exposure: const O2Exposure(),
         ppO2Curve: const [],
         meanDepthCurve: meanDepthCurve,
@@ -1105,6 +1128,14 @@ class ProfileAnalysisService {
           )
         : null;
 
+    // Read-only like the above (#4530): where the tissues counterdiffuse,
+    // and the switches that break the rule of fifths.
+    final counterdiffusion = _counterdiffusionOf(
+      decoStatuses: decoStatuses,
+      timestamps: timestamps,
+      gasSegments: gasSegments,
+    );
+
     return ProfileAnalysis(
       ascentRates: ascentRates,
       ascentRateStats: ascentRateStats,
@@ -1113,6 +1144,7 @@ class ProfileAnalysisService {
       ceilingCurve: ceilingCurve,
       decoStopCurve: decoStopCurve,
       ndlCurve: ndlCurve,
+      sampleTimestamps: timestamps,
       decoStatuses: decoStatuses,
       o2Exposure: o2Exposure,
       ppO2Curve: ppO2Curve,
@@ -1138,7 +1170,34 @@ class ProfileAnalysisService {
       environment: _environment,
       tissueLoadingWithheld: tissueLoadingWithheld,
       gasSwitchEfficiency: gasSwitchEfficiency,
+      counterdiffusion: counterdiffusion,
     );
+  }
+
+  /// [CounterdiffusionAnalysis] of the replayed [decoStatuses], with the
+  /// rule-of-fifths markers of [gasSegments] when there is a schedule. A
+  /// bailout reads the loop's mix at the ambient pressure of the first sample
+  /// at or after the switch.
+  CounterdiffusionAnalysis _counterdiffusionOf({
+    required List<DecoStatus> decoStatuses,
+    required List<int> timestamps,
+    required List<ProfileGasSegment>? gasSegments,
+  }) {
+    final tissue = counterdiffusionAnalysisOf(decoStatuses, timestamps);
+    if (gasSegments == null || decoStatuses.length != timestamps.length) {
+      return tissue;
+    }
+    final markers = icdSwitchMarkersOf(
+      gasSegments,
+      ambientPressureAt: (time) {
+        for (var i = 0; i < timestamps.length; i++) {
+          if (timestamps[i] >= time) return decoStatuses[i].ambientPressureBar;
+        }
+        return null;
+      },
+    );
+    if (markers.isEmpty) return tissue;
+    return tissue.copyWith(switchMarkers: markers, heliumPresent: true);
   }
 
   /// Detect significant events in the profile.

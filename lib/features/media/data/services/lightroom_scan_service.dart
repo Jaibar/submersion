@@ -1,3 +1,5 @@
+import 'package:uuid/uuid.dart';
+
 import 'package:submersion/core/services/lightroom/lightroom_api_client.dart';
 import 'package:submersion/core/services/lightroom/lightroom_models.dart';
 import 'package:submersion/core/services/logger_service.dart';
@@ -6,10 +8,12 @@ import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
 import 'package:submersion/features/media/data/services/enrichment_service.dart';
 import 'package:submersion/features/media/data/services/lightroom_connector_state.dart';
+import 'package:submersion/features/media/data/services/media_import_service.dart';
 import 'package:submersion/core/services/accounts/connected_account.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart'
     as domain;
 import 'package:submersion/features/media/domain/entities/media_source_type.dart';
+import 'package:submersion/features/media/domain/services/dive_media_clock.dart';
 import 'package:submersion/features/media/domain/services/dive_photo_matcher.dart';
 
 /// Counters describing one scan run, for the summary snackbar and the
@@ -21,6 +25,12 @@ class LightroomScanSummary {
   int skippedExisting = 0;
   int skippedNoCaptureTime = 0;
 }
+
+/// A dive's profile and the clock its media is placed against.
+typedef _DivePlacement = ({
+  List<DiveProfilePoint> profile,
+  DiveMediaClock clock,
+});
 
 /// Matches Lightroom catalog assets to dives by capture time.
 ///
@@ -101,42 +111,27 @@ class LightroomScanService {
     required LightroomConnectorState state,
   }) async {
     final summary = LightroomScanSummary();
-    final catalogId = account.accountIdentifier;
-    if (catalogId == null || dives.isEmpty) return summary;
-
     final bounds = [for (final dive in dives) _boundsFor(dive)];
-    final spans = mergeWindows(bounds);
-
-    final existing = await _mediaRepository.getConnectorRemoteAssetIds();
-    final suggested = await _mediaRepository
-        .getPendingSuggestionRemoteAssetIds();
-    final albumIds = await state.albumIds();
-
-    final assets = albumIds.isEmpty
-        ? await _fetchCatalogAssets(catalogId, spans)
-        : await _fetchAlbumAssets(catalogId, albumIds);
-
-    final seenThisScan = <String>{};
-    for (final asset in assets) {
-      if (!seenThisScan.add(asset.id)) continue;
-      summary.examined++;
-      if (asset.captureDate == null) {
-        summary.skippedNoCaptureTime++;
-        continue;
-      }
-      if (existing.contains(asset.id) || suggested.contains(asset.id)) {
-        summary.skippedExisting++;
-        continue;
-      }
-      final match = _matcher.matchTimestamp(
-        takenAt: asset.captureDate!,
-        dives: bounds,
-      );
+    final matched = await _matched(
+      account: account,
+      bounds: bounds,
+      state: state,
+      summary: summary,
+    );
+    // A card of photos lands on a handful of dives. Each dive is read once
+    // for the scan, not once per photo placed on it.
+    final placements = <String, Future<_DivePlacement?>>{};
+    for (final (asset, match) in matched) {
       switch (match.kind) {
         case TimestampMatchKind.none:
           break;
         case TimestampMatchKind.confident:
-          await _attach(asset, diveId: match.diveId!, account: account);
+          await _attach(
+            asset,
+            diveId: match.diveId!,
+            account: account,
+            placements: placements,
+          );
           summary.attached++;
         case TimestampMatchKind.ambiguous:
           for (final diveId in match.candidateDiveIds) {
@@ -161,6 +156,89 @@ class LightroomScanService {
       '${summary.skippedExisting} already linked',
     );
     return summary;
+  }
+
+  /// The rows a scan of [dive] would attach, built and placed but not
+  /// written, for a sitting on the dive that holds them until its Save
+  /// (issue #4527); Save also queues their uploads. A scan of one dive
+  /// only ever matches it confidently, so it suggests nothing. [dive] is
+  /// the sitting's, whose profile and media clock place the rows.
+  Future<({List<PreparedMedia> rows, LightroomScanSummary summary})>
+  prepareForDive({
+    required ConnectedAccount account,
+    required Dive dive,
+    required LightroomConnectorState state,
+  }) async {
+    final summary = LightroomScanSummary();
+    final matched = await _matched(
+      account: account,
+      bounds: [_boundsFor(dive)],
+      state: state,
+      summary: summary,
+    );
+    // Read only when there is something to place.
+    final placement = dive.profile.isEmpty || matched.isEmpty
+        ? null
+        : (
+            profile: dive.profile,
+            clock: DiveMediaClock.forDive(
+              dive,
+              primarySourceEntry: await _diveRepository.getPrimarySourceEntry(
+                dive.id,
+              ),
+            ),
+          );
+    final rows = [
+      for (final (asset, match) in matched)
+        if (match.kind == TimestampMatchKind.confident)
+          _prepare(asset, diveId: dive.id, account: account, at: placement),
+    ];
+    summary.attached = rows.length;
+    return (rows: rows, summary: summary);
+  }
+
+  /// The catalog assets [bounds] may take, each with its match: fetched for
+  /// their windows (or from the chosen albums), once each, skipping those
+  /// with no capture time and those already linked or suggested (on any
+  /// device; media rows sync). [summary] counts what was skipped.
+  Future<List<(LightroomAsset, TimestampMatch)>> _matched({
+    required ConnectedAccount account,
+    required List<DiveBounds> bounds,
+    required LightroomConnectorState state,
+    required LightroomScanSummary summary,
+  }) async {
+    final catalogId = account.accountIdentifier;
+    if (catalogId == null || bounds.isEmpty) return const [];
+    final spans = mergeWindows(bounds);
+
+    final existing = await _mediaRepository.getConnectorRemoteAssetIds();
+    final suggested = await _mediaRepository
+        .getPendingSuggestionRemoteAssetIds();
+    final albumIds = await state.albumIds();
+
+    final assets = albumIds.isEmpty
+        ? await _fetchCatalogAssets(catalogId, spans)
+        : await _fetchAlbumAssets(catalogId, albumIds);
+
+    final seenThisScan = <String>{};
+    final matched = <(LightroomAsset, TimestampMatch)>[];
+    for (final asset in assets) {
+      if (!seenThisScan.add(asset.id)) continue;
+      summary.examined++;
+      if (asset.captureDate == null) {
+        summary.skippedNoCaptureTime++;
+        continue;
+      }
+      if (existing.contains(asset.id) || suggested.contains(asset.id)) {
+        summary.skippedExisting++;
+        continue;
+      }
+      matched.add((
+        asset,
+        _matcher.matchTimestamp(takenAt: asset.captureDate!, dives: bounds),
+      ));
+    }
+    return matched;
   }
 
   /// Scans dives from the last [pollLookback] and stamps the poll time.
@@ -299,62 +377,105 @@ class LightroomScanService {
     return assets;
   }
 
+  /// What placing media on a dive needs: its profile and its media clock.
+  /// Null when the dive is gone or has no profile to place anything on.
+  Future<_DivePlacement?> _placementFor(String diveId) async {
+    final dive = await _diveRepository.getDiveById(diveId);
+    if (dive == null || dive.profile.isEmpty) return null;
+    return (
+      profile: dive.profile,
+      clock: DiveMediaClock.forDive(
+        dive,
+        primarySourceEntry: await _diveRepository.getPrimarySourceEntry(diveId),
+      ),
+    );
+  }
+
+  /// Creates the media row for [asset] on [diveId] and places it.
+  ///
+  /// [placements] is a scan's per-dive cache of [_placementFor]; without one
+  /// (a single confirmed suggestion) the dive is read for this asset alone.
   Future<void> _attach(
     LightroomAsset asset, {
     required String diveId,
     required ConnectedAccount account,
+    Map<String, Future<_DivePlacement?>>? placements,
   }) async {
-    final now = _now();
-    final saved = await _mediaRepository.createMedia(
-      domain.MediaItem(
-        id: '',
-        diveId: diveId,
-        mediaType: asset.isVideo
-            ? domain.MediaType.video
-            : domain.MediaType.photo,
-        takenAt: asset.captureDate!,
-        originalFilename: asset.fileName,
-        latitude: asset.latitude,
-        longitude: asset.longitude,
-        durationSeconds: asset.videoDurationSeconds,
-        sourceType: MediaSourceType.serviceConnector,
-        connectorAccountId: account.id,
-        remoteAssetId: asset.id,
-        createdAt: now,
-        updatedAt: now,
-      ),
+    final placement = await (placements == null
+        ? _placementFor(diveId)
+        : placements.putIfAbsent(diveId, () => _placementFor(diveId)));
+    final row = _prepare(
+      asset,
+      diveId: diveId,
+      account: account,
+      at: placement,
     );
-
-    final dive = await _diveRepository.getDiveById(diveId);
-    final profile = dive?.profile ?? const [];
-    if (dive != null && profile.isNotEmpty) {
-      final result = _enrichmentService.calculateEnrichment(
-        profile: profile,
-        diveStartTime: dive.effectiveEntryTime,
-        photoTime: asset.captureDate!,
-      );
-      if (result.depthMeters != null ||
-          result.matchConfidence != domain.MatchConfidence.noProfile) {
-        await _mediaRepository.saveEnrichment(
-          domain.MediaEnrichment(
-            id: '',
-            mediaId: saved.id,
-            diveId: dive.id,
-            depthMeters: result.depthMeters,
-            temperatureCelsius: result.temperatureCelsius,
-            elapsedSeconds: result.elapsedSeconds,
-            matchConfidence: result.matchConfidence,
-            timestampOffsetSeconds: result.timestampOffsetSeconds,
-            createdAt: now,
-          ),
-        );
-      }
+    final saved = await _mediaRepository.createMedia(row.item);
+    final enrichment = row.enrichment;
+    if (enrichment != null) {
+      await _mediaRepository.saveEnrichment(enrichment);
     }
     _enqueueUpload(saved.id);
   }
 
+  /// The media row [asset] becomes on [diveId], under a fresh id of its
+  /// own, with its place in the dive when [at] gives one.
+  PreparedMedia _prepare(
+    LightroomAsset asset, {
+    required String diveId,
+    required ConnectedAccount account,
+    required _DivePlacement? at,
+  }) {
+    final now = _now();
+    final item = domain.MediaItem(
+      id: const Uuid().v4(),
+      diveId: diveId,
+      mediaType: asset.isVideo
+          ? domain.MediaType.video
+          : domain.MediaType.photo,
+      takenAt: asset.captureDate!,
+      originalFilename: asset.fileName,
+      latitude: asset.latitude,
+      longitude: asset.longitude,
+      durationSeconds: asset.videoDurationSeconds,
+      sourceType: MediaSourceType.serviceConnector,
+      connectorAccountId: account.id,
+      remoteAssetId: asset.id,
+      createdAt: now,
+      updatedAt: now,
+    );
+    if (at == null) return (item: item, enrichment: null);
+    final result = _enrichmentService.calculateEnrichment(
+      profile: at.profile,
+      diveStartTime: at.clock.countsFrom,
+      photoTime: asset.captureDate!,
+    );
+    if (result.depthMeters == null &&
+        result.matchConfidence == domain.MatchConfidence.noProfile) {
+      return (item: item, enrichment: null);
+    }
+    return (
+      item: item,
+      enrichment: domain.MediaEnrichment(
+        id: '',
+        mediaId: item.id,
+        diveId: diveId,
+        depthMeters: result.depthMeters,
+        temperatureCelsius: result.temperatureCelsius,
+        elapsedSeconds: result.elapsedSeconds,
+        matchConfidence: result.matchConfidence,
+        timestampOffsetSeconds: result.timestampOffsetSeconds,
+        createdAt: now,
+      ),
+    );
+  }
+
   /// Dive time bounds with the gallery scanner's fallbacks: entry falls
   /// back to the dive's dateTime; exit to entry + runtime, or one hour.
+  ///
+  /// The window is the dive's as its camera reads it, so an asset is
+  /// matched, and fetched, on the clock [_placementFor] then places it by
+  /// (issue #4539).
   DiveBounds _boundsFor(Dive dive) {
     final entry = dive.entryTime ?? dive.dateTime;
     final exit =
@@ -362,6 +483,10 @@ class LightroomScanService {
         (dive.effectiveRuntime != null
             ? entry.add(dive.effectiveRuntime!)
             : entry.add(const Duration(minutes: 60)));
-    return DiveBounds(diveId: dive.id, entryTime: entry, exitTime: exit);
+    return DiveBounds(
+      diveId: dive.id,
+      entryTime: DiveMediaClock.onCameraClock(dive, entry),
+      exitTime: DiveMediaClock.onCameraClock(dive, exit),
+    );
   }
 }

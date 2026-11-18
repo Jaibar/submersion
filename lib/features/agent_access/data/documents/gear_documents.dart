@@ -39,6 +39,7 @@ Map<String, Object?> equipmentDocument(EquipmentItem e) => {
   'custom_reminder_enabled': e.customReminderEnabled,
   'custom_reminder_days': e.customReminderDays,
   'parent_equipment_id': e.parentEquipmentId,
+  'cover_media_id': e.coverMediaId,
   'attributes': [for (final a in e.attributes) _attributeDocument(a)],
   // The tag id the passport and gear tag cards link, a system attribute.
   'passport_id': [
@@ -53,6 +54,7 @@ Map<String, Object?> _attributeDocument(EquipmentAttribute a) => {
   'is_custom': a.isCustom,
   'value_text': a.valueText,
   'value_num': a.valueNum,
+  'value_unit': a.valueUnit,
   'sort_order': a.sortOrder,
 };
 
@@ -130,6 +132,10 @@ Map<String, Object?> equipmentSetDocument(EquipmentSet s) => {
   'name': s.name,
   'description': s.description,
   'equipment_ids': s.equipmentIds,
+  // What the set applies besides its own gear (issue #4525), in order.
+  'included_set_ids': s.includedSetIds,
+  'weight_preset_ids': s.weightPresetIds,
+  'cylinder_config_ids': s.cylinderConfigIds,
   'is_default': s.isDefault,
   'auto_apply_on_computer_import': s.autoApplyOnComputerImport,
   'show_figure': s.showFigure,

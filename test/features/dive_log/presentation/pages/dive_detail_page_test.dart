@@ -26,6 +26,7 @@ import 'package:submersion/features/dive_log/presentation/pages/dive_detail_page
 import 'package:submersion/features/dive_planner/presentation/providers/dive_planner_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/active_source_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_tracking_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/gas_switch_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/profile_analysis_provider.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/collapsible_section.dart';
@@ -43,6 +44,7 @@ import 'package:submersion/features/dive_log/presentation/widgets/o2_toxicity_ca
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/unlock_for_operation.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers shared by gas-segment tests
@@ -1093,6 +1095,7 @@ void main() {
       );
       return ProfileAnalysis.empty().copyWith(
         decoStatuses: [status],
+        sampleTimestamps: const [0],
         ppO2Curve: const [0.21],
       );
     }
@@ -1231,6 +1234,108 @@ void main() {
       expect(find.byType(CompactO2ToxicityPanel), findsOneWidget);
     });
 
+    testWidgets('reads a cursor time before the dive\'s zero point with its '
+        'own seconds', (tester) async {
+      // A computer that started 2:50 before the dive's zero point.
+      final dive = createTestDiveWithBottomTime().copyWith(
+        profile: const [
+          DiveProfilePoint(timestamp: -170, depth: 0),
+          DiveProfilePoint(timestamp: 60, depth: 10),
+        ],
+      );
+      final base = await getBaseOverrides();
+      final originalOnError = FlutterError.onError;
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...panelOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => analysisWithDeco()),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      ).read(profileTrackingIndexProvider(dive.id).notifier).state = 0;
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      final card = tester.widget<CompactTissueLoadingCard>(
+        find.byType(CompactTissueLoadingCard),
+      );
+      expect(card.subtitle, contains('-2:50'));
+    });
+
+    testWidgets('hands the tissue card the profile times for its heat map '
+        '(issue #4503)', (tester) async {
+      final dive = diveWithProfile();
+      final base = await getBaseOverrides();
+      final originalOnError = FlutterError.onError;
+      addTearDown(() => FlutterError.onError = originalOnError);
+      FlutterError.onError = (d) {
+        if (d.toString().contains('overflowed')) return;
+        originalOnError?.call(d);
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...base,
+            ...panelOverrides(
+              dive,
+              profileAnalysisProvider(
+                dive.id,
+              ).overrideWith((ref) async => analysisWithDeco()),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: DiveDetailPage(diveId: dive.id, embedded: true),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      final card = tester.widget<CompactTissueLoadingCard>(
+        find.byType(CompactTissueLoadingCard),
+      );
+      // The analysis's own times, the ones its deco statuses were computed
+      // at, so a retained analysis is never paired with a newer profile.
+      expect(card.profileTimestamps, const [0]);
+
+      // Moving the cursor rebuilds the panel; the times are not copied again.
+      ProviderScope.containerOf(
+        tester.element(find.byType(DiveDetailPage)),
+      ).read(profileTrackingIndexProvider(dive.id).notifier).state = 2;
+      await tester.pump();
+      final moved = tester.widget<CompactTissueLoadingCard>(
+        find.byType(CompactTissueLoadingCard),
+      );
+      expect(moved.subtitle, isNotNull);
+      expect(
+        identical(moved.profileTimestamps, card.profileTimestamps),
+        isTrue,
+      );
+    });
+
     testWidgets(
       'says why tissue loading is missing on a loop it could not model',
       (tester) async {
@@ -1286,7 +1391,13 @@ void main() {
       tester,
     ) async {
       final dive = diveWithProfile();
-      final base = await getBaseOverrides();
+      // The 3D button is scrolled to the top and tapped, where the pinned
+      // profile strip (#4423) would sit over it.
+      final base = await getBaseOverrides(
+        settingsNotifier: MockSettingsNotifier(
+          const AppSettings(pinProfileOnScroll: false),
+        ),
+      );
       final originalOnError = FlutterError.onError;
       addTearDown(() => FlutterError.onError = originalOnError);
       FlutterError.onError = (d) {
@@ -1810,7 +1921,9 @@ void main() {
       expect(chart.safetyFindings, isNotNull);
       expect(chart.safetyFindings!.map((f) => f.id), ['f-lane']);
       expect(chart.onSafetyFindingTap, isNotNull);
-      expect(chart.onSafetyFindingDismiss, isNotNull);
+      // A locked page dismisses nothing: that is held in the open Safety
+      // review card (issue #4527).
+      expect(chart.onSafetyFindingDismiss, isNull);
       expect(chart.onSafetyFindingDetails, isNotNull);
     });
 
@@ -1970,7 +2083,10 @@ void main() {
             locale: const Locale('en'),
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
-            home: DiveDetailPage(diveId: dive.id, embedded: true),
+            // In a Scaffold, as the list pane is (the unlocked strip needs one).
+            home: Scaffold(
+              body: DiveDetailPage(diveId: dive.id, embedded: true),
+            ),
           ),
         ),
       );
@@ -1988,6 +2104,8 @@ void main() {
       tester,
     ) async {
       await pumpChips(tester);
+      // A check-in is a whole-record operation (issue #4527).
+      await unlockForOperation(tester);
       await tester.ensureVisible(find.byType(ObservationStatusChip).first);
       await tester.tap(find.byType(ObservationStatusChip).first);
       await tester.pumpAndSettle();

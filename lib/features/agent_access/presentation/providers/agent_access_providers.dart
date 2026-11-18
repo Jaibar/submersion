@@ -25,6 +25,7 @@ import 'package:submersion/features/equipment/presentation/providers/equipment_p
 import 'package:submersion/features/notifications/presentation/providers/notification_providers.dart';
 import 'package:submersion/features/planner/data/services/stored_series_results.dart';
 import 'package:submersion/features/planner/presentation/providers/plan_follow_providers.dart';
+import 'package:submersion/features/query/presentation/providers/query_cache_awaits.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
@@ -276,6 +277,15 @@ class AgentAccessController {
     final records = RecordRepositories(activeDiverId: activeDiverId);
     // The app's language as it is when a tool runs, for every tool's text.
     AppLocalizations strings() => l10nForLocaleTag(_ref.read(localeProvider));
+    // Read as the planner reads it, so a plan an agent computes or saves
+    // after a logged dive carries in exactly what the planner's would. An
+    // agent names the dive by id, so a planned entry is refused as no
+    // logged dive rather than followed as if it had been dived.
+    final followOf = loggedDivesOnly(
+      (diveId) =>
+          _ref.container.awaitFuture(seriesFollowProvider(diveId).future),
+      _ref.read(diveRepositoryProvider),
+    );
     return AgentServerSpec(
       registry: AgentToolRegistry.standard(
         loader: loader,
@@ -283,16 +293,13 @@ class AgentAccessController {
         settings: settings,
         records: records,
         sql: _sqlRunner,
-        // Read as the planner reads it, so a plan an agent computes after a
-        // logged dive carries in exactly what the planner's would. An agent
-        // names the dive by id, so a planned entry is refused as no logged
-        // dive rather than followed as if it had been dived.
-        followOf: loggedDivesOnly(
-          (diveId) =>
-              _ref.container.awaitFuture(seriesFollowProvider(diveId).future),
-          _ref.read(diveRepositoryProvider),
-        ),
+        followOf: followOf,
         planCaveat: () => strings().planning_disclaimer_dialog_body,
+        // `deco` answers from the app's analysis where the computer recorded
+        // no deco data (#4461), so a query waits for those verdicts as the
+        // dive list does.
+        prepareQueryCaches: (diverId, tables) =>
+            prepareQueryCachesFor(_ref, diverId, tables),
         writes: AgentWriteServices(
           records: records,
           plans: _ref.read(agentWritePlanStoreProvider),
@@ -302,6 +309,7 @@ class AgentAccessController {
           rearmDocuments: _ref.read(documentMutationsProvider).rearmReminders,
           refreshGearReminders: _refreshGearReminders,
           strings: strings,
+          followOf: followOf,
         ),
       ),
       gate: AgentToolGate(isLocked: () => _ref.read(appLockNotifierProvider)),

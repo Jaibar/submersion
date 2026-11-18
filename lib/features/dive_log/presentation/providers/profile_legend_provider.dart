@@ -88,6 +88,19 @@ class ProfileLegendState {
   /// device-local [AppSettings.o2CellUnit].
   final O2CellUnit o2CellUnit;
 
+  /// Isobaric counterdiffusion overlay on the profile (issue #4530). Seeds
+  /// from the persisted [AppSettings.defaultShowCounterdiffusion] default.
+  final bool showCounterdiffusion;
+
+  /// Whether the counterdiffusion overlay draws every range rather than only
+  /// the flagged ones. Seeds from the device-local
+  /// [AppSettings.counterdiffusionShowAll].
+  final bool counterdiffusionShowAll;
+
+  /// Net buoyancy line on the profile (issue #4593). Seeds from the persisted
+  /// [AppSettings.defaultShowBuoyancy] default.
+  final bool showBuoyancy;
+
   // Per-metric data source preferences (session overrides).
   // The ceiling line has no source toggle: every import path stores only the
   // computer's stepped stop depth in `ceiling`, so a "computer" ceiling line
@@ -159,6 +172,9 @@ class ProfileLegendState {
     this.showOtu = false,
     this.showO2Cells = false,
     this.o2CellUnit = O2CellUnit.ppO2,
+    this.showCounterdiffusion = false,
+    this.showBuoyancy = false,
+    this.counterdiffusionShowAll = false,
     this.showGtr = false,
     // Same per-metric default as AppSettings (#1859); build() seeds from
     // settings, so these only apply to reset() and a state built without them.
@@ -210,6 +226,8 @@ class ProfileLegendState {
     if (showCns) count++;
     if (showOtu) count++;
     if (showO2Cells) count++;
+    if (showCounterdiffusion) count++;
+    if (showBuoyancy) count++;
     if (showGtr) count++;
     count += showTankPressure.values.where((v) => v).length;
     return count;
@@ -259,6 +277,9 @@ class ProfileLegendState {
     bool? showOtu,
     bool? showO2Cells,
     O2CellUnit? o2CellUnit,
+    bool? showCounterdiffusion,
+    bool? showBuoyancy,
+    bool? counterdiffusionShowAll,
     bool? showGtr,
     MetricDataSource? ndlSource,
     MetricDataSource? ttsSource,
@@ -307,6 +328,10 @@ class ProfileLegendState {
       showOtu: showOtu ?? this.showOtu,
       showO2Cells: showO2Cells ?? this.showO2Cells,
       o2CellUnit: o2CellUnit ?? this.o2CellUnit,
+      showCounterdiffusion: showCounterdiffusion ?? this.showCounterdiffusion,
+      showBuoyancy: showBuoyancy ?? this.showBuoyancy,
+      counterdiffusionShowAll:
+          counterdiffusionShowAll ?? this.counterdiffusionShowAll,
       showGtr: showGtr ?? this.showGtr,
       ndlSource: ndlSource ?? this.ndlSource,
       ttsSource: ttsSource ?? this.ttsSource,
@@ -360,6 +385,9 @@ class ProfileLegendState {
           showOtu == other.showOtu &&
           showO2Cells == other.showO2Cells &&
           o2CellUnit == other.o2CellUnit &&
+          showCounterdiffusion == other.showCounterdiffusion &&
+          showBuoyancy == other.showBuoyancy &&
+          counterdiffusionShowAll == other.counterdiffusionShowAll &&
           showGtr == other.showGtr &&
           ndlSource == other.ndlSource &&
           ttsSource == other.ttsSource &&
@@ -407,6 +435,9 @@ class ProfileLegendState {
     showOtu,
     showO2Cells,
     o2CellUnit,
+    showCounterdiffusion,
+    counterdiffusionShowAll,
+    showBuoyancy,
     showGtr,
     ndlSource,
     ttsSource,
@@ -457,6 +488,8 @@ class ProfileLegend extends _$ProfileLegend {
           defaultShowPhotoMarkers: s.defaultShowPhotoMarkers,
           defaultShowGasTimeline: s.defaultShowGasTimeline,
           defaultShowO2CellMv: s.defaultShowO2CellMv,
+          defaultShowCounterdiffusion: s.defaultShowCounterdiffusion,
+          defaultShowBuoyancy: s.defaultShowBuoyancy,
           showNdlOnProfile: s.showNdlOnProfile,
           defaultShowPpO2: s.defaultShowPpO2,
           defaultShowPpN2: s.defaultShowPpN2,
@@ -486,6 +519,12 @@ class ProfileLegend extends _$ProfileLegend {
       settingsProvider.select((s) => s.o2CellUnit),
       (_, unit) => state = state.copyWith(o2CellUnit: unit),
     );
+    // Written from the chart options dialog the same way, so it is seeded
+    // once and kept in sync in place rather than watched.
+    ref.listen(
+      settingsProvider.select((s) => s.counterdiffusionShowAll),
+      (_, showAll) => state = state.copyWith(counterdiffusionShowAll: showAll),
+    );
     return ProfileLegendState(
       // rightAxisMetric is null initially - uses setting default via fallback
       showTemperature: settings.defaultShowTemperature,
@@ -505,6 +544,11 @@ class ProfileLegend extends _$ProfileLegend {
       showGas: settings.defaultShowGasTimeline,
       showO2Cells: settings.defaultShowO2CellMv,
       o2CellUnit: ref.read(settingsProvider).o2CellUnit,
+      showCounterdiffusion: settings.defaultShowCounterdiffusion,
+      showBuoyancy: settings.defaultShowBuoyancy,
+      counterdiffusionShowAll: ref
+          .read(settingsProvider)
+          .counterdiffusionShowAll,
       showNdl: settings.showNdlOnProfile,
       showPpO2: settings.defaultShowPpO2,
       showPpN2: settings.defaultShowPpN2,
@@ -555,11 +599,11 @@ class ProfileLegend extends _$ProfileLegend {
 
   /// Get the effective right axis metric (session override or settings default).
   /// Returns null when the user has explicitly chosen "None".
-  ProfileRightAxisMetric? getEffectiveRightAxisMetric() {
-    if (state.rightAxisHidden) return null;
-    return state.rightAxisMetric ??
-        ref.read(settingsProvider).defaultRightAxisMetric;
-  }
+  ProfileRightAxisMetric? getEffectiveRightAxisMetric() =>
+      effectiveRightAxisMetricOf(
+        state,
+        ref.read(settingsProvider).defaultRightAxisMetric,
+      );
 
   // Primary toggle methods
   void toggleTemperature() {
@@ -714,6 +758,18 @@ class ProfileLegend extends _$ProfileLegend {
     state = state.copyWith(o2CellUnit: unit);
   }
 
+  void toggleCounterdiffusion() {
+    state = state.copyWith(showCounterdiffusion: !state.showCounterdiffusion);
+  }
+
+  void toggleBuoyancy() {
+    state = state.copyWith(showBuoyancy: !state.showBuoyancy);
+  }
+
+  void setCounterdiffusionShowAll(bool showAll) {
+    state = state.copyWith(counterdiffusionShowAll: showAll);
+  }
+
   // Data source set methods (for SegmentedButton)
   void setDecoStopSource(MetricDataSource source) {
     state = state.copyWith(decoStopSource: source);
@@ -774,3 +830,12 @@ class ProfileLegend extends _$ProfileLegend {
     ref.invalidateSelf();
   }
 }
+
+/// The right-axis metric [state] shows: none when the diver hid the axis,
+/// else the session's pick, else [defaultMetric] from settings. Shared by
+/// the chart and by the surfaces that decide whether a metric's data must
+/// be computed for the axis (#4593).
+ProfileRightAxisMetric? effectiveRightAxisMetricOf(
+  ProfileLegendState state,
+  ProfileRightAxisMetric defaultMetric,
+) => state.rightAxisHidden ? null : (state.rightAxisMetric ?? defaultMetric);

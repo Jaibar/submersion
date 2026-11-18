@@ -286,6 +286,10 @@ final Map<String, ConflictField> diveLogFields = {
     (l) => l.settings_conflict_field_gasSwitchesEdited,
     FieldKind.boolean,
   ),
+  'mediaTimeOffsetSeconds': ConflictField(
+    (l) => l.settings_conflict_field_mediaTimeOffsetSeconds,
+    FieldKind.durationSeconds,
+  ),
   'gradientFactorHigh': ConflictField(
     (l) => DiveField.gradientFactorHigh.localizedDisplayName(l),
     FieldKind.percent,
@@ -785,6 +789,12 @@ final Map<String, ConflictField> diveLogOverrides = {
     (l) => l.settings_conflict_field_diveProfileEvents_source,
     FieldKind.enumValue,
     enumLabel: eventSourceLabeler,
+  ),
+  // A dive's types read back in created_at order, so a reorder rewrites it and
+  // the change log records it (issue #4477). It is an order here, not a date.
+  'diveDiveTypes.createdAt': ConflictField(
+    (l) => l.settings_conflict_field_sortOrder,
+    FieldKind.number,
   ),
   // When this generation last went live for its source (v283, issue #3189).
   'diveProfileSeries.activatedAt': ConflictField(

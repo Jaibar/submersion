@@ -5,6 +5,7 @@ import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dar
 import 'package:submersion/features/insights/presentation/providers/insights_filter_provider.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_gas_lane_provider.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
+import 'package:submersion/features/insights/presentation/providers/my_role_providers.dart';
 
 import '../../../../helpers/mock_providers.dart';
 import '../../../../helpers/test_database.dart';
@@ -56,6 +57,7 @@ void main() {
     );
     expect(await container.read(gasMixDistributionProvider.future), isEmpty);
     expect(await container.read(diveTypeDistributionProvider.future), isEmpty);
+    expect(await container.read(diverRoleDistributionProvider.future), isEmpty);
     expect(await container.read(depthProgressionTrendProvider.future), isEmpty);
     expect(await container.read(bottomTimeTrendProvider.future), isEmpty);
     expect(await container.read(runtimeTrendProvider.future), isEmpty);
@@ -113,10 +115,8 @@ void main() {
     );
     expect(ascentDescent.avgAscent, isNull);
     expect(await container.read(timeAtDepthRangesProvider.future), isEmpty);
-    final suits = await container.read(divesBySuitThicknessProvider.future);
-    expect(suits.byThickness, isEmpty);
-    expect(suits.unknownThicknessCount, 0);
-    expect(suits.drysuitCount, 0);
+    final suits = await container.read(divesBySuitTypeProvider.future);
+    expect(suits, isEmpty);
     final deco = await container.read(decoObligationStatsProvider.future);
     expect(deco.decoCount, 0);
     expect(deco.noDecoCount, 0);

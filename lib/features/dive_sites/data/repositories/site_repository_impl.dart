@@ -8,18 +8,21 @@ import 'package:submersion/core/data/visibility/visibility_filter.dart';
 import 'package:submersion/core/database/app_sql_functions.dart';
 import 'package:submersion/core/database/database.dart';
 import 'package:submersion/core/database/dive_stats_scope.dart';
+import 'package:submersion/core/geography/country_code.dart';
 import 'package:submersion/core/performance/perf_timer.dart';
 import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/geocoding/place_lookup.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
 import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/core/util/wall_clock_utc.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_parent_links.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_times_sql.dart';
 import 'package:submersion/features/dive_log/data/services/derived_metrics_scheduler.dart';
 import 'package:submersion/features/dive_sites/data/mappers/dive_site_row_mapper.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_catalogue_claims.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_children.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_classification_repository.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_links.dart';
@@ -27,6 +30,8 @@ import 'package:submersion/features/dive_sites/domain/entities/site_classificati
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart'
     as domain;
 import 'package:submersion/features/dive_sites/domain/entities/site_with_dive_count.dart';
+import 'package:submersion/features/dive_sites/domain/services/catalogue_merge_claims.dart';
+import 'package:submersion/features/dive_sites/domain/services/site_country_code.dart';
 import 'package:submersion/features/dive_sites/domain/services/site_location_merge.dart';
 import 'package:submersion/features/divers/data/repositories/item_shares_repository.dart';
 import 'package:submersion/features/divers/data/repositories/profile_hides_repository.dart';
@@ -150,6 +155,27 @@ class SiteRepository {
     }
   }
 
+  /// The site of [diverId] that claims the built-in catalogue record
+  /// [catalogueId], or null: the one adopted from it, or one that stands
+  /// for it since a merge. See [SiteCatalogueClaims.claimant].
+  Future<domain.DiveSite?> getSiteByCatalogueId(
+    String catalogueId, {
+    String? diverId,
+  }) async {
+    try {
+      return await SiteCatalogueClaims(
+        _db,
+      ).claimant(catalogueId, diverId: diverId);
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to get site by catalogue id: $catalogueId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
   /// Create a new site. A [classification] (issue #1765) is written in the
   /// same transaction, so a failure leaves neither the row nor its links.
   Future<domain.DiveSite> createSite(
@@ -177,6 +203,7 @@ class SiteRepository {
                 difficulty: Value(site.difficulty?.name),
                 waterType: Value(site.waterType?.name),
                 country: Value(site.country),
+                countryCode: Value(reconciledCountryCode(site)),
                 region: Value(site.region),
                 city: Value(site.city),
                 island: Value(site.island),
@@ -192,6 +219,8 @@ class SiteRepository {
                 exitMethod: Value(encodeEntryMethods(site.exitMethods)),
                 isShared: Value(site.isShared),
                 sharedLibraryId: Value(site.sharedLibraryId),
+                catalogueId: Value(site.catalogueId),
+                catalogueAnswers: Value(site.catalogueAnswers.encode()),
                 createdAt: Value(now),
                 updatedAt: Value(now),
               ),
@@ -223,15 +252,60 @@ class SiteRepository {
   /// Without one the junctions are never touched: several callers pass a
   /// partially loaded site (#1187), and none of them may clear its types or
   /// tags.
+  ///
+  /// [stampLibrary] false leaves a library site's edit stamp to the caller
+  /// ([stampLibraryEdit]): an editing sitting writes the site inside its own
+  /// transaction, and stamps only once that has committed, since the stamp
+  /// goes to the shared library store, which a rollback would not undo.
   Future<void> updateSite(
     domain.DiveSite site, {
     SiteClassification? classification,
     String? actingDiverId,
+    bool stampLibrary = true,
   }) => _writeSiteUpdate(
     site,
     classification: classification,
     actingDiverId: actingDiverId,
+    stampLibrary: stampLibrary,
   );
+
+  /// Records which fields a write changed on a library site, and the
+  /// profile's private notes and rating, as [updateSite] does after its own
+  /// write (issue #2567): for a write made with `stampLibrary: false`.
+  /// [before] is the site as it was, [after] as it is now stored. Does
+  /// nothing for a site in no library.
+  Future<void> stampLibraryEdit(
+    domain.DiveSite before,
+    domain.DiveSite after, {
+    String? actingDiverId,
+  }) async {
+    if (!before.isLibrarySite) return;
+    await _stampLibraryEdit(
+      before,
+      after,
+      LibraryEditStamper.changedFields(before, after),
+      actingDiverId: actingDiverId,
+    );
+  }
+
+  Future<void> _stampLibraryEdit(
+    domain.DiveSite before,
+    domain.DiveSite site,
+    Set<String> changed, {
+    String? actingDiverId,
+  }) async {
+    await _libraryStamper.stamp(site.id, changed, actingDiverId: actingDiverId);
+    // The profile's private notes and rating: never in the library, kept
+    // for personal sync to carry to its other devices.
+    if (before.notes != site.notes || before.rating != site.rating) {
+      await _libraryStamper.keepPrivate(
+        site.id,
+        notes: site.notes,
+        rating: site.rating,
+        actingDiverId: actingDiverId,
+      );
+    }
+  }
 
   /// Update an existing site and, in the same statement, apply importer-only
   /// columns that do not flow through the [domain.DiveSite] entity.
@@ -254,6 +328,7 @@ class SiteRepository {
     DiveSitesCompanion? metadataPatch,
     SiteClassification? classification,
     String? actingDiverId,
+    bool stampLibrary = true,
   }) async {
     try {
       _log.info('Updating site: ${site.id}');
@@ -299,6 +374,7 @@ class SiteRepository {
         difficulty: Value(site.difficulty?.name),
         waterType: Value(site.waterType?.name),
         country: Value(site.country),
+        countryCode: Value(reconciledCountryCode(site, before: before)),
         region: Value(site.region),
         city: Value(site.city),
         island: Value(site.island),
@@ -313,6 +389,10 @@ class SiteRepository {
         entryMethod: Value(encodeEntryMethods(site.entryMethods)),
         exitMethod: Value(encodeEntryMethods(site.exitMethods)),
         isShared: Value(site.isShared),
+        // catalogueId and catalogueAnswers are deliberately not written
+        // here, like sharedLibraryId: the site edit page saves an entity
+        // built fresh from its form, so writing them would erase both on
+        // every edit. They are set by createSite and carried by a merge.
         updatedAt: Value(now),
       );
       if (metadataPatch != null) {
@@ -324,6 +404,19 @@ class SiteRepository {
         if (metadataPatch.bodyOfWater.present) {
           companion = companion.copyWith(
             bodyOfWater: metadataPatch.bodyOfWater,
+          );
+        }
+        // The one way an update sets the catalogue link: an import that
+        // carries it, for a site that had none.
+        if (metadataPatch.catalogueId.present) {
+          companion = companion.copyWith(
+            catalogueId: metadataPatch.catalogueId,
+          );
+        }
+        // The diver's answers about catalogue records come the same way.
+        if (metadataPatch.catalogueAnswers.present) {
+          companion = companion.copyWith(
+            catalogueAnswers: metadataPatch.catalogueAnswers,
           );
         }
       }
@@ -355,7 +448,7 @@ class SiteRepository {
       if (before?.waterType?.name != companion.waterType.value) {
         DerivedMetricsScheduler.instance.scheduleStaleSweep();
       }
-      if (libraryEdit && before != null) {
+      if (stampLibrary && libraryEdit && before != null) {
         final changed = LibraryEditStamper.changedFields(before, site);
         if (classification != null) {
           if (classification.typeIds.toSet() != typesBefore) {
@@ -363,21 +456,12 @@ class SiteRepository {
           }
           if (classification.tagIds.toSet() != tagsBefore) changed.add('tags');
         }
-        await _libraryStamper.stamp(
-          site.id,
+        await _stampLibraryEdit(
+          before,
+          site,
           changed,
           actingDiverId: actingDiverId,
         );
-        // The profile's private notes and rating: never in the library,
-        // kept for personal sync to carry to its other devices.
-        if (before.notes != site.notes || before.rating != site.rating) {
-          await _libraryStamper.keepPrivate(
-            site.id,
-            notes: site.notes,
-            rating: site.rating,
-            actingDiverId: actingDiverId,
-          );
-        }
       }
       SyncEventBus.notifyLocalChange();
       _log.info('Updated site: ${site.id}');
@@ -420,6 +504,30 @@ class SiteRepository {
         DiveSitesCompanion(altitude: Value(altitudeMeters)),
       );
 
+  /// Stores a looked-up altitude for [siteId] only while the site still has
+  /// none. A sitting holds the copy of a lookup it made because the site had
+  /// no altitude, and writes it when it is saved; an altitude the site
+  /// gained meanwhile (typed on the site page, or brought in by a sync) is
+  /// newer than that lookup and is kept (issue #4527). Returns true when the
+  /// altitude was stored: read back, as the write declines a shared library
+  /// site this profile may not edit without saying so.
+  ///
+  /// One transaction, so an altitude stored between the read and the write
+  /// (a sync landing while the lookup's answer is written) is not
+  /// overwritten.
+  Future<bool> fillSiteAltitudeIfEmpty(String siteId, double altitudeMeters) =>
+      _db.transaction(() async {
+        final row = await (_db.select(
+          _db.diveSites,
+        )..where((t) => t.id.equals(siteId))).getSingleOrNull();
+        if (row == null || row.altitude != null) return false;
+        await updateSiteAltitude(siteId, altitudeMeters);
+        final stored = await (_db.select(
+          _db.diveSites,
+        )..where((t) => t.id.equals(siteId))).getSingleOrNull();
+        return stored?.altitude == altitudeMeters;
+      });
+
   /// Stores coordinates (and optionally an altitude) for [siteId] without
   /// touching any other column.
   Future<void> updateSiteCoordinates(
@@ -435,7 +543,8 @@ class SiteRepository {
     ),
   );
 
-  /// Writes country, region, city and body of water on [siteId] from
+  /// Writes country (with its ISO code), region, city and body of water on
+  /// [siteId] from
   /// [found], leaving every other column untouched (issue #1187). With
   /// [overwrite] false only columns that are still empty are written; with
   /// it true a differing stored value is replaced too, which is how sites
@@ -476,6 +585,9 @@ class SiteRepository {
         )..where((t) => t.id.equals(siteId))).write(
           DiveSitesCompanion(
             country: column(merged.country),
+            countryCode: merged.clearCountryCode
+                ? const Value(null)
+                : column(merged.countryCode),
             region: column(merged.region),
             city: column(merged.city),
             bodyOfWater: column(merged.bodyOfWater),
@@ -996,6 +1108,20 @@ class SiteRepository {
         final missing = duplicateIds.where((id) => !found.contains(id));
         throw StateError('Sites not found: ${missing.join(', ')}');
       }
+      // The catalogue link and answers are not the caller's to choose: the
+      // merge page builds [mergedSite] from its form, which knows nothing
+      // of them. The survivor keeps its own link, else takes the first
+      // merged site's, and stands for every other record merged in.
+      final deletedById = {for (final site in deletedSites) site.id: site};
+      final claims = mergedCatalogueClaims(
+        survivor: originalSurvivor,
+        mergedAway: [for (final id in duplicateIds) ?deletedById[id]],
+      );
+      final linkedSurvivor = guardedSurvivor.copyWith(
+        catalogueId: claims.link,
+        clearCatalogueId: claims.link == null,
+        catalogueAnswers: claims.answers,
+      );
 
       final affectedDives = await (_db.select(
         _db.dives,
@@ -1052,7 +1178,7 @@ class SiteRepository {
       // set at a duplicate meanwhile is moved too rather than failing the
       // duplicate's delete, and the hides it removed.
       final merged = await _db.transaction(() async {
-        await _updateSiteRow(guardedSurvivor, now);
+        await _updateSiteRow(linkedSurvivor, now);
         await _syncRepository.markRecordPending(
           entityType: 'diveSites',
           recordId: survivorId,
@@ -1117,6 +1243,19 @@ class SiteRepository {
         );
       });
 
+      // A library survivor's row is outside personal sync: what the merge
+      // left it claiming is kept for the profile, like its notes.
+      if (linkedSurvivor.isLibrarySite &&
+          (linkedSurvivor.catalogueId != originalSurvivor.catalogueId ||
+              linkedSurvivor.catalogueAnswers !=
+                  originalSurvivor.catalogueAnswers)) {
+        await _libraryStamper.keepCatalogue(
+          survivorId,
+          catalogueId: linkedSurvivor.catalogueId,
+          answers: linkedSurvivor.catalogueAnswers,
+          actingDiverId: actingDiverId,
+        );
+      }
       SyncEventBus.notifyLocalChange();
       _log.info('Merged ${orderedIds.length} sites into survivor: $survivorId');
 
@@ -1187,6 +1326,8 @@ class SiteRepository {
       _log.info(
         'Undoing merge: restoring ${snapshot.deletedSites.length} sites',
       );
+      // The survivor as the merge left it, to see what the undo changes.
+      final merged = await getSiteById(snapshot.originalSurvivor.id);
 
       await _db.transaction(() async {
         // 1. Restore the survivor to its original state
@@ -1215,6 +1356,7 @@ class SiteRepository {
                   difficulty: Value(site.difficulty?.name),
                   waterType: Value(site.waterType?.name),
                   country: Value(site.country),
+                  countryCode: Value(site.countryCode),
                   region: Value(site.region),
                   city: Value(site.city),
                   island: Value(site.island),
@@ -1229,6 +1371,8 @@ class SiteRepository {
                   entryMethod: Value(encodeEntryMethods(site.entryMethods)),
                   exitMethod: Value(encodeEntryMethods(site.exitMethods)),
                   isShared: Value(site.isShared),
+                  catalogueId: Value(site.catalogueId),
+                  catalogueAnswers: Value(site.catalogueAnswers.encode()),
                   createdAt: Value(ts?.createdAt ?? now),
                   updatedAt: Value(ts?.updatedAt ?? now),
                 ),
@@ -1383,6 +1527,20 @@ class SiteRepository {
         }
       });
 
+      // A library survivor's claims are also kept for the profile; what
+      // the merge put there is taken back, or the next copy-back would
+      // return it to the row.
+      final original = snapshot.originalSurvivor;
+      if (original.isLibrarySite &&
+          merged != null &&
+          (merged.catalogueId != original.catalogueId ||
+              merged.catalogueAnswers != original.catalogueAnswers)) {
+        await _libraryStamper.keepCatalogue(
+          original.id,
+          catalogueId: original.catalogueId,
+          answers: original.catalogueAnswers,
+        );
+      }
       SyncEventBus.notifyLocalChange();
       _log.info('Undo merge complete');
     } catch (e, stackTrace) {
@@ -1395,23 +1553,32 @@ class SiteRepository {
   ///
   /// Each column is folded by `unicode_lower` to meet the Dart-lowered
   /// needle: LIKE folds ASCII only, so "österreich" missed "Österreich"
-  /// (#3377).
+  /// (#3377). A query naming a country in any language also matches the
+  /// sites stored with that country's code, so "Thailand" finds a site whose
+  /// country reads "ประเทศไทย" (#4520).
   Future<List<domain.DiveSite>> searchSites(
     String query, {
     String? diverId,
   }) async {
     try {
       return await PerfTimer.measure('searchSites', () async {
-        final needle = query.toLowerCase();
+        final needle = foldForSearch(query);
+        final countryCodes = countryCodesMatching(query);
+        final uncodedCountries = countryCodes.isEmpty
+            ? const <String>[]
+            : await _uncodedCountriesNaming(countryCodes);
         final searchQuery = _db.select(_db.diveSites)
           ..where(
-            (t) =>
-                t.name.unicodeLower().contains(needle) |
-                t.country.unicodeLower().contains(needle) |
-                t.region.unicodeLower().contains(needle) |
-                t.city.unicodeLower().contains(needle) |
-                t.island.unicodeLower().contains(needle) |
-                t.bodyOfWater.unicodeLower().contains(needle),
+            (t) => [
+              t.name.searchFold().contains(needle),
+              t.country.searchFold().contains(needle),
+              t.region.searchFold().contains(needle),
+              t.city.searchFold().contains(needle),
+              t.island.searchFold().contains(needle),
+              t.bodyOfWater.searchFold().contains(needle),
+              if (countryCodes.isNotEmpty) t.countryCode.isIn(countryCodes),
+              if (uncodedCountries.isNotEmpty) t.country.isIn(uncodedCountries),
+            ].reduce((a, b) => a | b),
           )
           ..orderBy([(t) => OrderingTerm.asc(t.name.collate(Collate.noCase))]);
 
@@ -1428,6 +1595,24 @@ class SiteRepository {
       );
       rethrow;
     }
+  }
+
+  /// Stored country texts with no code beside them that name one of [codes]
+  /// (#4520). The v361 backfill ran once, so a name the recognizer learned
+  /// later ("ประเทศไทย") is still stored without its code.
+  Future<List<String>> _uncodedCountriesNaming(Set<String> codes) async {
+    final rows = await _db
+        .customSelect(
+          'SELECT DISTINCT country FROM dive_sites '
+          'WHERE country_code IS NULL AND country IS NOT NULL',
+          readsFrom: {_db.diveSites},
+        )
+        .get();
+    return [
+      for (final row in rows)
+        if (codes.contains(countryCodeFor(row.read<String>('country'))))
+          row.read<String>('country'),
+    ];
   }
 
   /// Dive count per site. Kept for callers that only need the count; the
@@ -1619,6 +1804,7 @@ class SiteRepository {
         difficulty: Value(site.difficulty?.name),
         waterType: Value(site.waterType?.name),
         country: Value(site.country),
+        countryCode: Value(site.countryCode),
         region: Value(site.region),
         city: Value(site.city),
         island: Value(site.island),
@@ -1634,6 +1820,8 @@ class SiteRepository {
         exitMethod: Value(encodeEntryMethods(site.exitMethods)),
         isShared: Value(site.isShared),
         sharedLibraryId: Value(site.sharedLibraryId),
+        catalogueId: Value(site.catalogueId),
+        catalogueAnswers: Value(site.catalogueAnswers.encode()),
         updatedAt: Value(now),
       ),
     );

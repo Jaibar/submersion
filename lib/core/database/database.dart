@@ -9,6 +9,7 @@ import 'package:submersion/core/database/tables/cylinder_tables.dart';
 import 'package:submersion/core/database/tables/dive_computer_connection_tables.dart';
 import 'package:submersion/core/database/tables/dive_lab_tables.dart';
 import 'package:submersion/core/database/tables/dive_plan_tables.dart';
+import 'package:submersion/core/database/tables/dive_deco_status_tables.dart';
 import 'package:submersion/core/database/tables/dive_derived_metrics_tables.dart';
 import 'package:submersion/core/database/tables/dive_plan_mission_tables.dart';
 import 'package:submersion/core/database/tables/dive_profile_tables.dart';
@@ -19,7 +20,9 @@ import 'package:submersion/core/database/tables/equipment_condition_tables.dart'
 import 'package:submersion/core/database/tables/document_tables.dart';
 import 'package:submersion/core/database/tables/equipment_location_tables.dart';
 import 'package:submersion/core/database/tables/equipment_service_status_tables.dart';
+import 'package:submersion/core/database/tables/equipment_set_bundle_tables.dart';
 import 'package:submersion/core/database/tables/equipment_tables.dart';
+import 'package:submersion/core/database/tables/identification_tables.dart';
 import 'package:submersion/core/database/tables/marine_life_tables.dart';
 import 'package:submersion/core/database/tables/media_people_tables.dart';
 import 'package:submersion/core/database/tables/media_tables.dart';
@@ -47,6 +50,7 @@ export 'package:submersion/core/database/tables/cylinder_tables.dart';
 export 'package:submersion/core/database/tables/dive_health_tables.dart';
 export 'package:submersion/core/database/tables/dive_lab_tables.dart';
 export 'package:submersion/core/database/tables/dive_plan_tables.dart';
+export 'package:submersion/core/database/tables/dive_deco_status_tables.dart';
 export 'package:submersion/core/database/tables/dive_derived_metrics_tables.dart';
 export 'package:submersion/core/database/tables/dive_plan_mission_tables.dart';
 export 'package:submersion/core/database/tables/dive_computer_connection_tables.dart';
@@ -57,7 +61,9 @@ export 'package:submersion/core/database/tables/equipment_condition_tables.dart'
 export 'package:submersion/core/database/tables/document_tables.dart';
 export 'package:submersion/core/database/tables/equipment_location_tables.dart';
 export 'package:submersion/core/database/tables/equipment_service_status_tables.dart';
+export 'package:submersion/core/database/tables/equipment_set_bundle_tables.dart';
 export 'package:submersion/core/database/tables/equipment_tables.dart';
+export 'package:submersion/core/database/tables/identification_tables.dart';
 export 'package:submersion/core/database/tables/marine_life_tables.dart';
 export 'package:submersion/core/database/tables/media_people_tables.dart';
 export 'package:submersion/core/database/tables/media_tables.dart';
@@ -114,6 +120,10 @@ String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
     EquipmentSets,
     EquipmentSetItems,
     EquipmentSetGeofences,
+    // What a set carries besides gear (v364, issue #4525)
+    EquipmentSetIncludes,
+    EquipmentSetWeightPresets,
+    EquipmentSetCylinderConfigs,
     QualityFindings,
     EquipmentAttributes,
     EquipmentComponents,
@@ -128,6 +138,8 @@ String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
     MediaPeople,
     PendingPhotoSuggestions,
     MediaRepairLog,
+    MediaIdentificationRuns,
+    MediaIdentifications,
     MediaSmartAlbums,
     Settings,
     Buddies,
@@ -161,6 +173,7 @@ String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
     DiveSensorSummaries,
     // Explore derived metrics (v247, issue #2195), local only
     DiveDerivedMetricsRows,
+    DiveDecoStatus,
     EquipmentObservations,
     EquipmentFindings,
     EquipmentConditionReviews,
@@ -319,7 +332,7 @@ class AppDatabase extends _$AppDatabase {
 
   /// The current schema version as a static constant so that pre-open checks
   /// (e.g. version-mismatch guard) can reference it without an instance.
-  static const int currentSchemaVersion = 357;
+  static const int currentSchemaVersion = 376;
 
   /// The oldest schema whose reader can apply this build's sync payloads
   /// without loss or misinterpretation (the compatibility floor).
@@ -1630,6 +1643,10 @@ class AppDatabase extends _$AppDatabase {
     // folded group keys (issue #4184). A nullable column an older peer
     // omits, so the floor does not move.
     351,
+    // v352: media.observation_id and equipment.cover_media_id, gear photos
+    // and an item's cover photo (issue #3355). Nullable columns an older
+    // peer omits, with no backfill, so the floor does not move.
+    352,
     // v354: dives.is_draft, a dive marked at the site that waits for its
     // dive computer readings, and dive_health_records, heart rate, recovery
     // and sleep from Apple Health per dive (issue #637). Additive and
@@ -1647,6 +1664,90 @@ class AppDatabase extends _$AppDatabase {
     // omits, with no backfill, so the floor does not move. Numbered 357
     // because main holds 356; renumbered from 353, then 355.
     357,
+    // v358: a dive's rating back on the 1 to 5 star scale where a UDDF
+    // import stored the file's 1 to 10 value, or 0 for an unrated dive
+    // (issue #4415). Data only; the floor does not move.
+    358,
+    // v359: diver_settings.pin_profile_on_scroll, whether dive details pins
+    // a thin profile strip once the profile card scrolls away (issue #4423).
+    // Additive and defaulted; the floor does not move. Numbered 359 because
+    // main holds 358.
+    359,
+    // v360: diver_settings.show_country_flags, the switch for the flags
+    // beside site locations and trips (issue #4426). Defaulted on, so the
+    // floor does not move. Renumbered from 359, which main took for #4423.
+    360,
+    // v361: dive_sites.country_code, the site's ISO country code (issue
+    // #4426), backfilled offline from each site's country text. Nullable,
+    // so the floor does not move. Renumbered from 360.
+    361,
+    // v362: dive_deco_status, the computed deco verdicts the query
+    // language's deco field reads (issue #4461). A table with no hlc, never
+    // synced, so the floor does not move.
+    362,
+    // v363: dive_sites.catalogue_id, the built-in catalogue record a site
+    // was adopted from. Nullable, nothing to backfill, so the floor does
+    // not move. Renumbered from 362, which main took for #4461.
+    363,
+    // v364: the three equipment-set junction tables and the nullable body
+    // composition columns on divers and their weight entries (issue #4525).
+    // New tables and nullable columns, so the floor does not move.
+    // Renumbered from 363, which main took for the site catalogue id.
+    364,
+    // v365: diver_settings.recent_equipment_colors, the custom colours the
+    // diver picked for their gear (issue #4537). A nullable column an older
+    // peer omits, so the floor does not move. Renumbered from 364, which
+    // main took for #4525.
+    365,
+    // v366: diver_settings.default_show_counterdiffusion, the default
+    // visibility of the isobaric counterdiffusion overlay on the dive profile
+    // (issue #4530). Additive and defaulted off; the floor does not move.
+    // Renumbered from 365, which main took for #4537.
+    366,
+    // v367: dives.media_time_offset_seconds, the correction for a camera
+    // whose clock disagrees with the dive computer's (issue #4539). A
+    // defaulted column an older peer omits, so the floor does not move.
+    // Renumbered from 366, which main took for #4530.
+    367,
+    // v368: equipment_attributes.value_unit, the unit an item's own number
+    // reads in, and the repair of cylinder volumes saved as water cubic feet
+    // (issue #4534). Nullable column plus a data repair, so the floor does
+    // not move. Renumbered from 366 and 367, which main took.
+    368,
+    // v369: dive_sites.catalogue_answers and the catalogue link and answers
+    // a profile keeps for a shared library site. Nullable, nothing to
+    // backfill, so the floor does not move. Renumbered three times: main took
+    // 365 for #4537, 367 for #4539 and 368 for #4544.
+    369,
+    // v370: diver_settings.default_show_buoyancy, the default visibility of
+    // the net buoyancy line on the dive profile (issue #4593). Additive and
+    // defaulted off; the floor does not move.
+    370,
+    // v371: diver_settings.favourite_dive_type_ids, the dive types a diver
+    // starred to list first in the pickers (issue #4413). Nullable, no
+    // backfill; the floor does not move.
+    371,
+    // v372: buddies.country and buddies.country_code (issue #4457).
+    // Nullable, nothing to backfill; the floor does not move. Renumbered
+    // from 371, which main took for #4413.
+    372,
+    // v373: dive_centers.logo, a dive center's logo (issue #4460). Nullable,
+    // no backfill; the floor does not move. Renumbered twice: main took 371
+    // for #4413 and 372 for #4457.
+    373,
+    // v374: dive_plans.scr_injection_rate/scr_vo2/pscr_vo2 and the diver's
+    // planner_scr_injection_rate/planner_scr_vo2/planner_pscr_vo2 defaults
+    // (issue #4660). Columns only, no backfill; the floor does not move.
+    374,
+    // v375: media_identification_runs and media_identifications, what the
+    // on-device model found on each photo (issue #4668). Tables with no
+    // hlc, never synced, so the floor does not move. Renumbered from 374,
+    // which main took for #4660.
+    375,
+    // v376: video columns on media_identification_runs and
+    // media_identifications (issue #4675). Columns on tables that never
+    // sync, no backfill; the floor does not move.
+    376,
   ];
 
   /// Returns the number of migration steps that will execute when upgrading

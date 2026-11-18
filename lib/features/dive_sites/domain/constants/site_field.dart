@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/constants/enums.dart';
+import 'package:submersion/core/utils/number_display.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/domain/entities/site_with_dive_count.dart';
@@ -28,6 +29,11 @@ String _formatDurationSeconds(num seconds) {
   if (hours > 0) return '${hours}h ${minutes}m';
   return '${minutes}min';
 }
+
+/// Whether a card slot showing [field] names the site's place, so a country
+/// flag belongs beside it (issue #4426).
+bool showsPlace(SiteField field) =>
+    field == SiteField.location || field == SiteField.country;
 
 /// Categories grouping related site fields together.
 enum SiteFieldCategory {
@@ -798,7 +804,7 @@ class SiteFieldAdapter extends EntityFieldAdapter<SiteWithCount, SiteField> {
       case SiteField.difficulty:
         return (value as SiteDifficulty).displayName;
       case SiteField.rating:
-        return (value as double).toStringAsFixed(1);
+        return formatRatingForDisplay(value as double);
       case SiteField.latitude:
         return units.formatLatitude(value as double);
       case SiteField.longitude:

@@ -15,10 +15,12 @@ import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/features/change_log/presentation/providers/change_log_providers.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_custom_field_repository.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
+import 'package:submersion/features/dive_log/data/sql/dive_weight_sql.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
 import 'package:submersion/features/dive_log/data/services/dive_bulk_delete_service.dart';
 import 'package:submersion/features/dive_log/data/services/dive_consolidation_service.dart';
 import 'package:submersion/features/dive_log/data/services/dive_merge_service.dart';
+import 'package:submersion/features/dive_log/data/services/dive_source_removal_service.dart';
 import 'package:submersion/features/dive_log/data/services/dive_split_service.dart';
 import 'package:submersion/features/dive_log/data/services/dive_uncombine_service.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_data_retention.dart';
@@ -35,13 +37,13 @@ import 'package:submersion/features/dive_log/domain/entities/dive_summary.dart';
 import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
 import 'package:submersion/features/dive_log/query/dive_filter_query.dart';
 import 'package:submersion/features/dive_log/query/dive_query_entity.dart';
-import 'package:submersion/features/equipment/presentation/providers/equipment_service_status_providers.dart';
 import 'package:submersion/features/dive_log/presentation/providers/filter_aware_tick.dart';
 import 'package:submersion/features/dive_log/presentation/providers/narrow_dives.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/trips/presentation/providers/trip_providers.dart';
 import 'package:submersion/features/documents/presentation/providers/document_providers.dart';
+import 'package:submersion/features/query/presentation/providers/query_cache_awaits.dart';
 
 // Re-export DiveFilterState so existing imports continue to work
 export 'package:submersion/features/dive_log/domain/models/dive_filter_state.dart';
@@ -52,6 +54,13 @@ export 'package:submersion/features/dive_log/presentation/providers/dive_reposit
 /// Dive filter state provider
 final diveFilterProvider = StateProvider<DiveFilterState>(
   (ref) => const DiveFilterState(),
+);
+
+/// The tables the dive list's filter reads, compiled once per filter rather
+/// than once by every widget and keeper that asks (the dive list's
+/// counterpart of `insightsFilterTablesProvider`).
+final diveFilterTablesProvider = Provider<Set<String>>(
+  (ref) => diveFilterTablesTouched(ref.watch(diveFilterProvider)),
 );
 
 /// Dive sort state provider
@@ -91,7 +100,7 @@ final queryFilteredDiveIdsProvider = FutureProvider.autoDispose
       // Compiled once: the same object names the tables to follow and is
       // the query the repository runs.
       final compiled = compileDiveFilter(filter, rootAlias: 'd');
-      await awaitServiceStatusIfRead(ref, compiled.tablesTouched);
+      await awaitQueryCachesIfRead(ref, compiled.tablesTouched);
       ref.invalidateSelfWhen(repository.watchTables(compiled.tablesTouched));
       return repository.getDiveIdsForQuery(compiled, diverId: diverId);
     });
@@ -142,7 +151,7 @@ final orderedDiveIdsProvider = FutureProvider.autoDispose<List<String>>((
   // tables under an attribute condition (#1805). One stream, not two, so a
   // junction write followed by the dive write recomputes the ids once.
   final touched = diveFilterTablesTouched(filter);
-  await awaitServiceStatusIfRead(ref, touched);
+  await awaitQueryCachesIfRead(ref, touched);
   final extra = touched.difference({'dives'});
   ref.invalidateSelfWhen(
     extra.isEmpty
@@ -240,6 +249,11 @@ final diveConsolidationServiceProvider = Provider<DiveConsolidationService>((
 final diveSplitServiceProvider = Provider<DiveSplitService>((ref) {
   return DiveSplitService(ref.watch(diveRepositoryProvider));
 });
+
+/// Remove-a-source-from-a-dive service singleton (issue #4393).
+final diveSourceRemovalServiceProvider = Provider<DiveSourceRemovalService>(
+  (ref) => DiveSourceRemovalService(),
+);
 
 /// Separate-a-combined-dive service singleton (inverse of combine).
 final diveUncombineServiceProvider = Provider<DiveUncombineService>((ref) {
@@ -564,7 +578,6 @@ final diveBulkDeleteServiceProvider = Provider<DiveBulkDeleteService>((ref) {
     changeLog: ref.watch(changeLogRepositoryProvider),
     revert: ref.watch(changeLogRevertServiceProvider),
     restoreDocuments: documents.restoreSnapshot,
-    rearmDocuments: documents.rearmReminders,
   );
 });
 
@@ -600,20 +613,29 @@ class DiveListNotifier extends StateNotifier<AsyncValue<List<domain.Dive>>> {
     // whatever tables the filter names; a write to one of them (a synced
     // buddy link, a weight row) changes the answer without a dives write,
     // so the tick follows the filter's tables beyond `dives` (#1915).
+    //
+    // The table's Total weight reads each dive's weight rows and the lead its
+    // weights gear carries (`Dive.recordedWeightKg`, #4442). A synced weight
+    // row or an edit of a weights item's dry weight writes only those tables,
+    // so they are in the base tick beside `dives`, as one debounced stream.
     final divesTick = FilterAwareTick(
-      plain: _repository.watchDivesChanges,
-      baseTables: const {'dives'},
+      plain: () => _repository.watchTables(_listBaseTables),
+      baseTables: _listBaseTables,
       watchTables: _repository.watchTables,
       onTick: _silentReload,
     );
     Set<String> extra(DiveFilterState f) =>
-        diveFilterTablesTouched(f).difference({'dives'});
+        diveFilterTablesTouched(f).difference(_listBaseTables);
     _ref.listen<DiveFilterState>(diveFilterProvider, (previous, next) {
       divesTick.follow(extra(next));
     });
     divesTick.follow(extra(_ref.read(diveFilterProvider)));
     _ref.onDispose(divesTick.cancel);
   }
+
+  /// What the hydrated list's rows read that a write can change without
+  /// touching `dives`, and that the list ticks on whatever the filter.
+  static const _listBaseTables = {'dives', ...recordedWeightTables};
 
   Future<void> _loadDives() async {
     state = const AsyncValue.loading();
@@ -935,11 +957,12 @@ class PaginatedDiveListNotifier
   /// which stays null for rows loaded with no filter active.
   static int? _shifted(int? count, int by) => count == null ? null : count + by;
 
-  /// A filter naming gear.serviceDue reads the service cache: each load waits
-  /// for it to mirror the engine, so no page shows an empty cache or the
-  /// previous diver's verdicts (#2365).
-  Future<void> _awaitServiceCache(DiveFilterState filter) =>
-      awaitServiceStatusIfRead(
+  /// A filter naming gear.serviceDue reads the service cache, and one naming
+  /// deco reads the computed deco verdicts: each load waits for those it
+  /// reads to mirror their engine, so no page shows an empty cache or the
+  /// previous diver's verdicts (#2365, #4461).
+  Future<void> _awaitQueryCaches(DiveFilterState filter) =>
+      awaitQueryCachesIfRead(
         _ref,
         diveFilterTablesTouched(filter),
         hold: false,
@@ -957,7 +980,7 @@ class PaginatedDiveListNotifier
     try {
       final filter = _ref.read(diveFilterProvider);
       final sort = _ref.read(diveSortProvider);
-      await _awaitServiceCache(filter);
+      await _awaitQueryCaches(filter);
       if (!mounted) return;
       final results = await Future.wait([
         _repository.getDiveSummaries(
@@ -1224,7 +1247,7 @@ class PaginatedDiveListNotifier
     try {
       final filter = _ref.read(diveFilterProvider);
       final sort = _ref.read(diveSortProvider);
-      await _awaitServiceCache(filter);
+      await _awaitQueryCaches(filter);
       if (!mounted) return;
       final results = await Future.wait([
         _repository.getDiveSummaries(
@@ -1343,18 +1366,41 @@ class PaginatedDiveListNotifier
       await _repository.assignMissingDiveNumbers(
         diverId: newDive.diverId ?? diverId,
       );
-      _ref.invalidate(diveNumberingInfoProvider);
     }
 
-    // Optimistic: prepend new summary and bump totalCount. Only onto the list
-    // of the diver this call started for: after a switch the loaded rows are
-    // another diver's (or the same diver's, reloaded, after a switch back), so
-    // reload rather than prepend a dive that does not belong or is already in.
+    // After a switch the loaded rows are another diver's (or the same
+    // diver's, reloaded, after a switch back): reload rather than prepend a
+    // dive that does not belong or is already in.
+    await _showCreated(newDive, reload: _diverSwitches != diverSwitches);
+    return newDive;
+  }
+
+  /// Shows [created] in the list, after it was written by something other
+  /// than [addDive]: a new dive's sitting creates its dive inside its own
+  /// transaction (issue #4527, plan 8) and needs the refresh alone.
+  Future<void> refreshAfterCreate(domain.Dive created) async {
+    // A dive made for another diver than the list's reloads the list, as a
+    // switch during addDive does.
+    await _showCreated(
+      created,
+      reload: created.diverId != null && created.diverId != _currentDiverId,
+    );
+  }
+
+  /// What a create owes the list: the new row, its counts, and every
+  /// provider a new dive changes. [reload] reads the list again instead of
+  /// prepending: the loaded rows belong to another diver than the dive.
+  Future<void> _showCreated(domain.Dive newDive, {required bool reload}) async {
+    // The dive may have been numbered, or have moved the next number.
+    _ref.invalidate(diveNumberingInfoProvider);
+
+    // Optimistic: prepend new summary and bump totalCount, onto the list of
+    // the dive's own diver only.
     //
     // Under a filter the new dive may not match it, so the rows and both
     // counts come from the query instead, without a spinner (#2669).
     final current = state.valueOrNull;
-    if (_diverSwitches != diverSwitches) {
+    if (reload) {
       await loadFirstPage();
     } else if (_loadedUnderFilter) {
       await _silentReloadLoadedPages();
@@ -1373,22 +1419,32 @@ class PaginatedDiveListNotifier
     _invalidateStatistics();
     _invalidateRelatedProviders(newDive);
     _invalidateOldProvider();
-    return newDive;
   }
 
   Future<void> updateDive(domain.Dive dive) async {
     final oldDive = await _repository.getDiveById(dive.id);
     await _repository.updateDive(dive);
+    await refreshAfterWrite(before: oldDive, after: dive);
+  }
 
+  /// Refreshes the list and every provider that depends on a dive, after
+  /// [after] was written by something other than [updateDive]: an editing
+  /// sitting writes inside its own transaction and needs the refresh alone.
+  /// [before] is the dive as it was, so what it used to belong to (its old
+  /// trip, say) is refreshed too.
+  Future<void> refreshAfterWrite({
+    required domain.Dive? before,
+    required domain.Dive after,
+  }) async {
     // Optimistic: replace the item in the list by ID, unless a filter decides
     // whether the edited dive still belongs in it.
     final current = state.valueOrNull;
     if (_loadedUnderFilter) {
       await _silentReloadLoadedPages();
     } else if (current != null) {
-      final summary = DiveSummary.fromDive(dive);
+      final summary = DiveSummary.fromDive(after);
       final updated = current.dives.map((d) {
-        return d.id == dive.id ? summary : d;
+        return d.id == after.id ? summary : d;
       }).toList();
       state = AsyncValue.data(current.copyWith(dives: updated));
     } else {
@@ -1396,9 +1452,9 @@ class PaginatedDiveListNotifier
     }
 
     _invalidateStatistics();
-    _ref.invalidate(diveProvider(dive.id));
-    if (oldDive != null) _invalidateRelatedProviders(oldDive);
-    _invalidateRelatedProviders(dive);
+    _ref.invalidate(diveProvider(after.id));
+    if (before != null) _invalidateRelatedProviders(before);
+    _invalidateRelatedProviders(after);
     _invalidateOldProvider();
   }
 

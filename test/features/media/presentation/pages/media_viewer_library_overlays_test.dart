@@ -102,6 +102,7 @@ void main() {
     // Riverpod 3 does not export its Override type, so the list cannot be
     // named; the spread below casts it back from context.
     List<dynamic> overrides = const [],
+    String? Function(MediaItem)? captionFor,
   }) async {
     await tester.runAsync(() async {
       await tester.pumpWidget(
@@ -126,6 +127,7 @@ void main() {
               mediaList: mediaList,
               initialMediaId: initialMediaId,
               showGoToDive: true,
+              captionFor: captionFor,
             ),
           ),
         ),
@@ -136,6 +138,18 @@ void main() {
       await tester.pump();
     });
   }
+
+  testWidgets('viewer shows the check-in caption', (tester) async {
+    // The Gear gallery (issue #3355) names the check-in a photo backs up.
+    await pump(
+      tester,
+      mediaList: [_item('m1')],
+      initialMediaId: 'm1',
+      captionFor: (item) => 'Check-in: Free flow, 3 Nov 2026',
+    );
+
+    expect(find.text('Check-in: Free flow, 3 Nov 2026'), findsOneWidget);
+  });
 
   testWidgets('a lean library item shows the mini dive profile chart', (
     tester,
@@ -260,12 +274,15 @@ void main() {
   testWidgets('a re-linked item with no enrichment yet backfills the dive the '
       'database reports', (tester) async {
     final enrichedDives = <String>[];
+    // The backfill reads a dive's media before anything else, so that read
+    // names the dive it ran for.
     final enricher = DiveMediaEnricher(
-      loadDive: (diveId) async {
+      loadDive: (diveId) async => _dive,
+      loadMediaForDive: (diveId) async {
         enrichedDives.add(diveId);
-        return _dive;
+        return const [];
       },
-      loadMediaForDive: (diveId) async => const [],
+      loadPrimarySourceEntry: (_) async => null,
       saveEnrichments: (enrichments) async {},
     );
 
@@ -287,12 +304,15 @@ void main() {
   testWidgets('an item whose enrichment row is missing backfills the dive '
       'once', (tester) async {
     final enrichedDives = <String>[];
+    // The backfill reads a dive's media before anything else, so that read
+    // names the dive it ran for.
     final enricher = DiveMediaEnricher(
-      loadDive: (diveId) async {
+      loadDive: (diveId) async => _dive,
+      loadMediaForDive: (diveId) async {
         enrichedDives.add(diveId);
-        return _dive;
+        return const [];
       },
-      loadMediaForDive: (diveId) async => const [],
+      loadPrimarySourceEntry: (_) async => null,
       saveEnrichments: (enrichments) async {},
     );
 

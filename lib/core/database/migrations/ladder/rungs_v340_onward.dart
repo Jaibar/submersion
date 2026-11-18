@@ -106,6 +106,13 @@ extension RungsFromV340 on AppDatabase {
     if (from < 351) await _assertEquipmentCollapsedGroupsColumn();
     if (from < 351) await reportProgress();
 
+    // v352: media.observation_id, the check-in a gear photo backs up, and
+    // equipment.cover_media_id, the photo that stands for an item (issue
+    // #3355). Nullable columns, no backfill. Re-asserted in beforeOpen.
+    // Numbered 352: main holds 350, 351 and 354, and left 352 for this.
+    if (from < 352) await _assertEquipmentPhotoColumns();
+    if (from < 352) await reportProgress();
+
     // v354: dives.is_draft, a dive marked at the site that waits for its
     // readings (issue #637). Defaulted, no backfill, so the compatibility
     // floor does not move. Numbered 354: main holds 351 and open work
@@ -131,5 +138,149 @@ extension RungsFromV340 on AppDatabase {
     // 357 because main holds 356; renumbered from 353, then 355.
     if (from < 357) await _assertProfileSeriesIsEditColumn();
     if (from < 357) await reportProgress();
+
+    // v358: a dive's rating back on the 1 to 5 star scale where a UDDF
+    // import stored the file's 1 to 10 value, or 0 for an unrated dive
+    // (issue #4415). Data only, so the compatibility floor does not move.
+    // It rewrites dives.rating, so changeLogRewrittenColumns lists it.
+    if (from < 358) await _repairOutOfScaleDiveRatings();
+    if (from < 358) await reportProgress();
+
+    // v359: diver_settings.pin_profile_on_scroll, whether dive details pins
+    // a profile strip (issue #4423). Column only, defaulted on; re-asserted
+    // in beforeOpen.
+    if (from < 359) await _assertPinProfileOnScrollColumn();
+    if (from < 359) await reportProgress();
+
+    // v360: diver_settings.show_country_flags, the switch for the flags
+    // beside site locations and trips (issue #4426). Defaulted on, no
+    // backfill, so the compatibility floor does not move. Re-asserted in
+    // beforeOpen. Renumbered from 359, which main took for #4423.
+    if (from < 360) await _assertShowCountryFlagsColumn();
+    if (from < 360) await reportProgress();
+
+    // v361: dive_sites.country_code, the site's ISO country code (issue
+    // #4426), backfilled from the country text each site already holds where
+    // that text names one country. Nullable and offline, so the floor does
+    // not move. The column is re-asserted in beforeOpen; the backfill runs
+    // here only. Renumbered from 360.
+    if (from < 361) await _assertSiteCountryCodeColumn();
+    if (from < 361) await _backfillSiteCountryCodes();
+    if (from < 361) await reportProgress();
+
+    // v362: dive_deco_status, the computed deco verdicts the query
+    // language's deco field reads (issue #4461). Table-only rung, no
+    // backfill: the app fills it on demand. Re-asserted in beforeOpen.
+    if (from < 362) await _assertDiveDecoStatusTable();
+    if (from < 362) await reportProgress();
+
+    // v363: dive_sites.catalogue_id, the built-in catalogue record a site
+    // was adopted from. Nullable and offline, with nothing to backfill, so
+    // the floor does not move. The column is re-asserted in beforeOpen.
+    // Renumbered from 362, which main took for #4461.
+    if (from < 363) await _assertSiteCatalogueIdColumn();
+    if (from < 363) await reportProgress();
+
+    // v364: what an equipment set carries besides gear (included sets,
+    // weight presets, cylinder configurations) and the body composition
+    // columns of the weight prediction (issue #4525). Tables and nullable
+    // columns only, no backfill: a set with none of the three and a diver
+    // with no body data are the correct starting state. Re-asserted in
+    // beforeOpen. Renumbered from 363, which main took for the site
+    // catalogue id.
+    if (from < 364) await _assertSetBundleTables();
+    if (from < 364) await _assertBodyCompositionColumns();
+    if (from < 364) await reportProgress();
+
+    // v365: diver_settings.recent_equipment_colors, the custom colours the
+    // diver picked for their gear (issue #4537). Nullable, no backfill.
+    // Re-asserted in beforeOpen. Renumbered from 364, which main took for
+    // #4525.
+    if (from < 365) await _assertRecentEquipmentColorsColumn();
+    if (from < 365) await reportProgress();
+
+    // v366: diver_settings.default_show_counterdiffusion, the default
+    // visibility of the isobaric counterdiffusion overlay on the dive profile
+    // (issue #4530). Column only, defaulted off; re-asserted in beforeOpen.
+    // Renumbered from 365, which main took for #4537.
+    if (from < 366) await _assertDefaultShowCounterdiffusionColumn();
+    if (from < 366) await reportProgress();
+
+    // v367: dives.media_time_offset_seconds, the correction for a camera
+    // whose clock disagrees with the dive computer's (issue #4539). Column
+    // only, defaulted to 0, so the compatibility floor does not move.
+    // Re-asserted in beforeOpen. Renumbered from 366, which main took for
+    // #4530.
+    if (from < 367) await _assertDiveMediaTimeOffsetColumn();
+    if (from < 367) await reportProgress();
+
+    // v368: equipment_attributes.value_unit, the unit an item's own number
+    // reads in (issue #4534). Nullable, no backfill: every existing row
+    // follows the diver's settings, as it did. Re-asserted in beforeOpen.
+    // The same rung repairs cylinder volumes an imperial diver typed in
+    // cubic feet, stored as water volume until now. Data only, so the floor
+    // does not move; it rewrites equipment_attributes.value_num, so
+    // changeLogRewrittenColumns lists it, and it repeats after each sync
+    // apply for rows a peer below v368 still sends. Renumbered from 366 and
+    // 367, which main took.
+    if (from < 368) await _assertAttributeValueUnitColumn();
+    if (from < 368) await _repairCylinderVolumeCubicFeet();
+    if (from < 368) await reportProgress();
+
+    // v369: dive_sites.catalogue_answers, what a diver has settled about
+    // built-in catalogue records for a site, and the link and answers a
+    // profile keeps for a shared library site in library_site_notes.
+    // Nullable, with nothing to backfill, so the floor does not move. The
+    // columns are re-asserted in beforeOpen. Renumbered three times: main took
+    // 365 for #4537, 367 for #4539 and 368 for #4544.
+    if (from < 369) await _assertSiteCatalogueAnswersColumns();
+    if (from < 369) await reportProgress();
+
+    // v370: diver_settings.default_show_buoyancy, the default visibility of
+    // the net buoyancy line on the dive profile (issue #4593). Column only,
+    // defaulted off; re-asserted in beforeOpen.
+    if (from < 370) await _assertDefaultShowBuoyancyColumn();
+    if (from < 370) await reportProgress();
+
+    // v371: diver_settings.favourite_dive_type_ids, the dive types a diver
+    // starred to list first in the pickers (issue #4413). Nullable, no
+    // backfill, so the floor does not move; re-asserted in beforeOpen.
+    if (from < 371) await _assertFavouriteDiveTypeIdsColumn();
+    if (from < 371) await reportProgress();
+
+    // v372: buddies.country and buddies.country_code, where a buddy is from
+    // and the ISO code read from it (issue #4457). Nullable, nothing to
+    // backfill, so the floor does not move. Re-asserted in beforeOpen.
+    // Renumbered from 371, which main took for #4413.
+    if (from < 372) await _assertBuddyCountryColumns();
+    if (from < 372) await reportProgress();
+
+    // v373: dive_centers.logo, a center's logo as a square JPEG (issue
+    // #4460). Nullable, no backfill, so the floor does not move.
+    // Re-asserted in beforeOpen. Renumbered twice: main took 371 for #4413
+    // and 372 for #4457.
+    if (from < 373) await _assertDiveCenterLogoColumn();
+    if (from < 373) await reportProgress();
+
+    // v374: a plan's own SCR injection rate, SCR VO2 and pSCR VO2
+    // (dive_plans, nullable: null follows the diver) and the diver's
+    // defaults for them (diver_settings, defaulted to the figures every plan
+    // used before) (issue #4660). Columns only, no backfill, so the floor
+    // does not move. Re-asserted in beforeOpen.
+    if (from < 374) await _assertScrFlowColumns();
+    if (from < 374) await reportProgress();
+
+    // v375: media_identification_runs and media_identifications (issue
+    // #4668). Table-only rung, nothing to backfill: the app fills them as
+    // photos are analysed. Never synced. Re-asserted in beforeOpen.
+    // Renumbered from 374, which main took for #4660.
+    if (from < 375) await _assertMediaIdentificationTables();
+    if (from < 375) await reportProgress();
+
+    // v376: a video's scan progress and length on the run, and each
+    // identification's time range, path, claim and label flags (issue
+    // #4675). Columns only, no backfill.
+    if (from < 376) await _assertIdentificationVideoColumns();
+    if (from < 376) await reportProgress();
   }
 }

@@ -3,10 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:submersion/core/deco/entities/deco_status.dart';
 import 'package:submersion/features/dive_log/presentation/info/tissue_loading_info.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/compact_card_title.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/tissue_area_chart.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/tissue_color_schemes.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/tissue_compartment_detail.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/tissue_heat_map.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/tissue_heat_map_axes.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/tissue_pressure_bar_chart.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
@@ -51,6 +53,14 @@ class CompactTissueLoadingCard extends ConsumerStatefulWidget {
   /// Optional time label (e.g. "at 3:42") shown next to the title on hover
   final String? subtitle;
 
+  /// Seconds on the profile chart's clock, one per [decoStatuses] entry, for
+  /// the heat map's time axis (issue #4503): the times those statuses were
+  /// computed at (`ProfileAnalysis.sampleTimestamps`). Negative for samples
+  /// before the dive's zero point, as from a computer switched on early. The axis is left out when null
+  /// or when it does not match [decoStatuses] (see
+  /// [TissueHeatMapTimeAxis.fits]).
+  final List<int>? profileTimestamps;
+
   /// Called when user hovers over a time index on the heat map.
   final ValueChanged<int?>? onHeatMapHover;
 
@@ -70,6 +80,7 @@ class CompactTissueLoadingCard extends ConsumerStatefulWidget {
     this.decoStatuses,
     this.selectedIndex,
     this.subtitle,
+    this.profileTimestamps,
     this.onHeatMapHover,
     this.expandVisualization = false,
     this.onOpen3dView,
@@ -135,39 +146,26 @@ class _CompactTissueLoadingCardState
           children: [
             Row(
               children: [
-                Text(
-                  context.l10n.diveLog_deco_sectionTissueLoading,
-                  style: textTheme.titleSmall,
-                ),
-                if (widget.subtitle != null) ...[
-                  const SizedBox(width: 6),
-                  Text(
-                    '@ ${widget.subtitle!}',
-                    style: textTheme.labelSmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
+                Expanded(
+                  child: CompactCardTitle(
+                    title: context.l10n.diveLog_deco_sectionTissueLoading,
+                    cursorTime: widget.subtitle,
                   ),
-                ],
-                const Spacer(),
+                ),
+                // Keeps the cursor time off the first control once the
+                // title has shrunk to make room.
+                const SizedBox(width: 8),
                 // Every control below shares _headerButtonStyle, so each one
                 // lays out to the same box and the gaps stay even. Do not add
-                // manual spacers between them: the icons are built from three
+                // manual spacers between them: the icons are built from
                 // different widget types whose intrinsic widths differ, and
                 // uniform spacers on top of non-uniform boxes is exactly what
                 // made the spacing drift before.
-                _modeIcon(
-                  Icons.grid_on,
-                  TissueVizMode.heatMap,
-                  vizMode,
-                  colorScheme,
-                ),
-                _modeIcon(
-                  Icons.area_chart,
-                  TissueVizMode.stackedArea,
-                  vizMode,
-                  colorScheme,
-                ),
-                _buildColorSchemeSelector(colorScheme),
+                //
+                // One dropdown picks the view (issue #4437). The colour scheme
+                // is a standing preference that also drives Dive Lab and the
+                // 3D view, so it lives in Settings > Appearance > Dives.
+                _buildViewMenu(vizMode, colorScheme),
                 if (widget.onOpen3dView != null)
                   _build3dViewButton(colorScheme),
                 // Laid out to the compact buttons' 40 px box, like its
@@ -221,11 +219,11 @@ class _CompactTissueLoadingCardState
     );
   }
 
-  /// The heat map with its legend above and the row direction below.
+  /// The heat map with its legend above, a compartment axis beside it and
+  /// the dive time below (issue #4503).
   ///
-  /// Its rows run fast to slow from top to bottom. That axis is named once,
-  /// in a caption under the strip, rather than with a second "Fast"/"Slow"
-  /// pair that read as a duplicate of the bar chart's labels just above.
+  /// Its rows run fast to slow from top to bottom; the axis numbers them
+  /// rather than repeating the bar chart's "Fast"/"Slow" pair just above.
   Widget _buildHeatMapSection(
     BuildContext context,
     ColorScheme colorScheme,
@@ -233,18 +231,14 @@ class _CompactTissueLoadingCardState
     required int leadingIndex,
     bool expandToFill = false,
   }) {
-    final l10n = context.l10n;
     final tissueScheme = ref.watch(tissueColorSchemeProvider);
     final colorFn = colorFnForScheme(tissueScheme);
-
-    final labelStyle = textTheme.labelSmall?.copyWith(
-      fontSize: 11,
-      color: colorScheme.onSurfaceVariant,
-    );
+    final statuses = widget.decoStatuses!;
+    final timestamps = widget.profileTimestamps;
 
     Widget buildStrip({bool flexible = false}) {
       return TissueHeatMapStrip(
-        decoStatuses: widget.decoStatuses!,
+        decoStatuses: statuses,
         selectedIndex: widget.selectedIndex,
         height: 72,
         flexible: flexible,
@@ -258,6 +252,51 @@ class _CompactTissueLoadingCardState
             _clearHoveredCompartment();
           }
         },
+      );
+    }
+
+    // The strip with its compartment axis beside it and, when the times fit,
+    // the dive time under it. All of it left to right whatever the text
+    // direction, like the painter: time runs left to right and compartment 1
+    // sits at the top.
+    final withTime = TissueHeatMapTimeAxis.fits(timestamps, statuses.length);
+    Widget heatMapWithAxes({required bool expand}) {
+      final strip = Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TissueHeatMapCompartmentAxis(
+            compartmentCount: statuses.first.compartments.length,
+          ),
+          Expanded(child: buildStrip(flexible: expand)),
+        ],
+      );
+      return Semantics(
+        label: tissueHeatMapSemantics(
+          context.l10n,
+          compartmentCount: statuses.first.compartments.length,
+          timestamps: withTime ? timestamps : null,
+        ),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (expand)
+                Expanded(child: strip)
+              else
+                SizedBox(height: 72, child: strip),
+              if (withTime)
+                Padding(
+                  // Under the strip, past the compartment axis.
+                  padding: const EdgeInsets.only(
+                    left: TissueHeatMapCompartmentAxis.width,
+                    top: 2,
+                  ),
+                  child: TissueHeatMapTimeAxis(timestamps: timestamps!),
+                ),
+            ],
+          ),
+        ),
       );
     }
 
@@ -276,11 +315,9 @@ class _CompactTissueLoadingCardState
         ),
         const SizedBox(height: 4),
         if (expandToFill)
-          Expanded(child: buildStrip(flexible: true))
+          Expanded(child: heatMapWithAxes(expand: true))
         else
-          SizedBox(height: 72, child: buildStrip()),
-        const SizedBox(height: 2),
-        Text(l10n.diveLog_deco_heatMapRows, style: labelStyle),
+          heatMapWithAxes(expand: false),
       ],
     );
   }
@@ -312,28 +349,55 @@ class _CompactTissueLoadingCardState
     );
   }
 
-  Widget _modeIcon(
-    IconData icon,
-    TissueVizMode mode,
-    TissueVizMode currentMode,
-    ColorScheme colorScheme,
-  ) {
-    final isActive = mode == currentMode;
-    return IconButton(
-      icon: Icon(
-        icon,
-        size: _headerIconSize,
-        color: isActive
-            ? colorScheme.primary
-            : colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+  /// The header's view dropdown: the current view's icon with a caret,
+  /// opening a menu of both views by icon and name, the current one checked.
+  Widget _buildViewMenu(TissueVizMode current, ColorScheme colorScheme) {
+    final l10n = context.l10n;
+    return PopupMenuButton<TissueVizMode>(
+      tooltip: l10n.diveLog_tissue_viewMenuTooltip,
+      icon: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _viewIcon(current),
+            size: _headerIconSize,
+            color: colorScheme.primary,
+          ),
+          Icon(
+            Icons.arrow_drop_down,
+            size: _headerIconSize,
+            color: colorScheme.onSurfaceVariant,
+          ),
+        ],
       ),
+      // No `constraints:` here. On PopupMenuButton that parameter sizes the
+      // popup menu, not the button.
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(),
       style: _headerButtonStyle,
-      onPressed: () =>
+      initialValue: current,
+      itemBuilder: (context) => [
+        for (final mode in TissueVizMode.values)
+          CheckedPopupMenuItem<TissueVizMode>(
+            value: mode,
+            checked: mode == current,
+            child: Row(
+              children: [
+                Icon(_viewIcon(mode), size: 18),
+                const SizedBox(width: 12),
+                Text(tissueVizModeLabel(l10n, mode)),
+              ],
+            ),
+          ),
+      ],
+      onSelected: (mode) =>
           ref.read(settingsProvider.notifier).setTissueVizMode(mode),
     );
   }
+
+  static IconData _viewIcon(TissueVizMode mode) => switch (mode) {
+    TissueVizMode.heatMap => Icons.grid_on,
+    TissueVizMode.stackedArea => Icons.area_chart,
+  };
 
   Widget _build3dViewButton(ColorScheme colorScheme) {
     return IconButton(
@@ -347,30 +411,6 @@ class _CompactTissueLoadingCardState
       constraints: const BoxConstraints(),
       style: _headerButtonStyle,
       onPressed: widget.onOpen3dView,
-    );
-  }
-
-  Widget _buildColorSchemeSelector(ColorScheme colorScheme) {
-    return PopupMenuButton<TissueColorScheme>(
-      icon: Icon(
-        Icons.palette_outlined,
-        size: _headerIconSize,
-        color: colorScheme.onSurfaceVariant,
-      ),
-      // No `constraints:` here. On PopupMenuButton that parameter sizes the
-      // popup menu, not the button, so passing it the button's BoxConstraints
-      // only stripped the menu's standard minimum width.
-      padding: EdgeInsets.zero,
-      style: _headerButtonStyle,
-      itemBuilder: (context) => TissueColorScheme.values.map((scheme) {
-        return PopupMenuItem<TissueColorScheme>(
-          value: scheme,
-          child: Text(scheme.displayName),
-        );
-      }).toList(),
-      onSelected: (scheme) {
-        ref.read(settingsProvider.notifier).setTissueColorScheme(scheme);
-      },
     );
   }
 

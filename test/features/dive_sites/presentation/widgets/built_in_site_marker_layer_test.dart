@@ -3,15 +3,15 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
-import 'package:submersion/features/dive_sites/data/services/dive_site_api_service.dart';
+import 'package:submersion/features/dive_sites/domain/entities/catalogue_site.dart';
+import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/built_in_site_marker_layer.dart';
 
-ExternalDiveSite ext(String id, double lat, double lng) => ExternalDiveSite(
-  externalId: id,
+CatalogueSite ext(String id, double lat, double lng) => CatalogueSite(
+  id: id,
   name: id,
-  latitude: lat,
-  longitude: lng,
-  source: 't',
+  location: GeoPoint(lat, lng),
+  source: 'osm',
 );
 
 Widget _host(Widget layer) => MaterialApp(
@@ -29,12 +29,12 @@ void main() {
   testWidgets('renders a pin per built-in site and reports taps', (
     tester,
   ) async {
-    ExternalDiveSite? tapped;
+    CatalogueSite? tapped;
     await tester.pumpWidget(
       _host(
         BuiltInSiteMarkerLayer(
           sites: [ext('a', 10.0, 20.0)],
-          selectedExternalId: null,
+          selectedCatalogueId: null,
           onTap: (s) => tapped = s,
         ),
       ),
@@ -43,7 +43,7 @@ void main() {
 
     expect(find.byKey(const Key('builtInPin_a')), findsOneWidget);
     await tester.tap(find.byKey(const Key('builtInPin_a')));
-    expect(tapped?.externalId, 'a');
+    expect(tapped?.id, 'a');
   });
 
   testWidgets('exposes a semantics label for each built-in pin', (
@@ -53,7 +53,7 @@ void main() {
       _host(
         BuiltInSiteMarkerLayer(
           sites: [ext('Blue Hole', 10.0, 20.0)],
-          selectedExternalId: null,
+          selectedCatalogueId: null,
           onTap: (_) {},
         ),
       ),
@@ -66,6 +66,79 @@ void main() {
     );
   });
 
+  group('a pin says what kind of record it marks', () {
+    CatalogueSite wreck(String id) => CatalogueSite(
+      id: id,
+      name: id,
+      location: const GeoPoint(10, 20),
+      source: 'ukho',
+      kind: CatalogueKind.register,
+    );
+
+    Icon pin(WidgetTester tester, String id) => tester.widget<Icon>(
+      find.descendant(
+        of: find.byKey(Key('builtInPin_$id')),
+        matching: find.byType(Icon),
+      ),
+    );
+
+    testWidgets('a dive site keeps the hollow pin', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          BuiltInSiteMarkerLayer(
+            sites: [ext('a', 10.0, 20.0)],
+            selectedCatalogueId: null,
+            onTap: (_) {},
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(pin(tester, 'a').icon, Icons.location_on_outlined);
+    });
+
+    testWidgets('a charted wreck or reef is an anchor, and says so', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          BuiltInSiteMarkerLayer(
+            sites: [wreck('Tabarka')],
+            selectedCatalogueId: null,
+            onTap: (_) {},
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(pin(tester, 'Tabarka').icon, Icons.anchor);
+      expect(
+        find.bySemanticsLabel('Charted wreck or reef: Tabarka'),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Built-in dive site: Tabarka'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a selected anchor takes the primary colour', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          BuiltInSiteMarkerLayer(
+            sites: [wreck('w')],
+            selectedCatalogueId: 'w',
+            onTap: (_) {},
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final context = tester.element(find.byKey(const Key('builtInPin_w')));
+      expect(pin(tester, 'w').color, Theme.of(context).colorScheme.primary);
+    });
+  });
+
   testWidgets('renders a cluster bubble for co-located built-in sites', (
     tester,
   ) async {
@@ -75,7 +148,7 @@ void main() {
       _host(
         BuiltInSiteMarkerLayer(
           sites: [ext('a', 10.0, 20.0), ext('b', 10.0, 20.0)],
-          selectedExternalId: 'a',
+          selectedCatalogueId: 'a',
           onTap: (_) {},
         ),
       ),
@@ -91,7 +164,7 @@ void main() {
       _host(
         const BuiltInSiteMarkerLayer(
           sites: [],
-          selectedExternalId: null,
+          selectedCatalogueId: null,
           onTap: _noop,
         ),
       ),
@@ -101,4 +174,4 @@ void main() {
   });
 }
 
-void _noop(ExternalDiveSite _) {}
+void _noop(CatalogueSite _) {}

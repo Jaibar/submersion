@@ -33,6 +33,20 @@ class DiveSites extends Table {
   TextColumn get city => text().nullable()();
   TextColumn get island => text().nullable()();
   TextColumn get country => text().nullable()();
+
+  /// The country's ISO 3166-1 alpha-2 code (v361, issue #4426): from the
+  /// geocoder when the location is geocoded, else read from [country].
+  TextColumn get countryCode => text().nullable()();
+
+  /// The id of the built-in catalogue record this site was adopted from
+  /// (v363). Null for a site the diver made by hand.
+  TextColumn get catalogueId => text().nullable()();
+
+  /// What the diver has settled about catalogue records for this site
+  /// (v369), as JSON. It holds the records the site also stands for, the
+  /// records that are a different place, and the details turned down.
+  /// Null when there is nothing.
+  TextColumn get catalogueAnswers => text().nullable()();
   TextColumn get region => text().nullable()();
   RealColumn get rating => real().nullable()();
   TextColumn get notes => text().withDefault(const Constant(''))();
@@ -139,6 +153,11 @@ class DiveCenters extends Table {
   /// and statistics; the picker leaves it out of nearby centers.
   BoolColumn get isPermanentlyClosed =>
       boolean().withDefault(const Constant(false))();
+
+  /// v373: logo, a 512x512 square JPEG produced by
+  /// `lib/core/services/images/profile_photo_codec.dart` (issue #4460).
+  /// Stored on the row so it syncs with the center, as a buddy's photo does.
+  BlobColumn get logo => blob().nullable()();
   IntColumn get createdAt => integer()();
   IntColumn get updatedAt => integer()();
 

@@ -10,7 +10,7 @@ import 'package:submersion/features/buddies/presentation/widgets/buddy_picker.da
 import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
-import 'package:submersion/features/dive_log/presentation/pages/dive_edit_page.dart';
+import 'package:submersion/features/dive_log/presentation/pages/bulk_dive_edit_page.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
 import 'package:submersion/features/divers/presentation/providers/diver_providers.dart';
 import 'package:submersion/features/tags/presentation/widgets/tag_chip.dart';
@@ -34,12 +34,14 @@ import '../../../../helpers/test_app.dart';
 import '../../../../helpers/test_database.dart';
 import '../../../../helpers/role_sheet.dart';
 import '../../../../helpers/folded_groups.dart';
+import 'package:submersion/features/weight_presets/data/repositories/weight_preset_repository.dart';
+import 'package:submersion/features/equipment/data/repositories/equipment_set_repository_impl.dart';
 
-/// Covers the bulk tri-state membership wiring in DiveEditPage: loading members
+/// Covers the bulk tri-state membership wiring in BulkDiveEditPage: loading members
 /// for every reference collection, the add-affordance dialogs/sheets, and the
 /// delta -> add/remove op path through apply.
 void main() {
-  group('DiveEditPage bulk membership wiring', () {
+  group('BulkDiveEditPage membership wiring', () {
     late DiveRepository repository;
     late BuddyRepository buddyRepo;
     late AppDatabase db;
@@ -134,7 +136,7 @@ void main() {
             ],
             ...extraOverrides,
           ],
-          child: DiveEditPage(bulkDiveIds: ids, embedded: true),
+          child: BulkDiveEditPage(diveIds: ids, embedded: true),
         ),
       );
       await tester.pumpAndSettle();
@@ -753,6 +755,57 @@ void main() {
       expect(rows.map((r) => r.viaSetId).toSet(), {'s1'});
     });
 
+    // Issue #4525: a set that carries only weights has no gear to list, so
+    // the set itself is staged and its weights go on dives that have none.
+    testWidgets('use-set stages a set with only weights and applies them', (
+      tester,
+    ) async {
+      await seedDive('d1');
+      await seedDive('d2');
+      final preset = await WeightPresetRepository().createPreset(
+        diverId: 'diver-1',
+        displayName: 'Belt',
+        entries: const [
+          (weightType: WeightType.belt, amountKg: 3.63, notes: '', label: ''),
+        ],
+      );
+      final created = await EquipmentSetRepository().createSet(
+        EquipmentSet(
+          id: 'lead',
+          name: 'Lead only',
+          weightPresetIds: [preset.id],
+          createdAt: DateTime(2026, 1, 1),
+          updatedAt: DateTime(2026, 1, 1),
+        ),
+      );
+
+      await pump(
+        tester,
+        ['d1', 'd2'],
+        sets: [created.copyWith(items: const [])],
+      );
+      final useSet = find.descendant(
+        of: editorFor('Equipment'),
+        matching: find.widgetWithText(TextButton, 'Use Set'),
+      );
+      await tester.ensureVisible(useSet);
+      await tester.tap(useSet);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lead only'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('bulk-used-set-lead')), findsOneWidget);
+
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+
+      final weights = await db.select(db.diveWeights).get();
+      expect(weights.map((w) => w.diveId).toSet(), {'d1', 'd2'});
+      expect(await db.select(db.diveEquipment).get(), isEmpty);
+    });
+
     // Issue #2046: a set member another profile owns and has not shared
     // stays in the set but is not applied, as when the set is used on one
     // dive.
@@ -815,6 +868,47 @@ void main() {
         )..where((t) => t.diveId.equals(diveId))).get();
         expect(rows.map((r) => r.equipmentId), ['e1'], reason: diveId);
       }
+    });
+
+    // A set whose only gear cannot go on these dives, and which carries no
+    // weights or tanks either, has nothing to stage.
+    testWidgets('use-set stages nothing for a set that would apply '
+        'nothing', (tester) async {
+      const camera = EquipmentItem(
+        id: 'e2',
+        name: 'Borrowed camera',
+        type: EquipmentType.camera,
+        diverId: 'other',
+      );
+      await EquipmentRepository().createEquipment(camera);
+      await seedDive('d1');
+      final borrowed = EquipmentSet(
+        id: 's9',
+        name: 'Borrowed kit',
+        equipmentIds: const ['e2'],
+        items: const [camera],
+        createdAt: DateTime(2026, 1, 1),
+        updatedAt: DateTime(2026, 1, 1),
+      );
+
+      await pump(
+        tester,
+        ['d1'],
+        sets: [borrowed],
+        extraOverrides: [
+          validatedCurrentDiverIdProvider.overrideWith((ref) async => 'me'),
+        ],
+      );
+      final useSet = find.descendant(
+        of: editorFor('Equipment'),
+        matching: find.widgetWithText(TextButton, 'Use Set'),
+      );
+      await tester.ensureVisible(useSet);
+      await tester.tap(useSet);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Borrowed kit'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('bulk-used-set-s9')), findsNothing);
     });
 
     // Issue #4284: a set item the diver unchecks after "Use Set" stays off,

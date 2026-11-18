@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
 
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/tags/presentation/widgets/tag_chip.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
@@ -12,9 +13,9 @@ class TagInputWidget extends ConsumerStatefulWidget {
   final void Function(List<Tag> tags) onTagsChanged;
   final bool enabled;
 
-  /// Which tags are suggested and what a new tag applies to (issue #1765).
-  /// A name already used by a tag of the other scope widens that tag rather
-  /// than creating a second one.
+  /// Which tags are suggested (issue #1765). A new tag applies to every
+  /// scope (issue #4407); a name already used by a tag of another scope
+  /// widens that tag to this one rather than creating a second one.
   final TagScope scope;
 
   const TagInputWidget({
@@ -146,18 +147,21 @@ class _TagInputWidgetState extends ConsumerState<TagInputWidget> {
                 final allTags = everyTag
                     .where((tag) => tag.appliesTo(widget.scope))
                     .toList();
-                final query = _textController.text.toLowerCase();
+                final query = foldForSearch(_textController.text);
                 final filteredTags = allTags
                     .where(
                       (tag) =>
-                          tag.name.toLowerCase().contains(query) &&
+                          foldForSearch(tag.name).contains(query) &&
                           !widget.selectedTags.any((t) => t.id == tag.id),
                     )
                     .take(5)
                     .toList();
 
                 final exactMatch = allTags.any(
-                  (tag) => tag.name.toLowerCase() == query.toLowerCase(),
+                  // Case only: [query] is accent-folded for the search.
+                  (tag) =>
+                      tag.name.toLowerCase() ==
+                      _textController.text.toLowerCase(),
                 );
 
                 if (filteredTags.isEmpty && exactMatch) {

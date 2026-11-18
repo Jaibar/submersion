@@ -57,6 +57,13 @@ List<(O2CellUnit, String)> o2CellUnitSegments(BuildContext context) => [
   (O2CellUnit.millivolts, context.l10n.units_profileMetric_millivolts),
 ];
 
+/// The counterdiffusion overlay's two views (#4530): ICD spans only, or all
+/// phases in which nitrogen and helium move in opposite directions.
+List<(bool, String)> counterdiffusionSegments(BuildContext context) => [
+  (false, context.l10n.diveLog_counterdiffusion_segment_icd),
+  (true, context.l10n.diveLog_counterdiffusion_segment_all),
+];
+
 /// A toggle row with a segmented mode switch on the right. Generic over the
 /// mode enum so every computer-vs-calculated data-source toggle (deco stops,
 /// NDL, TTS, CNS) shares one row implementation.
@@ -205,12 +212,25 @@ Widget _checkboxIndicator(
   required bool isEnabled,
   required Color color,
   Color? sourceColor,
+  Color? secondColor,
 }) {
-  final checkbox = Icon(
+  Widget checkbox = Icon(
     isEnabled ? Icons.check_box : Icons.check_box_outline_blank,
     size: 18,
     color: isEnabled ? color : Theme.of(context).colorScheme.onSurfaceVariant,
   );
+  // A two-coloured line (the buoyancy line, #4593): left half [color], right
+  // half [secondColor], like its legend swatch.
+  if (isEnabled && secondColor != null) {
+    checkbox = ShaderMask(
+      blendMode: BlendMode.srcIn,
+      shaderCallback: (bounds) => LinearGradient(
+        colors: [color, color, secondColor, secondColor],
+        stops: const [0, 0.5, 0.5, 1],
+      ).createShader(bounds),
+      child: checkbox,
+    );
+  }
   if (sourceColor == null) return checkbox;
   return Container(
     padding: const EdgeInsets.all(2),
@@ -229,6 +249,7 @@ Widget buildToggleItem(
   required bool isEnabled,
   required VoidCallback onTap,
   Color? sourceColor,
+  Color? secondColor,
 }) {
   return _checkboxSemantics(
     isEnabled: isEnabled,
@@ -243,6 +264,7 @@ Widget buildToggleItem(
               isEnabled: isEnabled,
               color: color,
               sourceColor: sourceColor,
+              secondColor: secondColor,
             ),
             const SizedBox(width: 8),
             Expanded(

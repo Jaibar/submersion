@@ -375,7 +375,9 @@ class DiverSettingsRepository {
                 showMapBackgroundOnSiteCards: Value(
                   s.showMapBackgroundOnSiteCards,
                 ),
+                showCountryFlags: Value(s.showCountryFlags),
                 showMaxDepthMarker: Value(s.showMaxDepthMarker),
+                pinProfileOnScroll: Value(s.pinProfileOnScroll),
                 showPressureThresholdMarkers: Value(
                   s.showPressureThresholdMarkers,
                 ),
@@ -403,6 +405,13 @@ class DiverSettingsRepository {
                 defaultShowPhotoMarkers: Value(s.defaultShowPhotoMarkers),
                 defaultShowGasTimeline: Value(s.defaultShowGasTimeline),
                 defaultShowO2CellMv: Value(s.defaultShowO2CellMv),
+                defaultShowCounterdiffusion: Value(
+                  s.defaultShowCounterdiffusion,
+                ),
+                defaultShowBuoyancy: Value(s.defaultShowBuoyancy),
+                favouriteDiveTypeIds: Value(
+                  _encodeDisabledRules(s.favouriteDiveTypeIds),
+                ),
                 defaultShowEstimatedTankPressure: Value(
                   s.defaultShowEstimatedTankPressure,
                 ),
@@ -446,6 +455,9 @@ class DiverSettingsRepository {
                   s.plannerBatteryReserveFraction,
                 ),
                 plannerWalkSpeedMps: Value(s.plannerWalkSpeedMps),
+                plannerScrInjectionRate: Value(s.plannerScrInjectionRate),
+                plannerScrVo2: Value(s.plannerScrVo2),
+                plannerPscrVo2: Value(s.plannerPscrVo2),
                 plannerTurnPressureRule: Value(s.plannerTurnPressureRule?.name),
                 plannerTurnPressureFraction: Value(
                   s.plannerTurnPressureFraction,
@@ -771,7 +783,9 @@ class DiverSettingsRepository {
       showMapBackgroundOnSiteCards: Value(
         settings.showMapBackgroundOnSiteCards,
       ),
+      showCountryFlags: Value(settings.showCountryFlags),
       showMaxDepthMarker: Value(settings.showMaxDepthMarker),
+      pinProfileOnScroll: Value(settings.pinProfileOnScroll),
       showPressureThresholdMarkers: Value(
         settings.showPressureThresholdMarkers,
       ),
@@ -797,6 +811,11 @@ class DiverSettingsRepository {
       defaultShowPhotoMarkers: Value(settings.defaultShowPhotoMarkers),
       defaultShowGasTimeline: Value(settings.defaultShowGasTimeline),
       defaultShowO2CellMv: Value(settings.defaultShowO2CellMv),
+      defaultShowCounterdiffusion: Value(settings.defaultShowCounterdiffusion),
+      defaultShowBuoyancy: Value(settings.defaultShowBuoyancy),
+      favouriteDiveTypeIds: Value(
+        _encodeDisabledRules(settings.favouriteDiveTypeIds),
+      ),
       defaultShowEstimatedTankPressure: Value(
         settings.defaultShowEstimatedTankPressure,
       ),
@@ -836,6 +855,9 @@ class DiverSettingsRepository {
         settings.plannerBatteryReserveFraction,
       ),
       plannerWalkSpeedMps: Value(settings.plannerWalkSpeedMps),
+      plannerScrInjectionRate: Value(settings.plannerScrInjectionRate),
+      plannerScrVo2: Value(settings.plannerScrVo2),
+      plannerPscrVo2: Value(settings.plannerPscrVo2),
       plannerTurnPressureRule: Value(settings.plannerTurnPressureRule?.name),
       plannerTurnPressureFraction: Value(settings.plannerTurnPressureFraction),
       plannerAirBreakO2Seconds: Value(settings.plannerAirBreakO2Seconds),
@@ -1051,7 +1073,9 @@ class DiverSettingsRepository {
       cardPhotoOverlayDark: row.cardPhotoOverlayDark,
       cardPhotoOverlayLight: row.cardPhotoOverlayLight,
       showMapBackgroundOnSiteCards: row.showMapBackgroundOnSiteCards,
+      showCountryFlags: row.showCountryFlags,
       showMaxDepthMarker: row.showMaxDepthMarker,
+      pinProfileOnScroll: row.pinProfileOnScroll,
       showPressureThresholdMarkers: row.showPressureThresholdMarkers,
       defaultRightAxisMetric: _parseRightAxisMetric(row.defaultRightAxisMetric),
       defaultShowTemperature: row.defaultShowTemperature,
@@ -1075,6 +1099,9 @@ class DiverSettingsRepository {
       defaultShowPhotoMarkers: row.defaultShowPhotoMarkers,
       defaultShowGasTimeline: row.defaultShowGasTimeline,
       defaultShowO2CellMv: row.defaultShowO2CellMv,
+      defaultShowCounterdiffusion: row.defaultShowCounterdiffusion,
+      defaultShowBuoyancy: row.defaultShowBuoyancy,
+      favouriteDiveTypeIds: _decodeDisabledRules(row.favouriteDiveTypeIds),
       defaultShowEstimatedTankPressure: row.defaultShowEstimatedTankPressure,
       defaultShowAscentRateLine: row.defaultShowAscentRateLine,
       notificationsEnabled: row.notificationsEnabled,
@@ -1108,6 +1135,9 @@ class DiverSettingsRepository {
       plannerDeviationTimeMinutes: row.plannerDeviationTimeMinutes,
       plannerBatteryReserveFraction: row.plannerBatteryReserveFraction,
       plannerWalkSpeedMps: row.plannerWalkSpeedMps,
+      plannerScrInjectionRate: row.plannerScrInjectionRate,
+      plannerScrVo2: row.plannerScrVo2,
+      plannerPscrVo2: row.plannerPscrVo2,
       plannerTurnPressureRule: domain.TurnPressureRule.values
           .asNameMap()[row.plannerTurnPressureRule],
       plannerTurnPressureFraction: row.plannerTurnPressureFraction,

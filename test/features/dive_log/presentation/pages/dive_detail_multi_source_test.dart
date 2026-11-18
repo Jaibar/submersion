@@ -20,7 +20,10 @@ import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_c
 import 'package:submersion/features/dive_log/presentation/widgets/source_bar.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
 
+import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
+
 import '../../../../helpers/mock_providers.dart';
+import '../../../../helpers/unlock_for_operation.dart';
 
 class _RecordingDiveRepository extends Fake implements DiveRepository {
   final setPrimaryCalls = <(String, String)>[];
@@ -169,7 +172,13 @@ void main() {
   Finder inSourceBarMenu() => inSourceBar(find.byIcon(Icons.more_vert)).last;
 
   Future<void> pumpPage(WidgetTester tester) async {
-    final base = await getBaseOverrides();
+    // These tests scroll the source bar to the top and tap it; the pinned
+    // profile strip (#4423) would sit over it there.
+    final base = await getBaseOverrides(
+      settingsNotifier: MockSettingsNotifier(
+        const AppSettings(pinProfileOnScroll: false),
+      ),
+    );
     final originalOnError = FlutterError.onError;
     FlutterError.onError = (d) {
       if (d.toString().contains('overflowed')) return;
@@ -233,6 +242,8 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
     FlutterError.onError = originalOnError;
+    // Set as primary, split and separate are whole-record operations.
+    await unlockForOperation(tester);
   }
 
   /// Keeps the dive read alive once the page is gone, as the dive list does,
@@ -529,7 +540,12 @@ void main() {
       expect(find.text('Split into separate dive?'), findsOneWidget);
 
       // Cancel first: no call.
-      await tester.tap(find.text('Cancel'));
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('Cancel'),
+        ),
+      );
       await tester.pumpAndSettle();
       expect(splitService.calls, isEmpty);
 

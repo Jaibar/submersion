@@ -68,6 +68,10 @@ extension BeforeOpenChildColumns on AppDatabase {
     // row, for the same reason as the tank columns.
     await _assertDiveIsDraftColumn();
 
+    // v368: dives.media_time_offset_seconds (issue #4539), for the same
+    // reason.
+    await _assertDiveMediaTimeOffsetColumn();
+
     // v350: sightings.abundance (issue #4337). Every sighting read selects
     // the whole row, for the same reason as the tank columns.
     await _assertSightingAbundanceColumn();
@@ -75,5 +79,33 @@ extension BeforeOpenChildColumns on AppDatabase {
     // v357: dive_profile_series.is_edit (issue #4386). Every series read
     // selects the whole row, for the same reason as the tank columns.
     await _assertProfileSeriesIsEditColumn();
+
+    // v361: dive_sites.country_code (issue #4426). Every site read selects
+    // the whole row. Column only: the backfill runs in the rung.
+    await _assertSiteCountryCodeColumn();
+    // v363: dive_sites.catalogue_id. Every site read selects the whole row.
+    await _assertSiteCatalogueIdColumn();
+
+    // v364: divers.sex, divers.birth_year and
+    // diver_weight_entries.body_fat_percent (issue #4525). Every diver and
+    // weight-entry read selects the whole row.
+    await _assertBodyCompositionColumns();
+
+    // v368: equipment_attributes.value_unit (issue #4534). Every attribute
+    // read selects the whole row. A database that skipped the rung also
+    // skipped its cylinder volume repair, so healing the column runs it.
+    await _healAttributeValueUnitColumn();
+
+    // v369: dive_sites.catalogue_answers and the catalogue columns of
+    // library_site_notes. Every read of either table selects the whole row.
+    await _assertSiteCatalogueAnswersColumns();
+
+    // v372: buddies.country and buddies.country_code (issue #4457). Every
+    // buddy read selects the whole row.
+    await _assertBuddyCountryColumns();
+
+    // v373: dive_centers.logo (issue #4460). Every center read selects the
+    // whole row.
+    await _assertDiveCenterLogoColumn();
   }
 }

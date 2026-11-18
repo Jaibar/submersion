@@ -52,6 +52,29 @@ void main() {
       expect(terms, isNot(contains(DiveTerm.ppHe)));
     });
 
+    test('lists the buoyancy line only when it can be drawn and is on', () {
+      // Issue #4593.
+      const on = ProfileLegendState(showBuoyancy: true);
+      expect(
+        profileOverlayTerms(
+          const ProfileLegendConfig(hasBuoyancyLine: true),
+          on,
+        ),
+        contains(DiveTerm.buoyancyProfile),
+      );
+      expect(
+        profileOverlayTerms(const ProfileLegendConfig(), on),
+        isNot(contains(DiveTerm.buoyancyProfile)),
+      );
+      expect(
+        profileOverlayTerms(
+          const ProfileLegendConfig(hasBuoyancyLine: true),
+          const ProfileLegendState(),
+        ),
+        isNot(contains(DiveTerm.buoyancyProfile)),
+      );
+    });
+
     test('an air dive sheet has no ppHe or setpoint', () {
       const config = ProfileLegendConfig(hasPpO2Data: true, hasNdlData: true);
       const state = ProfileLegendState(
@@ -171,6 +194,28 @@ void main() {
       expect(labels(stacked), contains(label(DiveTerm.stackedArea)));
       expect(labels(none), isNot(contains(label(DiveTerm.heatMap))));
     });
+
+    test(
+      'the compartments entry names the three speed groups (issue #4503)',
+      () {
+        final content = tissueLoadingInfo(
+          l10n,
+          units,
+          view: TissueVizMode.heatMap,
+          hasHelium: false,
+        );
+        final body = content.terms
+            .firstWhere((t) => t.term == label(DiveTerm.tissueCompartment))
+            .body;
+        expect(body, contains('1-5'));
+        expect(body, contains('6-10'));
+        expect(body, contains('11-16'));
+        // The tissues are examples, never presented as anatomy.
+        expect(body, contains('rough examples, not anatomy'));
+        // Each group's clause says what it limits.
+        expect(body, contains('slow ones limit long and repeat dives'));
+      },
+    );
   });
 
   test('safety review lists only the rules it found', () {
@@ -182,6 +227,20 @@ void main() {
     expect(labels(content), [
       label(DiveTerm.ascentRate),
       label(DiveTerm.sawtooth),
+    ]);
+  });
+
+  test('a counterdiffusion finding explains both the switch and the span', () {
+    // The rule fires on rule-of-fifths switches and on tissue-model spans;
+    // the ICD term alone describes only the switch (#4530).
+    final content = safetyReviewInfo(
+      l10n,
+      units,
+      rules: {SafetyRuleId.isobaricCounterdiffusion},
+    );
+    expect(labels(content), [
+      label(DiveTerm.isobaricCounterdiffusion),
+      label(DiveTerm.counterdiffusionProfile),
     ]);
   });
 
@@ -240,7 +299,7 @@ void main() {
       l10n,
       imperial,
       hasDrysuitGas: false,
-      canAdjust: true,
+      canTryWhatIf: true,
     );
     final ditch = content.terms.firstWhere(
       (e) => e.term == label(DiveTerm.minDitchable),

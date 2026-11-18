@@ -7,6 +7,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/media/data/services/dive_gallery_lookup.dart';
 import 'package:submersion/features/media/data/services/trip_media_scanner.dart';
+import 'package:submersion/features/media/domain/services/dive_media_clock.dart';
 import 'package:submersion/features/media/domain/services/dive_photo_matcher.dart';
 import 'package:submersion/features/media/domain/value_objects/media_attach_target.dart';
 import 'package:submersion/features/media/presentation/pages/photo_picker_page.dart';
@@ -14,6 +15,7 @@ import 'package:submersion/features/media/presentation/providers/media_providers
 import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
 import 'package:submersion/features/media/presentation/providers/resolved_asset_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
+import 'package:submersion/features/media/presentation/helpers/media_hold.dart';
 
 /// Helper for importing photos for a dive.
 ///
@@ -33,15 +35,23 @@ class PhotoImportHelper {
     required WidgetRef ref,
     required Dive dive,
     List<String>? initialFilePaths,
+    MediaHoldSink? onHold,
   }) async {
     // Calculate time window with 30-minute buffer
-    final diveStart = dive.effectiveEntryTime;
+    // The dive's window as its camera reads it, so the picker opens on the
+    // photos the dive's media time shift places inside it (issue #4539).
+    final entry = dive.effectiveEntryTime;
     final diveDuration = dive.effectiveRuntime ?? const Duration(hours: 1);
-    final diveEnd = dive.exitTime ?? diveStart.add(diveDuration);
+    final diveStart = DiveMediaClock.onCameraClock(dive, entry);
+    final diveEnd = DiveMediaClock.onCameraClock(
+      dive,
+      dive.exitTime ?? entry.add(diveDuration),
+    );
 
     // Gallery assets already linked to this dive, as this device knows them:
     // a row linked on another device carries that device's asset id (#885).
     final mediaRepo = ref.read(mediaRepositoryProvider);
+    final importService = ref.read(mediaImportServiceProvider);
     final alreadyLinkedIds = await ref
         .read(linkedGalleryAssetsProvider)
         .idsOnThisDevice(await mediaRepo.getGalleryLinksForDive(dive.id));
@@ -78,6 +88,7 @@ class PhotoImportHelper {
       // Lets the Files tab link photos this dive's date window rejected.
       target: DiveAttachTarget(dive.id),
       initialFilePaths: initialFilePaths,
+      onHold: onHold,
       loadAssets: (isActive) => DiveGalleryLookup.find(
         windowStart: windowStart,
         windowEnd: windowEnd,
@@ -90,6 +101,17 @@ class PhotoImportHelper {
     // User cancelled or context no longer valid
     if (selectedAssets == null || selectedAssets.isEmpty || !context.mounted) {
       return false;
+    }
+
+    // A sitting on the dive (issue #4527) holds the picks until Save: the
+    // rows are built, and written then.
+    if (onHold != null) {
+      final prepared = await importService.prepareForDive(
+        selectedAssets: selectedAssets,
+        dive: dive,
+      );
+      onHold([for (final p in prepared) HeldMediaRow(p)]);
+      return true;
     }
 
     // Defer dialog display to avoid Navigator lock issues.

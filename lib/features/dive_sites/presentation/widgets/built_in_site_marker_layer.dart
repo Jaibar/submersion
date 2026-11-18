@@ -4,23 +4,27 @@ import 'package:flutter_map_marker_cluster/flutter_map_marker_cluster.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'package:submersion/l10n/l10n_extension.dart';
-import 'package:submersion/features/dive_sites/data/services/dive_site_api_service.dart';
+import 'package:submersion/features/dive_sites/domain/entities/catalogue_site.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/catalogue_kind_glyph.dart';
 import 'package:submersion/features/maps/presentation/widgets/world_copies.dart';
 
 /// A recessive marker-cluster layer for built-in (bundled) dive sites.
 /// Rendered BELOW the user-site layer and clustered separately, so built-in
-/// markers never merge into the user's clusters. Markers are hollow grey pins,
-/// smaller than the user's filled circles. Repeats across the date line with
-/// the user-site layer (issue #2516).
+/// markers never merge into the user's clusters. Markers are hollow grey
+/// glyphs, smaller than the user's filled circles: a pin for a dive site,
+/// an anchor for a charted wreck or reef (`catalogueKindIcon`). Both kinds
+/// share the one cluster layer. Repeats across the date line with the
+/// user-site layer (issue #2516).
 class BuiltInSiteMarkerLayer extends StatelessWidget {
-  final List<ExternalDiveSite> sites;
-  final String? selectedExternalId;
-  final void Function(ExternalDiveSite) onTap;
+  /// Sites with coordinates; one without is skipped.
+  final List<CatalogueSite> sites;
+  final String? selectedCatalogueId;
+  final void Function(CatalogueSite) onTap;
 
   const BuiltInSiteMarkerLayer({
     super.key,
     required this.sites,
-    required this.selectedExternalId,
+    required this.selectedCatalogueId,
     required this.onTap,
   });
 
@@ -34,22 +38,29 @@ class BuiltInSiteMarkerLayer extends StatelessWidget {
       options: MarkerClusterLayerOptions(
         maxClusterRadius: 80,
         size: const Size(40, 40),
-        markers: sites.map((site) {
-          final selected = site.externalId == selectedExternalId;
+        markers: sites.where((site) => site.hasCoordinates).map((site) {
+          final selected = site.id == selectedCatalogueId;
           return Marker(
-            point: LatLng(site.latitude!, site.longitude!),
+            point: LatLng(site.location!.latitude, site.location!.longitude),
             width: selected ? 34 : 28,
             height: selected ? 40 : 34,
             child: Semantics(
               button: true,
-              label: context.l10n.diveSites_map_semantics_builtInSiteMarker(
-                site.name,
-              ),
+              label: switch (site.kind) {
+                CatalogueKind.site =>
+                  context.l10n.diveSites_map_semantics_builtInSiteMarker(
+                    site.name,
+                  ),
+                CatalogueKind.register =>
+                  context.l10n.diveSites_map_semantics_registerMarker(
+                    site.name,
+                  ),
+              },
               child: GestureDetector(
-                key: Key('builtInPin_${site.externalId}'),
+                key: Key('builtInPin_${site.id}'),
                 onTap: () => onTap(site),
                 child: Icon(
-                  Icons.location_on_outlined,
+                  catalogueKindIcon(site.kind),
                   size: selected ? 36 : 30,
                   color: selected
                       ? Theme.of(context).colorScheme.primary

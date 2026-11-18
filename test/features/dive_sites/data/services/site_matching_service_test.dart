@@ -1,17 +1,21 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/core/constants/enums.dart';
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
 
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
-import 'package:submersion/features/dive_sites/data/services/dive_site_api_service.dart';
+import 'package:submersion/features/dive_sites/data/services/catalogue_adoption_service.dart';
 import 'package:submersion/features/dive_sites/data/services/site_matching_service.dart';
+import 'package:submersion/features/dive_sites/domain/entities/catalogue_site.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/entities/site_catalogue_answers.dart';
 import 'package:submersion/features/dive_sites/domain/entities/site_classification.dart';
 import 'package:submersion/features/dive_sites/domain/matching/site_match_sensitivity.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
 
+import '../../../../helpers/fake_site_catalogue.dart';
 import 'site_matching_service_test.mocks.dart';
 
 GeoPoint _eastMeters(double m) => GeoPoint(0, m / 111320.0);
@@ -38,22 +42,18 @@ Dive _diveWithBareSite(String id, DiveSite site, {GeoPoint? gps}) => Dive(
 
 const _bareSite = DiveSite(id: 'bare', name: 'Typed Twice');
 
-@GenerateMocks([
-  SiteRepository,
-  DiveSiteApiService,
-  DiveRepository,
-  MediaRepository,
-])
+@GenerateMocks([SiteRepository, DiveRepository, MediaRepository])
 void main() {
   late MockSiteRepository sites;
-  late MockDiveSiteApiService api;
+  late FakeSiteCatalogue catalogue;
   late MockDiveRepository dives;
   late MockMediaRepository media;
 
   // Pass-through transaction runner so apply runs without a real database.
   SiteMatchingService service() => SiteMatchingService(
     siteRepository: sites,
-    apiService: api,
+    catalogue: catalogue,
+    adoption: CatalogueAdoptionService(siteRepository: sites),
     diveRepository: dives,
     mediaRepository: media,
     diverId: 'diver-1',
@@ -63,17 +63,14 @@ void main() {
 
   setUp(() {
     sites = MockSiteRepository();
-    api = MockDiveSiteApiService();
+    // No catalogue site has been adopted yet, unless a test says so.
+    when(
+      sites.getSiteByCatalogueId(any, diverId: anyNamed('diverId')),
+    ).thenAnswer((_) async => null);
+    catalogue = FakeSiteCatalogue();
     dives = MockDiveRepository();
     media = MockMediaRepository();
     when(media.getBestPhotoGpsForDives(any)).thenAnswer((_) async => const {});
-    when(
-      api.searchNearby(
-        latitude: anyNamed('latitude'),
-        longitude: anyNamed('longitude'),
-        radiusKm: anyNamed('radiusKm'),
-      ),
-    ).thenAnswer((_) async => const DiveSiteSearchResult(sites: []));
     when(
       sites.getAllSites(diverId: anyNamed('diverId')),
     ).thenAnswer((_) async => const []);
@@ -133,6 +130,186 @@ void main() {
     });
   });
 
+  group('register records', () {
+    setUp(() {
+      when(
+        sites.getAllSites(diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => const []);
+    });
+
+    CatalogueSite record(String id, double metersEast, CatalogueKind kind) =>
+        CatalogueSite(
+          id: id,
+          name: id,
+          location: _eastMeters(metersEast),
+          source: kind == CatalogueKind.register ? 'ukho' : 'osm',
+          kind: kind,
+        );
+
+    test('a dive site near the dive is recommended over a nearer charted '
+        'wreck', () async {
+      catalogue.sites = [
+        record('wreck', 60, CatalogueKind.register),
+        record('site', 120, CatalogueKind.site),
+      ];
+
+      final proposal = (await service().computeProposals([
+        _diveAt('d1', const GeoPoint(0, 0)),
+      ])).single;
+
+      expect(proposal.status, ProposalStatus.clear);
+      expect(proposal.recommendedCandidateId, 'site');
+      // Both are still offered, nearest first.
+      expect(proposal.candidates.map((c) => c.id), ['wreck', 'site']);
+    });
+
+    test('a lone researched record near the dive is offered, never '
+        'recommended', () async {
+      catalogue.sites = [
+        CatalogueSite(
+          id: 'research_id_liberty',
+          name: 'USAT Liberty',
+          location: _eastMeters(40),
+          source: 'research',
+          trust: CatalogueTrust.researched,
+        ),
+      ];
+
+      final proposal = (await service().computeProposals([
+        _diveAt('d1', const GeoPoint(0, 0)),
+      ])).single;
+
+      expect(proposal.status, ProposalStatus.review);
+      expect(proposal.recommendedCandidateId, isNull);
+      expect(proposal.candidates.single.id, 'research_id_liberty');
+      expect(proposal.candidates.single.isResearched, isTrue);
+    });
+
+    test('a verified record is not marked researched', () async {
+      catalogue.sites = [record('site', 60, CatalogueKind.site)];
+
+      final proposal = (await service().computeProposals([
+        _diveAt('d1', const GeoPoint(0, 0)),
+      ])).single;
+
+      expect(proposal.candidates.single.isResearched, isFalse);
+    });
+
+    test('a lone charted wreck near the dive is recommended', () async {
+      catalogue.sites = [record('wreck', 60, CatalogueKind.register)];
+
+      final proposal = (await service().computeProposals([
+        _diveAt('d1', const GeoPoint(0, 0)),
+      ])).single;
+
+      expect(proposal.status, ProposalStatus.clear);
+      expect(proposal.recommendedCandidateId, 'wreck');
+    });
+  });
+
+  group('catalogue candidates', () {
+    group('a record a merged site stands for', () {
+      DiveSite survivorAt(GeoPoint where) => DiveSite(
+        id: 's-survivor',
+        name: 'Thistlegorm',
+        location: where,
+        catalogueId: 'osm_1',
+        catalogueAnswers: const SiteCatalogueAnswers(also: {'osm_3'}),
+      );
+      final folded = CatalogueSite(
+        id: 'osm_3',
+        name: 'SS Thistlegorm',
+        location: _eastMeters(20),
+        source: 'osm',
+      );
+
+      test('is offered when that site is out of range of the dive', () async {
+        // The survivor sits at its own record, far from this one. Without
+        // the record the dive would have no candidate at all; applying it
+        // links the dive to the survivor, not to a new site.
+        when(
+          sites.getAllSites(diverId: anyNamed('diverId')),
+        ).thenAnswer((_) async => [survivorAt(_eastMeters(50000))]);
+        catalogue.sites = [folded];
+
+        final proposals = await service().computeProposals([
+          _diveAt('d1', const GeoPoint(0, 0)),
+        ]);
+
+        expect(proposals.single.candidates.map((c) => c.id), ['osm_3']);
+      });
+
+      test('is not offered beside that site when it is in range', () async {
+        when(
+          sites.getAllSites(diverId: anyNamed('diverId')),
+        ).thenAnswer((_) async => [survivorAt(_eastMeters(400))]);
+        catalogue.sites = [folded];
+
+        final proposals = await service().computeProposals([
+          _diveAt('d1', const GeoPoint(0, 0)),
+        ]);
+
+        expect(proposals.single.candidates.map((c) => c.id), ['s-survivor']);
+      });
+    });
+
+    test('an adopted site is not also offered as its catalogue twin', () async {
+      // 400 m from the dive: outside the inner radius, so catalogue sites
+      // compete, and the adopted site's own record would be a second card.
+      final adopted = DiveSite(
+        id: 's-adopted',
+        name: 'Salt Pier',
+        location: _eastMeters(400),
+        catalogueId: 'osm_3',
+      );
+      when(
+        sites.getAllSites(diverId: anyNamed('diverId')),
+      ).thenAnswer((_) async => [adopted]);
+      catalogue.sites = [
+        CatalogueSite(
+          id: 'osm_3',
+          name: 'Salt Pier',
+          location: _eastMeters(400),
+          source: 'osm',
+        ),
+      ];
+
+      final proposals = await service().computeProposals([
+        _diveAt('d1', const GeoPoint(0, 0)),
+      ]);
+
+      expect(proposals.single.candidates.map((c) => c.id), ['s-adopted']);
+    });
+
+    test(
+      'a card carries its site types as ids for the page to translate',
+      () async {
+        catalogue.sites = const [
+          CatalogueSite(
+            id: 'osm_4',
+            name: 'The Tugs',
+            location: GeoPoint(0, 0),
+            typeIds: ['artificial_reef', 'wreck'],
+            features: ['sharks'],
+            difficulty: SiteDifficulty.beginner,
+            source: 'osm',
+          ),
+        ];
+
+        final proposals = await service().computeProposals([
+          _diveAt('d1', _eastMeters(22)),
+        ]);
+
+        final card = proposals.single.candidates.single;
+        expect(card.difficulty, 'Beginner');
+        // The seed table's names are English: put on screen as they are,
+        // a German diver would read "Wreck" here and "Wrack" everywhere else.
+        expect(card.typeIds, ['artificial_reef', 'wreck']);
+        expect(card.features, ['sharks']);
+      },
+    );
+  });
+
   group('applyConfirmed', () {
     setUp(() {
       when(
@@ -165,25 +342,14 @@ void main() {
     test(
       'materialises a bundled site once for two dives (batch dedup)',
       () async {
-        when(
-          api.searchNearby(
-            latitude: anyNamed('latitude'),
-            longitude: anyNamed('longitude'),
-            radiusKm: anyNamed('radiusKm'),
+        catalogue.sites = const [
+          CatalogueSite(
+            id: 'osm_1',
+            name: 'Wreck',
+            location: GeoPoint(0, 0),
+            source: 'osm',
           ),
-        ).thenAnswer(
-          (_) async => const DiveSiteSearchResult(
-            sites: [
-              ExternalDiveSite(
-                externalId: 'osm_1',
-                name: 'Wreck',
-                latitude: 0,
-                longitude: 0,
-                source: 'OpenStreetMap',
-              ),
-            ],
-          ),
-        );
+        ];
         final s = service();
         await s.computeProposals([
           _diveAt('d1', _eastMeters(22)),
@@ -210,26 +376,16 @@ void main() {
     test(
       'a materialised bundled site carries its mapped site types (#1765)',
       () async {
-        when(
-          api.searchNearby(
-            latitude: anyNamed('latitude'),
-            longitude: anyNamed('longitude'),
-            radiusKm: anyNamed('radiusKm'),
+        catalogue.sites = const [
+          CatalogueSite(
+            id: 'osm_2',
+            name: 'Lake wreck',
+            location: GeoPoint(0, 0),
+            typeIds: ['wreck', 'lake'],
+            features: ['sharks'],
+            source: 'osm',
           ),
-        ).thenAnswer(
-          (_) async => const DiveSiteSearchResult(
-            sites: [
-              ExternalDiveSite(
-                externalId: 'osm_2',
-                name: 'Lake wreck',
-                latitude: 0,
-                longitude: 0,
-                features: ['wreck', 'lake', 'sharks'],
-                source: 'OpenStreetMap',
-              ),
-            ],
-          ),
-        );
+        ];
         final s = service();
         await s.computeProposals([_diveAt('d1', _eastMeters(22))]);
 
@@ -259,25 +415,14 @@ void main() {
         when(
           sites.getAllSites(diverId: anyNamed('diverId')),
         ).thenAnswer((_) async => [existing]);
-        when(
-          api.searchNearby(
-            latitude: anyNamed('latitude'),
-            longitude: anyNamed('longitude'),
-            radiusKm: anyNamed('radiusKm'),
+        catalogue.sites = [
+          CatalogueSite(
+            id: 'osm_2',
+            name: 'Reef',
+            location: GeoPoint(0, _eastMeters(140).longitude),
+            source: 'osm',
           ),
-        ).thenAnswer(
-          (_) async => DiveSiteSearchResult(
-            sites: [
-              ExternalDiveSite(
-                externalId: 'osm_2',
-                name: 'Reef',
-                latitude: 0,
-                longitude: _eastMeters(140).longitude,
-                source: 'OpenStreetMap',
-              ),
-            ],
-          ),
-        );
+        ];
         final s = service();
         await s.computeProposals([_diveAt('d1', const GeoPoint(0, 0))]);
 
@@ -292,6 +437,129 @@ void main() {
         );
       },
     );
+
+    test('a created site carries the catalogue\'s details and link', () async {
+      catalogue.sites = const [
+        CatalogueSite(
+          id: 'osm_3',
+          name: 'Salt Pier',
+          location: GeoPoint(0, 0),
+          countryCode: 'BQ',
+          country: 'Caribbean Netherlands',
+          minDepth: 5,
+          maxDepth: 15,
+          typeIds: ['reef'],
+          entryMethods: [EntryMethod.shore],
+          description: 'Pillars.',
+          source: 'osm',
+        ),
+      ];
+      final s = service();
+      final proposals = await s.computeProposals([
+        _diveAt('d1', _eastMeters(22)),
+      ]);
+      // The review card shows the depth range the catalogue holds.
+      expect(proposals.single.candidates.single.minDepth, 5);
+      expect(proposals.single.candidates.single.maxDepth, 15);
+
+      await s.applyConfirmed([const ConfirmedMatch('d1', 'osm_3')]);
+
+      final captured = verify(
+        sites.createSite(
+          captureAny,
+          classification: captureAnyNamed('classification'),
+        ),
+      ).captured;
+      final created = captured[0] as DiveSite;
+      expect(created.catalogueId, 'osm_3');
+      expect(created.diverId, 'diver-1');
+      expect(created.maxDepth, 15);
+      expect(created.countryCode, 'BQ');
+      expect(created.entryMethods, [EntryMethod.shore]);
+      expect(created.description, 'Pillars.');
+      // No "Imported from ..." boilerplate in the diver's own notes.
+      expect(created.notes, '');
+      expect((captured[1] as SiteClassification).typeIds, ['reef']);
+    });
+
+    test('a candidate adopted since the proposals were made is linked, not '
+        'created again', () async {
+      // Not among the diver's sites when the proposals were computed (it
+      // was adopted on the map a moment later, or it has no coordinates
+      // of its own any more), so its record was offered.
+      const adopted = DiveSite(
+        id: 's-adopted',
+        name: 'Salt Pier',
+        catalogueId: 'osm_3',
+      );
+      catalogue.sites = const [
+        CatalogueSite(
+          id: 'osm_3',
+          name: 'Salt Pier',
+          location: GeoPoint(0, 0),
+          source: 'osm',
+        ),
+      ];
+      final s = service();
+      await s.computeProposals([_diveAt('d1', const GeoPoint(0, 0))]);
+      when(
+        sites.getSiteByCatalogueId('osm_3', diverId: 'diver-1'),
+      ).thenAnswer((_) async => adopted);
+
+      final result = await s.applyConfirmed([
+        const ConfirmedMatch('d1', 'osm_3'),
+      ]);
+
+      expect(result.sitesCreated, 0);
+      verify(dives.setSite('d1', 's-adopted')).called(1);
+      verifyNever(
+        sites.createSite(any, classification: anyNamed('classification')),
+      );
+    });
+
+    test('a candidate another screen adopts while the apply runs is linked, '
+        'not reported as created', () async {
+      // The apply looks for the diver's copy, finds none, and asks for an
+      // adoption; by then the picker's adoption of the same record has
+      // landed, so the adoption hands that site back and creates nothing.
+      const adopted = DiveSite(
+        id: 's-adopted',
+        name: 'Salt Pier',
+        catalogueId: 'osm_3',
+      );
+      catalogue.sites = const [
+        CatalogueSite(
+          id: 'osm_3',
+          name: 'Salt Pier',
+          location: GeoPoint(0, 0),
+          source: 'osm',
+        ),
+      ];
+      final s = service();
+      await s.computeProposals([
+        _diveAt('d1', const GeoPoint(0, 0)),
+        _diveAt('d2', _eastMeters(11)),
+      ]);
+      var lookups = 0;
+      when(
+        sites.getSiteByCatalogueId('osm_3', diverId: 'diver-1'),
+      ).thenAnswer((_) async => lookups++ == 0 ? null : adopted);
+
+      final result = await s.applyConfirmed([
+        const ConfirmedMatch('d1', 'osm_3'),
+        const ConfirmedMatch('d2', 'osm_3'),
+      ]);
+
+      expect(result.divesLinked, 2);
+      expect(result.sitesCreated, 0);
+      // The diver's rules for a new site do not run on one they had.
+      expect(result.createdSiteIds, isEmpty);
+      verify(dives.setSite('d1', 's-adopted')).called(1);
+      verify(dives.setSite('d2', 's-adopted')).called(1);
+      verifyNever(
+        sites.createSite(any, classification: anyNamed('classification')),
+      );
+    });
 
     test('empty confirmed list writes nothing', () async {
       final s = service();
@@ -379,7 +647,8 @@ void main() {
     SiteMatchingService withElevation(Future<double?> Function(GeoPoint) f) =>
         SiteMatchingService(
           siteRepository: sites,
-          apiService: api,
+          catalogue: catalogue,
+          adoption: CatalogueAdoptionService(siteRepository: sites),
           diveRepository: dives,
           mediaRepository: media,
           diverId: 'diver-1',
@@ -481,7 +750,8 @@ void main() {
       () async {
         final s = SiteMatchingService(
           siteRepository: sites,
-          apiService: api,
+          catalogue: catalogue,
+          adoption: CatalogueAdoptionService(siteRepository: sites),
           diveRepository: dives,
           mediaRepository: media,
           diverId: 'diver-1',

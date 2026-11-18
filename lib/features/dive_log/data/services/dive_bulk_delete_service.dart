@@ -1,16 +1,14 @@
 import 'package:submersion/core/database/existing_row_ids.dart';
 import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
-import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/features/change_log/data/repositories/change_log_repository.dart';
+import 'package:submersion/features/change_log/data/services/change_log_operation_undo.dart';
 import 'package:submersion/features/change_log/data/services/change_log_revert_service.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart'
     as domain;
 import 'package:submersion/features/documents/data/repositories/document_repository.dart';
 import 'package:submersion/features/documents/domain/entities/document.dart';
-
-final _log = LoggerService.forClass(DiveBulkDeleteService);
 
 /// What a bulk delete took, for [DiveBulkDeleteService.restore] to put back.
 class DeletedDives {
@@ -46,18 +44,15 @@ class DiveBulkDeleteService {
     required ChangeLogRevertService revert,
     required Future<void> Function(List<DocumentSnapshotEntry>)
     restoreDocuments,
-    required Future<void> Function(Iterable<Document>) rearmDocuments,
   }) : _dives = dives,
        _changeLog = changeLog,
        _revert = revert,
-       _restoreDocuments = restoreDocuments,
-       _rearmDocuments = rearmDocuments;
+       _restoreDocuments = restoreDocuments;
 
   final DiveRepository _dives;
   final ChangeLogRepository _changeLog;
   final ChangeLogRevertService _revert;
   final Future<void> Function(List<DocumentSnapshotEntry>) _restoreDocuments;
-  final Future<void> Function(Iterable<Document>) _rearmDocuments;
 
   /// Deletes [ids]. The scope opened here is the one
   /// [DiveRepository.bulkDeleteDives] joins, so its entry is known. The media
@@ -85,7 +80,9 @@ class DiveBulkDeleteService {
   }
 
   /// Puts [deleted] back. Returns false when something could not return, so
-  /// the diver is not told a thinner dive was restored whole.
+  /// the diver is not told a thinner dive was restored whole. The revert
+  /// re-arms the reminders of the documents it brings back (#4607); one it
+  /// could not bring back is rebuilt from the snapshot, with its reminders.
   Future<bool> restore(DeletedDives deleted) async {
     final reverted = await _revertDelete(deleted.operationId);
     final rebuilt = await _rebuildMissingDives(deleted.dives);
@@ -93,10 +90,6 @@ class DiveBulkDeleteService {
     final db = DatabaseService.instance.database;
     final returned = await existingRowIds(db, db.documents, [
       for (final entry in deleted.documents) entry.document.id,
-    ]);
-    await _rearmDocuments([
-      for (final entry in deleted.documents)
-        if (returned.contains(entry.document.id)) entry.document,
     ]);
     await _restoreDocuments([
       for (final entry in deleted.documents)
@@ -108,26 +101,11 @@ class DiveBulkDeleteService {
   /// Whether the entry brought back everything it holds. A failure costs only
   /// this route: logging never blocks work, so the entry may be missing or
   /// short, and [_rebuildMissingDives] covers that.
-  Future<bool> _revertDelete(String? operationId) async {
-    if (operationId == null) return false;
-    try {
-      await _changeLog.settleAll();
-      final result = await _revert.execute(
-        await _revert.planOperation(operationId),
-      );
-      if (result.kept > 0) {
-        _log.warning('Undo left ${result.kept} deleted records behind');
-      }
-      return result.kept == 0;
-    } catch (error, stackTrace) {
-      _log.warning(
-        'Could not revert a bulk dive delete',
-        error: error,
-        stackTrace: stackTrace,
-      );
-      return false;
-    }
-  }
+  Future<bool> _revertDelete(String? operationId) => undoChangeLogOperation(
+    operationId,
+    changeLog: _changeLog,
+    revert: _revert,
+  );
 
   /// The last resort for a delete the change log did not record, such as on
   /// a device whose triggers could not be installed: the dive comes back from

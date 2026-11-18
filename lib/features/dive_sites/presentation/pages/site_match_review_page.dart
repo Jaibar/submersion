@@ -3,12 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/number_display.dart';
 import 'package:submersion/features/rules/domain/rule_subject.dart';
 import 'package:submersion/features/rules/presentation/run_rules_flow.dart';
 import 'package:submersion/features/dive_sites/data/services/site_matching_service.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_match_review_notifier.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/match_sites_map.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/not_verified_label.dart';
 import 'package:submersion/features/media/presentation/widgets/quick_site_from_gps_dialog.dart';
+import 'package:submersion/features/site_types/presentation/site_type_display.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 
 /// Staged review: compute proposals, choose a site per dive (list or map),
@@ -393,9 +396,17 @@ class _CandidateCard extends StatelessWidget {
               Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      c.name,
-                      style: Theme.of(context).textTheme.titleSmall,
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          c.name,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        if (c.isResearched) const NotVerifiedLabel(),
+                      ],
                     ),
                   ),
                   Flexible(
@@ -421,18 +432,27 @@ class _CandidateCard extends StatelessWidget {
                   padding: const EdgeInsets.only(top: 2),
                   child: Text(
                     [
-                      if (c.rating != null) '★ ${c.rating!.toStringAsFixed(1)}',
+                      if (c.rating != null)
+                        '★ ${formatRatingForDisplay(c.rating!)}',
                       if (c.difficulty != null) c.difficulty!,
                     ].join(' · '),
                     style: TextStyle(color: scheme.onSurfaceVariant),
                   ),
                 ),
-              if (c.features.isNotEmpty)
+              if (c.typeIds.isNotEmpty || c.features.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: Wrap(
                     spacing: 6,
                     children: [
+                      // Site types by their translated names; one this
+                      // build does not know is shown as it came.
+                      for (final id in c.typeIds)
+                        Chip(
+                          label: Text(
+                            builtInSiteTypeName(context.l10n, id) ?? id,
+                          ),
+                        ),
                       for (final f in c.features) Chip(label: Text(f)),
                     ],
                   ),

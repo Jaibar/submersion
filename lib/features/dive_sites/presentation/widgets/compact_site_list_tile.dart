@@ -1,21 +1,25 @@
 import 'package:flutter/material.dart';
 
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/number_display.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_sites/domain/constants/site_field.dart';
 import 'package:submersion/features/dive_sites/domain/entities/site_with_dive_count.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/selection/selection_checkbox_slot.dart';
+import 'package:submersion/shared/widgets/country_flag.dart';
 import 'package:submersion/shared/widgets/entity_card/card_slot_resolver.dart';
 import 'package:submersion/shared/widgets/entity_card/entity_card_stat.dart';
 import 'package:submersion/features/shared_library/presentation/widgets/library_site_badge.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 /// Two-line compact card tile for the site list, driven by
 /// [siteCompactCardConfigProvider].
 ///
-/// Line 1: title slot | rating | stat1 | chevron
+/// Line 1: title slot | rating | stat1
 /// Line 2: subtitle slot | stat2
+/// A chevron centred on both lines follows them at the card's end.
 class CompactSiteListTile extends ConsumerWidget {
   final SiteWithDiveCount entry;
   final VoidCallback? onTap;
@@ -59,9 +63,16 @@ class CompactSiteListTile extends ConsumerWidget {
     final title =
         slotText(resolveCardSlot(slots, 'title', SiteField.siteName)) ??
         site.name;
-    final subtitle = slotText(
-      resolveCardSlot(slots, 'subtitle', SiteField.location),
+    final subtitleField = resolveCardSlot(
+      slots,
+      'subtitle',
+      SiteField.location,
     );
+    final subtitle = slotText(subtitleField);
+    // A flag only beside a line naming the place.
+    final flagSite = subtitle != null && showsPlace(subtitleField)
+        ? site
+        : null;
     final stat2Field = resolveCardSlot(slots, 'stat2', SiteField.depthRange);
     final showSecondLine = subtitle != null || slotText(stat2Field) != null;
 
@@ -98,89 +109,95 @@ class CompactSiteListTile extends ConsumerWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(12),
           child: Padding(
-            padding: const EdgeInsets.all(10),
-            child: Row(
-              children: [
-                SelectionCheckboxSlot(
-                  isSelectionMode: isSelectionMode,
-                  isChecked: isSelected,
-                  onChanged: (_) => onTap?.call(),
-                  gap: 8,
-                ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              title,
-                              style: Theme.of(context).textTheme.bodyMedium
-                                  ?.copyWith(fontWeight: FontWeight.w600),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          LibrarySiteBadge(site: site),
-                          if (site.rating != null) ...[
-                            const SizedBox(width: 6),
-                            const Icon(
-                              Icons.star,
-                              color: Colors.amber,
-                              size: 14,
-                            ),
-                            const SizedBox(width: 2),
-                            Text(
-                              site.rating!.toStringAsFixed(1),
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ],
-                          if (showSharedBadge) ...[
-                            const SizedBox(width: 6),
-                            Tooltip(
-                              message:
-                                  l10n.accessibility_label_sharedWithProfiles,
-                              child: Icon(
-                                Icons.people_outline,
-                                size: 16,
-                                color: colorScheme.primary,
-                              ),
-                            ),
-                          ],
-                          const SizedBox(width: 8),
-                          stat('stat1', SiteField.diveCount),
-                          ExcludeSemantics(
-                            child: Icon(
-                              Icons.chevron_right,
-                              color: secondaryTextColor,
-                              size: 20,
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (showSecondLine) ...[
-                        const SizedBox(height: 2),
+            padding: const EdgeInsets.all(kRecordCardCompactPadding),
+            child: RecordListChevronRow(
+              chevronSize: RecordListChevron.compactSize,
+              chevronColor: secondaryTextColor,
+              child: Row(
+                children: [
+                  SelectionCheckboxSlot(
+                    isSelectionMode: isSelectionMode,
+                    isChecked: isSelected,
+                    onChanged: (_) => onTap?.call(),
+                    gap: 8,
+                  ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Row(
                           children: [
                             Expanded(
                               child: Text(
-                                subtitle ?? '',
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(color: secondaryTextColor),
+                                title,
+                                style: Theme.of(context).textTheme.bodyMedium
+                                    ?.copyWith(fontWeight: FontWeight.w600),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
+                            LibrarySiteBadge(site: site),
+                            if (site.rating != null) ...[
+                              const SizedBox(width: 6),
+                              const Icon(
+                                Icons.star,
+                                color: Colors.amber,
+                                size: 14,
+                              ),
+                              const SizedBox(width: 2),
+                              Text(
+                                formatRatingForDisplay(site.rating!),
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                            if (showSharedBadge) ...[
+                              const SizedBox(width: 6),
+                              Tooltip(
+                                message:
+                                    l10n.accessibility_label_sharedWithProfiles,
+                                child: Icon(
+                                  Icons.people_outline,
+                                  size: 16,
+                                  color: colorScheme.primary,
+                                ),
+                              ),
+                            ],
                             const SizedBox(width: 8),
-                            stat('stat2', SiteField.depthRange),
+                            stat('stat1', SiteField.diveCount),
                           ],
                         ),
+                        if (showSecondLine) ...[
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  child: LocationWithFlag(
+                                    country: flagSite?.country,
+                                    countryCode: flagSite?.countryCode,
+                                    text: Text(
+                                      subtitle ?? '',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(color: secondaryTextColor),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              stat('stat2', SiteField.depthRange),
+                            ],
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

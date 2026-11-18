@@ -14,6 +14,7 @@ import 'package:submersion/features/divers/data/repositories/diver_repository.da
 import 'package:submersion/features/divers/domain/entities/diver.dart';
 import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
 import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
+import 'package:submersion/features/tags/domain/entities/tag.dart';
 
 import '../../../helpers/test_database.dart';
 
@@ -99,6 +100,11 @@ void main() {
     expect(species.single.speciesName, 'Grouper');
     final tag = (await TagRepository().getAllTags(diverId: 'd1')).single;
     expect(tag.diverId, 'd1', reason: 'vocabulary belongs to the diver');
+    expect(
+      tag.scopes,
+      TagScope.everywhere,
+      reason: 'a new tag can be reused on any kind of item (#4407)',
+    );
   });
 
   test('apply reuses existing vocabulary case-insensitively', () async {
@@ -271,5 +277,54 @@ void main() {
     expect(site.name, 'B');
     expect(site.notes, 'mine');
     expect(site.rating, 4);
+  });
+
+  group('country code (issue #4426)', () {
+    Future<String?> applyAndRead(Map<String, Object?> fields) async {
+      await bridge.apply(
+        SiteDocument(id: 'cc', fields: {'name': 'Reef', ...fields}),
+        libraryId: 'L',
+        vocabularyDiverId: 'd1',
+      );
+      return (await SiteRepository().getSiteById('cc'))!.countryCode;
+    }
+
+    test('documents carry the code beside the country', () {
+      expect(SiteDocument.fieldNames, contains('countryCode'));
+      const site = DiveSite(
+        id: 's',
+        name: 'n',
+        country: 'Korea',
+        countryCode: 'KR',
+      );
+      expect(SiteDocumentBridge.fieldValue(site, 'countryCode'), 'KR');
+    });
+
+    test('a code the text cannot be read as comes along', () async {
+      expect(
+        await applyAndRead({'country': 'Korea', 'countryCode': 'KR'}),
+        'KR',
+      );
+    });
+
+    test('a code naming another country than the text is re-read', () async {
+      // An older build changed the country and passed the old code through.
+      expect(
+        await applyAndRead({'country': 'Spain', 'countryCode': 'FR'}),
+        'ES',
+      );
+    });
+
+    test('a code with no country text is not kept', () async {
+      // An older build cleared the country and passed the old code through.
+      expect(
+        await applyAndRead({'country': null, 'countryCode': 'KR'}),
+        isNull,
+      );
+    });
+
+    test('a document without a code reads its country text', () async {
+      expect(await applyAndRead({'country': 'Mexico'}), 'MX');
+    });
   });
 }

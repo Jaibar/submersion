@@ -1,8 +1,10 @@
+import 'package:uuid/uuid.dart';
 import 'package:equatable/equatable.dart';
 import 'package:path/path.dart' as p;
 
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/dive_providers.dart';
+import 'package:submersion/features/media/domain/services/dive_media_clock.dart';
 import 'package:submersion/features/media/domain/services/dive_photo_matcher.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
 import 'package:submersion/features/media/data/services/local_bookmark_storage.dart';
@@ -303,6 +305,17 @@ class FilesTabNotifier extends StateNotifier<FilesTabState> {
         for (final file in state.files) {
           created.add(await _persistOne(file, siteId: siteId));
         }
+      // Gear photos (issue #3355): owned outright, like a site's.
+      case EquipmentAttachTarget(:final equipmentId, :final observationId):
+        for (final file in state.files) {
+          created.add(
+            await _persistOne(
+              file,
+              equipmentId: equipmentId,
+              observationId: observationId,
+            ),
+          );
+        }
       case DiveAttachTarget() || null:
         for (final entry in state.match.matched.entries) {
           for (final file in entry.value) {
@@ -312,6 +325,39 @@ class FilesTabNotifier extends StateNotifier<FilesTabState> {
     }
     clear();
     return created;
+  }
+
+  /// The rows [commit] would write for [diveId], each under a fresh id,
+  /// built and not written, and how many staged files matched another dive
+  /// and were left out: a sitting on [diveId] holds its own photos until
+  /// Save, and changes no other dive (issue #4527). Clears the staged files.
+  Future<({List<MediaItem> rows, int leftOut})> heldRows(String diveId) async {
+    final rows = <MediaItem>[];
+    var leftOut = 0;
+    for (final entry in state.match.matched.entries) {
+      if (entry.key != diveId) {
+        leftOut += entry.value.length;
+        continue;
+      }
+      for (final file in entry.value) {
+        rows.add(await _itemFor(file, id: const Uuid().v4(), diveId: diveId));
+      }
+    }
+    clear();
+    return (rows: rows, leftOut: leftOut);
+  }
+
+  /// The rows [commit] would write for the site [siteId]: every staged
+  /// file, each under a fresh id, built and not written, for a sitting on
+  /// the site that holds them until Save (issue #4527, phase 2). Clears the
+  /// staged files.
+  Future<List<MediaItem>> heldSiteRows(String siteId) async {
+    final rows = <MediaItem>[
+      for (final file in state.files)
+        await _itemFor(file, id: const Uuid().v4(), siteId: siteId),
+    ];
+    clear();
+    return rows;
   }
 
   /// Reverses a prior [commit] by deleting each row by id. Bookmark blobs
@@ -330,19 +376,22 @@ class FilesTabNotifier extends StateNotifier<FilesTabState> {
   /// Writes one row. Exactly one of [diveId] / [siteId] is supplied by
   /// [commit]; the other stays null so the row belongs to one owner and does
   /// not surface in both a dive's grid and a site's.
-  Future<String> _persistOne(
+  Future<MediaItem> _itemFor(
     ExtractedFile file, {
+    String id = '',
     String? diveId,
     String? siteId,
+    String? equipmentId,
+    String? observationId,
   }) async {
     // Asserted, not just documented: neither mistake announces itself. Both
     // set puts the photo in a dive's grid and a site's; neither set writes an
     // ownerless row that shows up in no grid at all, which reads to the user
     // exactly like the import having silently failed.
     assert(
-      (diveId == null) != (siteId == null),
+      [diveId, siteId, equipmentId].where((id) => id != null).length == 1,
       'a Files-tab row belongs to exactly one owner, got '
-      'diveId=$diveId siteId=$siteId',
+      'diveId=$diveId siteId=$siteId equipmentId=$equipmentId',
     );
     // [ExtractedFile.file] is a dart:io File, so its path is always a
     // filesystem path; the factory decides per platform whether that path
@@ -350,11 +399,13 @@ class FilesTabNotifier extends StateNotifier<FilesTabState> {
     final handle = await _handles.create(file.file.path);
 
     final now = DateTime.now();
-    final item = MediaItem(
+    return MediaItem(
       // Empty id triggers UUID generation in MediaRepository.createMedia.
-      id: '',
+      id: id,
       diveId: diveId,
       siteId: siteId,
+      equipmentId: equipmentId,
+      observationId: observationId,
       mediaType: file.metadata.mimeType.startsWith('video/')
           ? MediaType.video
           : MediaType.photo,
@@ -382,7 +433,24 @@ class FilesTabNotifier extends StateNotifier<FilesTabState> {
       createdAt: now,
       updatedAt: now,
     );
+  }
 
+  /// Writes one row. Exactly one of [diveId] / [siteId] / [equipmentId] is
+  /// supplied by [commit].
+  Future<String> _persistOne(
+    ExtractedFile file, {
+    String? diveId,
+    String? siteId,
+    String? equipmentId,
+    String? observationId,
+  }) async {
+    final item = await _itemFor(
+      file,
+      diveId: diveId,
+      siteId: siteId,
+      equipmentId: equipmentId,
+      observationId: observationId,
+    );
     final saved = await mediaRepository.createMedia(item);
     onMediaCreated?.call(saved.id);
     return saved.id;
@@ -405,14 +473,18 @@ final diveBoundsProvider = FutureProvider<List<DiveBounds>>((ref) async {
   final dives = await ref.watch(divesProvider.future);
   return [
     for (final d in dives)
+      // Each window is the dive's as its camera reads it, so a file is
+      // matched on the clock it is later placed by (issue #4539).
       DiveBounds(
         diveId: d.id,
-        entryTime: d.effectiveEntryTime,
-        exitTime:
-            d.exitTime ??
-            d.effectiveEntryTime.add(
-              d.effectiveRuntime ?? const Duration(hours: 1),
-            ),
+        entryTime: DiveMediaClock.onCameraClock(d, d.effectiveEntryTime),
+        exitTime: DiveMediaClock.onCameraClock(
+          d,
+          d.exitTime ??
+              d.effectiveEntryTime.add(
+                d.effectiveRuntime ?? const Duration(hours: 1),
+              ),
+        ),
       ),
   ];
 });

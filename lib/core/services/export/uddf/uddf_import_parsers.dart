@@ -938,6 +938,16 @@ class UddfImportParsers {
       equipmentSet['equipmentRefs'] = itemRefs;
     }
 
+    // The sets this one includes (issue #4525), as set refs in order.
+    final includesElement = setElement.findElements('includes').firstOrNull;
+    if (includesElement != null) {
+      final setRefs = <String>[
+        for (final setRef in includesElement.findElements('setref'))
+          if (setRef.innerText.trim().isNotEmpty) setRef.innerText.trim(),
+      ];
+      if (setRefs.isNotEmpty) equipmentSet['includedSetRefs'] = setRefs;
+    }
+
     return equipmentSet;
   }
 
@@ -990,6 +1000,12 @@ class UddfImportParsers {
       buddy['phone'] = getElementText(personalElement, 'phone');
     }
 
+    // Where the buddy is from (issue #4457), from the UDDF address.
+    final addressElement = buddyElement.findElements('address').firstOrNull;
+    if (addressElement != null) {
+      buddy['country'] = getElementText(addressElement, 'country');
+    }
+
     final certElement = buddyElement.findElements('certification').firstOrNull;
     if (certElement != null) {
       final level = getElementText(certElement, 'level');
@@ -1036,6 +1052,8 @@ class UddfImportParsers {
     site['accessNotes'] = getElementText(siteElement, 'accessnotes');
     site['mooringNumber'] = getElementText(siteElement, 'mooringnumber');
     site['parkingInfo'] = getElementText(siteElement, 'parkinginfo');
+    site['catalogueId'] = getElementText(siteElement, 'catalogueid');
+    site['catalogueAnswers'] = getElementText(siteElement, 'catalogueanswers');
 
     final additionalNotes = getElementText(siteElement, 'sitenotesadditional');
     if (additionalNotes != null) {

@@ -31,6 +31,7 @@ import 'package:submersion/features/certifications/domain/entities/certification
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.dart';
 import 'package:submersion/features/divers/domain/entities/diver.dart';
+import 'package:submersion/features/divers/presentation/dive_owner_display.dart';
 import 'package:submersion/features/signatures/domain/entities/signature.dart';
 import 'package:submersion/features/dive_log/presentation/formatters/visibility_display.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/environment_enum_display.dart';
@@ -169,6 +170,7 @@ class PdfTemplateDetailed extends PdfTemplateBuilder {
             diveTypesById: diveTypesById,
             diveRolesById: diveRolesById,
             equipmentSetNamesById: equipmentSetNamesById,
+            diver: diver,
           ),
         ),
       );
@@ -207,6 +209,7 @@ class PdfTemplateDetailed extends PdfTemplateBuilder {
     required Map<String, DiveRole> diveRolesById,
     required Map<String, String> equipmentSetNamesById,
     Map<String, String> annotationTimes = const {},
+    Diver? diver,
   }) {
     final chart = profile == null
         ? null
@@ -233,7 +236,10 @@ class PdfTemplateDetailed extends PdfTemplateBuilder {
         l10n.pdf_sectionWeather,
         _weatherFields(dive, units: units, l10n: l10n),
       ),
-      ..._section(l10n.pdf_sectionTeam, _teamFields(dive, l10n, diveRolesById)),
+      ..._section(
+        l10n.pdf_sectionTeam,
+        _teamFields(dive, l10n, diveRolesById, diver),
+      ),
       ..._section(
         l10n.pdf_sectionEquipment,
         _equipmentFields(
@@ -446,7 +452,9 @@ class PdfTemplateDetailed extends PdfTemplateBuilder {
     final pressures = <String>[
       if (tank.startPressure != null || tank.endPressure != null)
         pdfPressureRange(units, tank.startPressure, tank.endPressure),
-      if (tank.pressureUsed != null)
+      // An Avelo Hydrotank's drop is the water pumped in and out, not gas
+      // used (issue #4657).
+      if (tank.pressureUsed != null && tank.role.pressureMeasuresGasUse)
         l10n.pdf_pressureUsed(units.formatPressure(tank.pressureUsed)),
     ];
 
@@ -526,11 +534,13 @@ class PdfTemplateDetailed extends PdfTemplateBuilder {
 
   /// Once the `dive_buddies` junction holds anyone it is authoritative, and the
   /// legacy [Dive.buddy] / [Dive.diveMaster] text is stale (#1864). This is the
-  /// same rule as the dive list's Buddy and Dive Master columns.
+  /// same rule as the dive list's Buddy and Dive Master columns. The diver's
+  /// own roles carry the logbook [diver]'s name when the dive is theirs.
   List<_Field> _teamFields(
     Dive dive,
     AppLocalizations l10n,
     Map<String, DiveRole> diveRolesById,
+    Diver? diver,
   ) {
     return [
       // The diver's own roles (#1221), then each person with every role
@@ -541,7 +551,7 @@ class PdfTemplateDetailed extends PdfTemplateBuilder {
             dive.diverRoleIds,
             diveRolesById,
           ).joinedLocalizedNames(l10n),
-          l10n.buddies_picker_me,
+          diveOwnerLabel(diverIfOwner(dive.diverId, diver), l10n),
         ),
       for (final buddy in dive.buddies)
         _Field(buddy.roles.joinedLocalizedNames(l10n), buddy.buddy.name),

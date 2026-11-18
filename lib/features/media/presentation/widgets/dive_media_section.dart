@@ -6,17 +6,18 @@ import 'package:submersion/core/platform/host_platform.dart';
 import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/core/utils/unit_formatter_settings.dart';
-import 'package:submersion/features/dive_log/presentation/providers/dive_repository_provider.dart';
 import 'package:submersion/features/media/presentation/helpers/lightroom_scan_helper.dart';
 import 'package:submersion/features/media/presentation/helpers/media_link_replacer.dart';
 import 'package:submersion/features/media/presentation/providers/lightroom_providers.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_pencil.dart';
 import 'package:submersion/shared/utils/file_reveal.dart';
 import 'package:submersion/features/media/domain/entities/media_source_type.dart';
 import 'package:submersion/features/media/presentation/pages/photo_viewer_page.dart';
 import 'package:submersion/features/media/presentation/providers/media_providers.dart';
 import 'package:submersion/features/media/presentation/widgets/lightroom_suggestions_row.dart';
 import 'package:submersion/features/media/presentation/widgets/media_grid.dart';
+import 'package:submersion/features/media/presentation/widgets/media_hover_region.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/selection/bulk_action.dart';
 import 'package:submersion/shared/selection/selectable_list_scope.dart';
@@ -24,6 +25,14 @@ import 'package:submersion/shared/selection/selection_app_bar.dart';
 import 'package:submersion/shared/selection/selection_controller.dart';
 import 'package:submersion/shared/selection/selection_state.dart';
 import 'package:submersion/shared/widgets/drag_select_grid_view.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
+import 'package:submersion/features/media/presentation/editing/record_media_sitting.dart';
+import 'package:submersion/features/media/presentation/helpers/dive_gallery_scan_in_sitting.dart';
+import 'package:submersion/features/media/presentation/helpers/document_open_helper.dart';
+import 'package:submersion/features/media/presentation/helpers/photo_import_helper.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_controller.dart';
+import 'package:submersion/shared/widgets/record_editing/sitting_load_failed.dart';
 
 /// Returns the OS-appropriate label for the "show file in OS file manager"
 /// menu item used by the right-click context menu.
@@ -51,25 +60,30 @@ String showInOsFileManagerLabel() {
 /// inside it and bulk unlink.
 class DiveMediaSection extends ConsumerStatefulWidget {
   final String diveId;
-  final VoidCallback? onAddPressed;
-  final VoidCallback? onScanPressed;
-
-  /// When provided, the add button becomes a menu offering photos and
-  /// documents; without it the button keeps its historical direct-tap
-  /// behavior for callers not yet migrated.
-  final VoidCallback? onAddDocumentPressed;
 
   /// Invoked when a document tile is tapped (documents never enter the
   /// photo viewer).
   final void Function(MediaItem)? onOpenDocument;
 
+  /// Invoked with the item when a mouse pointer enters its thumbnail, and
+  /// with null when the pointer leaves the item last reported (issue #4524).
+  /// Every item reported is followed by a null before the next item, and a
+  /// leave for any other item is not reported, so the last call always
+  /// names what is under the pointer now. Touch never hovers.
+  final void Function(MediaItem? item)? onHoverMedia;
+
+  /// The open Media card's sitting on the dive (issue #4527): photos and
+  /// documents added, unlinked or relinked go there, held until Save. With
+  /// no sitting given the card reads only: a tap still opens a photo or a
+  /// document.
+  final EditSession<Dive>? editing;
+
   const DiveMediaSection({
     super.key,
     required this.diveId,
-    this.onAddPressed,
-    this.onScanPressed,
-    this.onAddDocumentPressed,
     this.onOpenDocument,
+    this.onHoverMedia,
+    this.editing,
   });
 
   @override
@@ -79,6 +93,10 @@ class DiveMediaSection extends ConsumerStatefulWidget {
 class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
   /// A browser shows the media it can and links none (issue #4121).
   bool get _canAttach => ref.watch(deviceCapabilitiesProvider).mediaAttach;
+
+  /// Whether this card can link, unlink or relink media here and now: only
+  /// the open card can, holding what it changes until Save.
+  bool get _canWrite => _canAttach && widget.editing != null;
 
   /// Owns the bulk-selection state machine for this section.
   ///
@@ -93,18 +111,52 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
   /// post-frame trigger fires once per item rather than on every rebuild.
   final Set<String> _enrichAttempted = {};
 
+  /// The item last reported through [DiveMediaSection.onHoverMedia], and the
+  /// callback it was reported to. Not build state: nothing here draws
+  /// differently for them.
+  String? _hoveredMediaId;
+  void Function(MediaItem? item)? _hoverReportedTo;
+
+  /// Passes a thumbnail's hover on, dropping a leave that is not for the
+  /// item last reported. A removed thumbnail reports its leave after the
+  /// frame ([MediaHoverRegion]), by which time its neighbour may already
+  /// have reported an enter; that late leave must not clear the neighbour.
+  ///
+  /// The leave goes to the callback that was told about the enter. By the
+  /// time a late leave arrives this State may have been handed another
+  /// dive's callback (the page reuses it from dive to dive), and telling
+  /// that one would leave the first dive marked for good.
+  void _onTileHover(MediaItem item, bool hovered) {
+    if (hovered) {
+      // Another thumbnail still marked hovered has not reported its leave
+      // yet (it is the late one). Close it now, so every callback told
+      // about an enter hears the leave that ends it.
+      if (_hoveredMediaId != null && _hoveredMediaId != item.id) {
+        _hoverReportedTo?.call(null);
+      }
+      _hoveredMediaId = item.id;
+      _hoverReportedTo = widget.onHoverMedia;
+      _hoverReportedTo?.call(item);
+    } else if (_hoveredMediaId == item.id) {
+      final reportedTo = _hoverReportedTo;
+      _hoveredMediaId = null;
+      _hoverReportedTo = null;
+      reportedTo?.call(null);
+    }
+  }
+
   @override
   void dispose() {
     _selection.dispose();
     super.dispose();
   }
 
+  /// The open card's Lightroom scan: what it finds is held in the sitting
+  /// until Save (issue #4527).
   Future<void> _scanLightroom(BuildContext context) async {
-    final dive = await ref
-        .read(diveRepositoryProvider)
-        .getDiveById(widget.diveId);
-    if (dive == null || !context.mounted) return;
-    await runLightroomScan(context, ref, [dive]);
+    final editing = widget.editing;
+    if (editing == null) return;
+    await runLightroomScanInSitting(context, ref, editing);
   }
 
   // coverage:ignore-start
@@ -197,41 +249,14 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
       ),
     );
 
-    if (confirmed == true && context.mounted) {
-      try {
-        // Unlink IS the removal: the rows leave the library along with
-        // their cloud proxies and thumbnails, and only a row a dive site
-        // still references survives with its dive link cleared. The
-        // original source files are never touched.
-        await ref
-            .read(mediaListNotifierProvider(widget.diveId).notifier)
-            .unlinkMultipleMedia(selectedIds);
-
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                context.l10n.media_diveMediaSection_unlinkSelectedSuccess(
-                  selectedIds.length,
-                ),
-              ),
-            ),
-          );
-        }
-        return BulkActionOutcome.completed;
-      } catch (e) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(context.l10n.media_diveMediaSection_unlinkError(e)),
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-          );
-        }
-        return BulkActionOutcome.failed;
-      }
+    // The card closed while the dialog was up: there is no sitting to hold
+    // the unlink, so nothing happens.
+    final editing = widget.editing;
+    if (confirmed != true || editing == null) {
+      return BulkActionOutcome.cancelled;
     }
-    return BulkActionOutcome.cancelled;
+    unlinkMediaInSitting(editing, selectedIds.toSet());
+    return BulkActionOutcome.completed;
   }
 
   // coverage:ignore-start
@@ -251,11 +276,15 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
   /// Phase 2 photo-only constraint: picker is restricted to `FileType.image`
   /// (videos aren't supported as local-file media yet, see [FilesTab]).
   Future<void> _replaceLink(MediaItem item) async {
-    final applied = await replaceMediaLink(context, ref, item);
-    // The refresh stays here rather than in the helper: it is dive-scoped,
-    // and the info panel calls the same flow without a dive list to refresh.
-    if (!applied || !mounted) return;
-    await ref.read(mediaListNotifierProvider(widget.diveId).notifier).refresh();
+    // Offered only in the open card, which holds the relink until Save.
+    final editing = widget.editing;
+    if (editing == null) return;
+    await replaceMediaLink(
+      context,
+      ref,
+      item,
+      onHold: (proposal) => replaceLinkInSitting(editing, item.id, proposal),
+    );
   }
 
   /// Opens the right-click context menu for a local-file media item.
@@ -286,7 +315,8 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
             // TODO(media): l10n
             child: Text(showInOsFileManagerLabel()),
           ),
-        if (ref.read(deviceCapabilitiesProvider).mediaAttach)
+        if (ref.read(deviceCapabilitiesProvider).mediaAttach &&
+            widget.editing != null)
           const PopupMenuItem<String>(
             value: 'replace',
             // TODO(media): l10n
@@ -306,7 +336,13 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
 
   @override
   Widget build(BuildContext context) {
-    final mediaAsync = ref.watch(mediaForDiveProvider(widget.diveId));
+    final scope = RecordEditScope.maybeOf<Dive>(context);
+    final session = widget.editing ?? scope?.session;
+    final stored = ref.watch(mediaForDiveProvider(widget.diveId));
+    // During a sitting, the media it holds: added ones in, unlinked out.
+    final mediaAsync = session == null
+        ? stored
+        : stored.whenData((media) => mediaInSitting(session, media));
     _scheduleEnrichmentBackfill(mediaAsync.valueOrNull);
     final settings = ref.watch(unitFormatterProvider).settings;
     final colorScheme = Theme.of(context).colorScheme;
@@ -316,10 +352,17 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
     // unlink can never reach an item that is not on screen.
     final visibleIds =
         mediaAsync.value?.map((m) => m.id).toList() ?? const <String>[];
+    // Judged here, in build: _canWrite watches a provider.
+    final canWrite = _canWrite;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        _selection.pruneToSettled(mediaAsync, (rows) => rows.map((m) => m.id));
+      if (!mounted) return;
+      // A card that can no longer write keeps no selection, so its Unlink
+      // cannot outlive the open card (or reach the stored rows directly).
+      if (!canWrite) {
+        if (_isSelectionMode) _selection.exit();
+        return;
       }
+      _selection.pruneToSettled(mediaAsync, (rows) => rows.map((m) => m.id));
     });
 
     return SelectableListScope(
@@ -341,6 +384,9 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
     TextTheme textTheme,
   ) {
     final selectionMedia = mediaAsync.value ?? const <MediaItem>[];
+    // Only the open card adds, holding what it adds in its sitting.
+    final editing = widget.editing;
+    final adding = _canAttach ? editing : null;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -351,7 +397,7 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
             // Built from the value rather than the data branch, so a reload
             // that holds its rows keeps the bar (and its exit) on screen; the
             // controller disables the row actions while the rows are loading.
-            if (_isSelectionMode)
+            if (_isSelectionMode && _canWrite)
               SelectionAppBar(
                 controller: _selection,
                 selectableIds: selectionMedia.map((m) => m.id).toList(),
@@ -390,7 +436,7 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                   // The only way into selection: entry by long-press was
                   // removed, so nothing but this control opens the mode.
                   mediaAsync.whenOrNull(
-                        data: (media) => media.isEmpty || !_canAttach
+                        data: (media) => media.isEmpty || !_canWrite
                             ? const SizedBox.shrink()
                             : IconButton(
                                 key: const ValueKey('enter_selection'),
@@ -405,7 +451,7 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                               ),
                       ) ??
                       const SizedBox.shrink(),
-                  if (_canAttach && widget.onScanPressed != null)
+                  if (adding != null)
                     IconButton(
                       icon: Icon(
                         Icons.image_search,
@@ -413,11 +459,12 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                       ),
                       visualDensity: VisualDensity.compact,
                       tooltip: context.l10n.media_diveScan_scanTooltip,
-                      onPressed: widget.onScanPressed,
+                      onPressed: () =>
+                          scanGalleryInSitting(context, ref, adding),
                     ),
                   // Lightroom scan hidden pending Adobe review
                   // (lightroomUiEnabled).
-                  if (_canAttach &&
+                  if (_canWrite &&
                       lightroomUiEnabled &&
                       ref.watch(lightroomAccountProvider).value != null)
                     IconButton(
@@ -429,19 +476,7 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                       tooltip: context.l10n.settings_lightroom_scanNow,
                       onPressed: () => _scanLightroom(context),
                     ),
-                  if (_canAttach &&
-                      widget.onAddPressed != null &&
-                      widget.onAddDocumentPressed == null)
-                    IconButton(
-                      icon: Icon(
-                        Icons.add_photo_alternate,
-                        color: colorScheme.primary,
-                      ),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: context.l10n.media_diveMediaSection_addTooltip,
-                      onPressed: widget.onAddPressed,
-                    )
-                  else if (_canAttach && widget.onAddPressed != null)
+                  if (adding != null)
                     PopupMenuButton<String>(
                       icon: Icon(
                         Icons.add_photo_alternate,
@@ -449,9 +484,21 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                       ),
                       tooltip: context.l10n.media_diveMediaSection_addTooltip,
                       onSelected: (value) {
-                        if (value == 'photos') widget.onAddPressed!();
+                        if (value == 'photos') {
+                          PhotoImportHelper.importPhotosForDive(
+                            context: context,
+                            ref: ref,
+                            dive: adding.working,
+                            onHold: (adds) => addMediaToSitting(adding, adds),
+                          );
+                        }
                         if (value == 'document') {
-                          widget.onAddDocumentPressed!();
+                          DocumentOpenHelper.pickAndAttach(
+                            context: context,
+                            ref: ref,
+                            diveId: widget.diveId,
+                            onHold: (adds) => addMediaToSitting(adding, adds),
+                          );
                         }
                       },
                       itemBuilder: (context) => [
@@ -469,6 +516,10 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                         ),
                       ],
                     ),
+                  // Its pencil, while the dive is unlocked.
+                  RecordCardPencil(
+                    cardTitle: context.l10n.media_diveMediaSection_title,
+                  ),
                 ],
               ),
             const SizedBox(height: 16),
@@ -508,7 +559,16 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                   onSelectionModeChanged: (_) {},
                   onItemTap: (index) {
                     final item = media[index];
+                    final scope = RecordEditScope.maybeOf<Dive>(context);
+                    final session = widget.editing ?? scope?.session;
                     if (item.isDocument) {
+                      // A document held until Save has no file to open yet.
+                      if (session != null &&
+                          sittingMedia(
+                            session,
+                          ).added.any((a) => a.preview.id == item.id)) {
+                        return;
+                      }
                       widget.onOpenDocument?.call(item);
                       return;
                     }
@@ -518,6 +578,10 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                         builder: (_) => PhotoViewerPage(
                           diveId: widget.diveId,
                           initialMediaId: item.id,
+                          // The photos as the dive's sitting has them, so a
+                          // photo held for Save opens on itself; with no row
+                          // it cannot be unlocked, and reads only.
+                          diveEditing: scope,
                         ),
                       ),
                     );
@@ -527,16 +591,6 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                     crossAxisSpacing: 8,
                     mainAxisSpacing: 8,
                   ),
-                  // coverage:ignore-start
-                  // The itemBuilder closure only fires when the dive has
-                  // media; this widget has no tests that render media (the
-                  // suite would need a populated DB + asset resolver
-                  // pipeline), so the closure is unreachable from
-                  // flutter_test. The right-click context menu wired via
-                  // `onSecondaryTapDown` is also desktop-only — touchscreens
-                  // never fire it, and `flutter_test` lacks a trackpad
-                  // driver. Both are exercised by manual desktop smoke
-                  // tests.
                   itemBuilder: (context, item, isSelected) {
                     final thumbnail = MediaThumbnailTile(
                       item: item,
@@ -546,24 +600,46 @@ class _DiveMediaSectionState extends ConsumerState<DiveMediaSection> {
                       semanticsLabel:
                           context.l10n.media_diveMediaSection_thumbnailLabel,
                     );
-                    return GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onSecondaryTapDown: (details) =>
-                          _showLocalFileContextMenu(context, item, details),
-                      child: thumbnail,
+                    return MediaHoverRegion(
+                      // By item, not by grid slot: the grid keys its cells by
+                      // index, so when an item is unlinked its neighbour takes
+                      // over the same cell, and without this the cell would
+                      // stay "hovered" for the item that left.
+                      key: ValueKey(item.id),
+                      onHoverChanged: (hovered) => _onTileHover(item, hovered),
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        // coverage:ignore-start
+                        // The right-click context menu is desktop-only:
+                        // touchscreens never fire it and no test drives a
+                        // secondary tap here. It is exercised by manual
+                        // desktop smoke tests.
+                        onSecondaryTapDown: (details) =>
+                            _showLocalFileContextMenu(context, item, details),
+                        // coverage:ignore-end
+                        child: thumbnail,
+                      ),
                     );
                   },
-                  // coverage:ignore-end
                 );
               },
               loading: () => const SizedBox(
                 height: 100,
                 child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
               ),
-              error: (error, stack) => Text(
-                context.l10n.media_diveMediaSection_errorLoading,
-                style: textTheme.bodyMedium?.copyWith(color: colorScheme.error),
-              ),
+              // The open card offers to read again, as every card of a
+              // sitting does (issue #4527).
+              error: (error, stack) => widget.editing != null
+                  ? SittingLoadFailed(
+                      onRetry: () =>
+                          ref.invalidate(mediaForDiveProvider(widget.diveId)),
+                    )
+                  : Text(
+                      context.l10n.media_diveMediaSection_errorLoading,
+                      style: textTheme.bodyMedium?.copyWith(
+                        color: colorScheme.error,
+                      ),
+                    ),
             ),
             // Lightroom suggestions hidden pending Adobe review
             // (lightroomUiEnabled).

@@ -56,6 +56,11 @@ class DefaultVisibleMetricsPage extends ConsumerWidget {
             onChanged: notifier.setDefaultShowSac,
           ),
           SwitchListTile(
+            title: Text(context.l10n.settings_appearance_metric_buoyancy),
+            value: settings.defaultShowBuoyancy,
+            onChanged: notifier.setDefaultShowBuoyancy,
+          ),
+          SwitchListTile(
             title: Text(context.l10n.settings_appearance_metric_events),
             value: settings.defaultShowEvents,
             onChanged: notifier.setDefaultShowEvents,
@@ -134,6 +139,13 @@ class DefaultVisibleMetricsPage extends ConsumerWidget {
             title: Text(context.l10n.settings_appearance_metric_ppHe),
             value: settings.defaultShowPpHe,
             onChanged: notifier.setDefaultShowPpHe,
+          ),
+          SwitchListTile(
+            title: Text(
+              context.l10n.settings_appearance_metric_counterdiffusion,
+            ),
+            value: settings.defaultShowCounterdiffusion,
+            onChanged: notifier.setDefaultShowCounterdiffusion,
           ),
           SwitchListTile(
             title: Text(context.l10n.settings_appearance_metric_gasDensity),

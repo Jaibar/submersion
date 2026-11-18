@@ -182,6 +182,22 @@ void main() {
     );
   });
 
+  test('a deleted dive rated off the star scale returns on it', () async {
+    // A UDDF import stored the file's 1 to 10 rating before v358 (#4415).
+    await db.customStatement("UPDATE dives SET rating = 8 WHERE id = 'dive'");
+    await forget();
+    await DiveRepository().deleteDive('dive');
+
+    final plan = await service.planOperation(await newestOperation());
+    final result = await service.execute(plan);
+
+    expect(result.reverted, greaterThan(0));
+    final row = await db
+        .customSelect("SELECT rating FROM dives WHERE id = 'dive'")
+        .getSingle();
+    expect(row.data['rating'], 4);
+  });
+
   test('a null with a non-null default comes back null', () async {
     await db.customStatement(
       'INSERT INTO diver_settings (id, diver_id, default_tank_preset, '
@@ -363,6 +379,64 @@ void main() {
       expect(result.kept, 1);
       expect(result.keptItems.single.event.recordId, 'reef');
     });
+
+    test('a site linked in the same operation goes, and the link with it, '
+        'since the revert takes the link back too', () async {
+      await ChangeLogScope.run(
+        db,
+        source: ChangeLogSource.agent,
+        body: () async {
+          await db.customStatement(
+            'INSERT INTO dive_sites (id, diver_id, name, created_at, '
+            "updated_at) VALUES ('reef', 'me', 'Reef', 0, 0)",
+          );
+          await db.customStatement(
+            "UPDATE dives SET site_id = 'reef' WHERE id = 'dive'",
+          );
+        },
+      );
+      final operation = await newestOperation();
+      await repository.settleAll();
+
+      final plan = await service.planOperation(operation);
+
+      expect(plan.items.where((i) => i.isBlocked), isEmpty);
+      await service.execute(plan);
+      expect(await count('dive_sites', "id = 'reef'"), 0);
+      expect(await count('dives', "id = 'dive' AND site_id IS NULL"), 1);
+    });
+
+    test(
+      'a site linked in the same operation and again later is kept',
+      () async {
+        await ChangeLogScope.run(
+          db,
+          source: ChangeLogSource.agent,
+          body: () async {
+            await db.customStatement(
+              'INSERT INTO dive_sites (id, diver_id, name, created_at, '
+              "updated_at) VALUES ('reef', 'me', 'Reef', 0, 0)",
+            );
+            await db.customStatement(
+              "UPDATE dives SET site_id = 'reef' WHERE id = 'dive'",
+            );
+          },
+        );
+        final operation = await newestOperation();
+        await insertDive(db, 'later', diverId: 'me');
+        await db.customStatement(
+          "UPDATE dives SET site_id = 'reef' WHERE id = 'later'",
+        );
+        await repository.settleAll();
+
+        final plan = await service.planOperation(operation);
+
+        final site = plan.items.singleWhere(
+          (i) => i.event.table == 'dive_sites',
+        );
+        expect(site.block, ChangeLogBlock.inUse);
+      },
+    );
 
     test(
       'imported gear on a later dive is kept and that dive is untouched',

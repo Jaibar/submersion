@@ -10,6 +10,7 @@ import 'package:submersion/core/services/change_log/change_log_scope.dart';
 import 'package:submersion/core/services/database_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
 import 'package:submersion/core/text/text_sort.dart';
 import 'package:submersion/core/util/wall_clock_utc.dart';
 import 'package:submersion/features/buddies/domain/entities/buddy.dart'
@@ -17,6 +18,7 @@ import 'package:submersion/features/buddies/domain/entities/buddy.dart'
 import 'package:submersion/features/buddies/domain/entities/buddy_with_dive_count.dart';
 import 'package:submersion/features/buddies/domain/entities/legacy_buddy_conversion.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_card_columns.dart';
+import 'package:submersion/features/buddies/data/repositories/buddy_country_columns.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_conversion_repository.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_merge_repository.dart';
 import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
@@ -106,6 +108,33 @@ class BuddyRepository {
   Stream<void> watchBuddiesChanges() =>
       _db.tableUpdates(TableUpdateQuery.onTable(_db.buddies));
 
+  /// Emits whenever a buddy as the hydrated reads return it may change: its
+  /// `buddies` row, a `certifications` row its primary certification is
+  /// derived from, or a custom agency or level that ranks and titles it (see
+  /// [_withPrimaryCerts]). The buddy edit form writes the certifications
+  /// after the buddy row, so a reader that follows only [watchBuddiesChanges]
+  /// reloads too early and keeps the old level (issue #4496). Readers that
+  /// use only the buddy rows stay on [watchBuddiesChanges].
+  Stream<void> watchHydratedBuddiesChanges() => _db.tableUpdates(
+    TableUpdateQuery.allOf([
+      TableUpdateQuery.onTable(_db.buddies),
+      ..._primaryCertificationTables,
+    ]),
+  );
+
+  /// [watchHydratedBuddiesChanges] without the `buddies` table, for a reader
+  /// that already follows `buddies` through another stream (a debounced one,
+  /// which an undebounced `buddies` tick here would defeat).
+  Stream<void> watchPrimaryCertificationChanges() =>
+      _db.tableUpdates(TableUpdateQuery.allOf(_primaryCertificationTables));
+
+  /// The tables [_withPrimaryCerts] derives a buddy's primary cert from.
+  List<TableUpdateQuery> get _primaryCertificationTables => [
+    TableUpdateQuery.onTable(_db.certifications),
+    TableUpdateQuery.onTable(_db.customCertificationAgencies),
+    TableUpdateQuery.onTable(_db.customCertificationLevels),
+  ];
+
   /// Get all buddies ordered by name
   Future<List<domain.Buddy>> getAllBuddies({String? diverId}) async {
     try {
@@ -149,9 +178,10 @@ class BuddyRepository {
     String query, {
     String? diverId,
   }) async {
-    final searchTerm = '%${query.toLowerCase()}%';
+    final searchTerm = '%${foldForSearch(query)}%';
     final diverFilter = diverId != null ? 'AND diver_id = ?' : '';
     final variables = [
+      Variable.withString(searchTerm),
       Variable.withString(searchTerm),
       Variable.withString(searchTerm),
       Variable.withString(searchTerm),
@@ -160,9 +190,10 @@ class BuddyRepository {
 
     final results = await _db.customSelect('''
       SELECT * FROM buddies
-      WHERE (unicode_lower(name) LIKE ?
-         OR unicode_lower(email) LIKE ?
-         OR phone LIKE ?)
+      WHERE (search_fold(name) LIKE ?
+         OR search_fold(email) LIKE ?
+         OR phone LIKE ?
+         OR search_fold(country) LIKE ?)
       $diverFilter
       ORDER BY name COLLATE NOCASE ASC
     ''', variables: variables).get();
@@ -175,6 +206,30 @@ class BuddyRepository {
     return _withPrimaryCerts(buddies);
   }
 
+  /// The distinct countries written on buddies (issue #4457), for the
+  /// Country field's suggestions; [diverId] narrows them to that diver's
+  /// people. Reads only the one column, not whole buddies.
+  Future<List<String>> getUsedCountries({String? diverId}) async {
+    try {
+      final rows = await _db
+          .customSelect(
+            'SELECT DISTINCT country FROM buddies '
+            "WHERE country IS NOT NULL AND TRIM(country) != ''"
+            '${diverId == null ? '' : ' AND diver_id = ?'}',
+            variables: [if (diverId != null) Variable.withString(diverId)],
+          )
+          .get();
+      return [for (final row in rows) row.read<String>('country')];
+    } catch (e, stackTrace) {
+      _log.error(
+        'Failed to read buddy countries',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
   /// Create a new buddy
   Future<domain.Buddy> createBuddy(domain.Buddy buddy) async {
     try {
@@ -182,11 +237,17 @@ class BuddyRepository {
       final id = buddy.id.isEmpty ? _uuid.v4() : buddy.id;
       final now = DateTime.now();
 
+      final country = BuddyCountryColumns.of(
+        country: buddy.country,
+        code: buddy.countryCode,
+      );
       await _db
           .into(_db.buddies)
           .insert(
             BuddyCardColumns.of(buddy).copyWith(
               id: Value(id),
+              country: country.country,
+              countryCode: country.countryCode,
               diverId: Value(buddy.diverId),
               linkedDiverId: Value(buddy.linkedDiverId),
               name: Value(buddy.name),
@@ -210,7 +271,14 @@ class BuddyRepository {
       SyncEventBus.notifyLocalChange();
 
       _log.info('Created buddy with id: $id');
-      return buddy.copyWith(id: id, createdAt: now, updatedAt: now);
+      return buddy.copyWith(
+        id: id,
+        country: country.country.value,
+        countryCode: country.countryCode.value,
+        clearCountry: country.country.value == null,
+        createdAt: now,
+        updatedAt: now,
+      );
     } catch (e, stackTrace) {
       _log.error(
         'Failed to create buddy: ${buddy.name}',
@@ -302,11 +370,23 @@ class BuddyRepository {
     try {
       _log.info('Updating buddy: ${buddy.id}');
       final now = DateTime.now().millisecondsSinceEpoch;
+      final stored = await (_db.select(
+        _db.buddies,
+      )..where((t) => t.id.equals(buddy.id))).getSingleOrNull();
+      final country = BuddyCountryColumns.of(
+        country: buddy.country,
+        code: buddy.countryCode,
+        before: stored == null
+            ? null
+            : (country: stored.country, code: stored.countryCode),
+      );
 
       await (_db.update(
         _db.buddies,
       )..where((t) => t.id.equals(buddy.id))).write(
         BuddyCardColumns.of(buddy).copyWith(
+          country: country.country,
+          countryCode: country.countryCode,
           diverId: Value(buddy.diverId),
           linkedDiverId: Value(buddy.linkedDiverId),
           name: Value(buddy.name),
@@ -345,7 +425,9 @@ class BuddyRepository {
     if (partial.toColumns(false).isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     await (_db.update(_db.buddies)..where((t) => t.id.equals(id))).write(
-      partial.copyWith(updatedAt: Value(now)),
+      BuddyCountryColumns.withDerivedCode(
+        partial,
+      ).copyWith(updatedAt: Value(now)),
     );
     await _syncRepository.markRecordPending(
       entityType: 'buddies',
@@ -618,40 +700,69 @@ class BuddyRepository {
     };
   }
 
-  /// Set buddies for a dive (replaces existing). Each person's roles are
-  /// written to `dive_buddy_roles` (issue #1221); a buddy who left the dive
-  /// loses their role rows.
+  /// Makes [buddies] the dive's buddies. Each person's roles are written to
+  /// `dive_buddy_roles` (issue #1221); a buddy who left the dive loses their
+  /// role rows. Only what changed is written (see [_writeDiveBuddies]).
   Future<void> setBuddiesForDive(
     String diveId,
     List<domain.BuddyWithRole> buddies,
   ) async {
-    // Delete existing dive buddies
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (await _writeDiveBuddies(diveId, buddies, now)) {
+      await _bumpDive(diveId, now);
+    }
+    SyncEventBus.notifyLocalChange();
+  }
+
+  /// Makes [buddies] the buddies of [diveId], writing only what changed
+  /// (issue #4477): a buddy who stays keeps their link row; a dropped buddy's
+  /// links are deleted; an added buddy gets a link under a fresh id. Rewriting
+  /// every link left a revert restoring old rows beside their replacements.
+  /// A buddy linked twice (#3895) is left with one link, as the full rewrite
+  /// left them, and a buddy listed twice in [buddies] takes their first entry.
+  /// A kept link's primary role is brought in line by [_writeRoleSets].
+  ///
+  /// Returns whether any link or role row changed, so the caller bumps the
+  /// dive.
+  Future<bool> _writeDiveBuddies(
+    String diveId,
+    List<domain.BuddyWithRole> buddies,
+    int now,
+  ) async {
     final existing = await (_db.select(
       _db.diveBuddies,
     )..where((t) => t.diveId.equals(diveId))).get();
-    await (_db.delete(
-      _db.diveBuddies,
-    )..where((t) => t.diveId.equals(diveId))).go();
+    final wanted = <String, domain.BuddyWithRole>{};
+    for (final bwr in buddies) {
+      wanted.putIfAbsent(bwr.buddy.id, () => bwr);
+    }
+
+    final kept = <String>{};
+    var changed = false;
     for (final row in existing) {
+      if (wanted.containsKey(row.buddyId) && kept.add(row.buddyId)) continue;
+      await (_db.delete(
+        _db.diveBuddies,
+      )..where((t) => t.id.equals(row.id))).go();
       await _syncRepository.logDeletion(
         entityType: 'diveBuddies',
         recordId: row.id,
       );
+      changed = true;
     }
 
-    // Insert new dive buddies
-    final now = DateTime.now().millisecondsSinceEpoch;
-    await _insertLinks(diveId, buddies, now);
-    await _writeRoleSets(diveId, existing, buddies, now);
-    await (_db.update(_db.dives)..where((t) => t.id.equals(diveId))).write(
-      DivesCompanion(updatedAt: Value(now)),
+    final added = [
+      for (final bwr in wanted.values)
+        if (!kept.contains(bwr.buddy.id)) bwr,
+    ];
+    await _insertLinks(diveId, added, now);
+    final rolesChanged = await _writeRoleSets(
+      diveId,
+      existing,
+      wanted.values.toList(),
+      now,
     );
-    await _syncRepository.markRecordPending(
-      entityType: 'dives',
-      recordId: diveId,
-      localUpdatedAt: now,
-    );
-    SyncEventBus.notifyLocalChange();
+    return changed || added.isNotEmpty || rolesChanged;
   }
 
   /// One fresh `dive_buddies` row per entry of [buddies], carrying the
@@ -682,27 +793,31 @@ class BuddyRepository {
     }
   }
 
-  /// After a dive's links were replaced: drops the role rows of everyone in
-  /// [previous] who is not in [buddies], and writes each entry's set.
-  Future<void> _writeRoleSets(
+  /// Once a dive's links are in place: drops the role rows of everyone in
+  /// [previous] who is not in [buddies], and writes each entry's set, which
+  /// also sets a kept link's primary role. Returns whether any row was
+  /// written.
+  Future<bool> _writeRoleSets(
     String diveId,
     List<DiveBuddy> previous,
     List<domain.BuddyWithRole> buddies,
     int now,
   ) async {
     final kept = {for (final b in buddies) b.buddy.id};
-    await _roleLinks.deleteBuddyRoles(diveId, {
+    var changed = await _roleLinks.deleteBuddyRoles(diveId, {
       for (final row in previous)
         if (!kept.contains(row.buddyId)) row.buddyId,
     });
     for (final bwr in buddies) {
-      await _roleLinks.writeBuddyRoles(
+      final wrote = await _roleLinks.writeBuddyRoles(
         diveId,
         bwr.buddy.id,
         bwr.roleIds,
         now: now,
       );
+      changed = changed || wrote;
     }
+    return changed;
   }
 
   /// Add a buddy to a dive in one role. [roleId] is a dive_roles id (see
@@ -888,8 +1003,9 @@ class BuddyRepository {
     }
   }
 
-  /// Replace each dive's buddy set with exactly [buddies], roles included.
-  /// No notify/transaction.
+  /// Replace each dive's buddy set with exactly [buddies], roles included,
+  /// writing only what changed (see [_writeDiveBuddies]). No
+  /// notify/transaction.
   Future<void> bulkReplaceBuddies(
     List<String> diveIds,
     List<domain.BuddyWithRole> buddies,
@@ -897,21 +1013,9 @@ class BuddyRepository {
     if (diveIds.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     for (final diveId in diveIds) {
-      final existing = await (_db.select(
-        _db.diveBuddies,
-      )..where((t) => t.diveId.equals(diveId))).get();
-      await (_db.delete(
-        _db.diveBuddies,
-      )..where((t) => t.diveId.equals(diveId))).go();
-      for (final row in existing) {
-        await _syncRepository.logDeletion(
-          entityType: 'diveBuddies',
-          recordId: row.id,
-        );
+      if (await _writeDiveBuddies(diveId, buddies, now)) {
+        await _bumpDive(diveId, now);
       }
-      await _insertLinks(diveId, buddies, now);
-      await _writeRoleSets(diveId, existing, buddies, now);
-      await _bumpDive(diveId, now);
     }
   }
 
@@ -937,14 +1041,14 @@ class BuddyRepository {
         if (diverId != null) 'b.diver_id = ?',
         if (idList != null) 'b.id IN $idList',
         if (query != null && query.isNotEmpty)
-          '(unicode_lower(b.name) LIKE ? OR unicode_lower(b.email) LIKE ? '
-              'OR b.phone LIKE ?)',
+          '(search_fold(b.name) LIKE ? OR search_fold(b.email) LIKE ? '
+              'OR b.phone LIKE ? OR search_fold(b.country) LIKE ?)',
       ];
       final where = conditions.isEmpty
           ? ''
           : 'WHERE ${conditions.join(' AND ')}';
       final searchTerm = query != null && query.isNotEmpty
-          ? '%${query.toLowerCase()}%'
+          ? '%${foldForSearch(query)}%'
           : null;
       final idVariables = [...?ids?.map(Variable.withString)];
       final variables = [
@@ -953,6 +1057,7 @@ class BuddyRepository {
         if (diverId != null) Variable.withString(diverId),
         ...idVariables,
         if (searchTerm != null) ...[
+          Variable.withString(searchTerm),
           Variable.withString(searchTerm),
           Variable.withString(searchTerm),
           Variable.withString(searchTerm),
@@ -1249,6 +1354,24 @@ class BuddyRepository {
     newBuddyNote: newBuddyNote,
   );
 
+  Future<({List<({String buddyId, String roleId})> links, Set<String> toClaim})>
+  resolveLegacyForSitting(
+    ConversionPlan plan, {
+    required String diverId,
+    required String newBuddyNote,
+  }) => BuddyConversionRepository().resolveForSitting(
+    plan,
+    diverId: diverId,
+    newBuddyNote: newBuddyNote,
+  );
+
+  /// Claims each of [ids] for [diverId] where still unowned (a dive's
+  /// sitting saved, issue #4527).
+  Future<void> claimUnownedBuddies(
+    Iterable<String> ids, {
+    required String diverId,
+  }) => BuddyConversionRepository().claimUnowned(ids, diverId: diverId);
+
   Future<void> undoLegacyConversion(ConversionReceipt receipt) =>
       BuddyConversionRepository().undo(receipt);
 
@@ -1295,6 +1418,8 @@ class BuddyRepository {
       name: row.name,
       email: row.email,
       phone: row.phone,
+      country: row.country,
+      countryCode: row.countryCode,
       // Derived at hydration from the certifications table (issue #553);
       // _withPrimaryCerts overwrites these on the read paths.
       certificationLevel: null,

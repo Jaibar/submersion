@@ -741,6 +741,33 @@ void main() {
       expect(captured.map((m) => m.diveId), [null, null]);
     });
 
+    test(
+      'files tab stamps equipment and check-in on an equipment session',
+      () async {
+        // Gear photos (issue #3355): an equipment session owns every file,
+        // like a site session, and stamps the check-in it was opened from.
+        final notifier = container.read(filesTabNotifierProvider.notifier);
+        final a = _ef('/a.jpg');
+        notifier.setFiles([
+          a,
+        ], match: MatchedSelection(matched: const {}, unmatched: [a]));
+        final captured = <MediaItem>[];
+        when(mockRepo.createMedia(any)).thenAnswer((invocation) async {
+          captured.add(invocation.positionalArguments.first as MediaItem);
+          return _saved('saved-1');
+        });
+
+        await notifier.commit(
+          target: const EquipmentAttachTarget('reg-1', observationId: 'obs-1'),
+        );
+
+        expect(captured.single.equipmentId, 'reg-1');
+        expect(captured.single.observationId, 'obs-1');
+        expect(captured.single.diveId, isNull);
+        expect(captured.single.siteId, isNull);
+      },
+    );
+
     test('persists files the dive matcher rejected', () async {
       // The exact state from the issue: auto-match ran, matched no dive, and
       // parked everything in `unmatched`. Under the dive-keyed commit this
@@ -936,6 +963,27 @@ void main() {
       expect(bounds.single.diveId, 'dive-1');
       expect(bounds.single.entryTime, DateTime.utc(2025, 12, 27, 11, 26));
       expect(bounds.single.exitTime, DateTime.utc(2025, 12, 27, 12, 9));
+    });
+
+    // Issue #4539: files are matched on the clock they are later placed by.
+    test("moves a dive's window by its media time shift", () async {
+      final dive = Dive(
+        id: 'dive-3',
+        dateTime: DateTime.utc(2025, 12, 27, 11, 26),
+        exitTime: DateTime.utc(2025, 12, 27, 12, 9),
+        mediaTimeOffsetSeconds: -21600,
+      );
+      final boundsContainer = ProviderContainer(
+        overrides: [
+          divesProvider.overrideWith((ref) async => [dive]),
+        ],
+      );
+      addTearDown(boundsContainer.dispose);
+
+      final bounds = await boundsContainer.read(diveBoundsProvider.future);
+
+      expect(bounds.single.entryTime, DateTime.utc(2025, 12, 27, 17, 26));
+      expect(bounds.single.exitTime, DateTime.utc(2025, 12, 27, 18, 9));
     });
 
     test('falls back to entry plus one hour with no exit or runtime', () async {

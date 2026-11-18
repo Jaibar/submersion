@@ -3,6 +3,8 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'package:submersion/features/dive_log/presentation/utils/chart_drag_crossing.dart';
+
 /// One stretch of the dive in [SacTimeColumns].
 class SacTimeColumn {
   /// Where the column starts on the time axis, in seconds from dive start.
@@ -108,8 +110,13 @@ class SacTimeColumns extends StatelessWidget {
   /// mark.
   static const double _minHeightFactor = 0.03;
 
-  /// Marks the selected column, since every column is at full color.
-  static const double _selectedOutlineWidth = 1.5;
+  /// How much of its color a column keeps while another one is picked, so
+  /// the picked column is the only one at full strength (issue #4697).
+  static const double unpickedAlpha = 0.35;
+
+  /// Outlines the picked column as well, so the pick does not rest on color
+  /// alone.
+  static const double _selectedOutlineWidth = 2;
 
   final List<SacTimeColumn> columns;
 
@@ -129,6 +136,10 @@ class SacTimeColumns extends StatelessWidget {
   final ValueChanged<int> onScrub;
   final ValueChanged<int?> onHover;
 
+  /// The dive time under a hovering or dragging pointer, in seconds, then
+  /// null when it leaves or lifts. Drives the profile cursor (#4423).
+  final ValueChanged<int?>? onCursorSeconds;
+
   const SacTimeColumns({
     super.key,
     required this.columns,
@@ -139,6 +150,7 @@ class SacTimeColumns extends StatelessWidget {
     required this.onTap,
     required this.onScrub,
     required this.onHover,
+    this.onCursorSeconds,
   });
 
   /// The empty time ahead of the column at [index].
@@ -146,12 +158,26 @@ class SacTimeColumns extends StatelessWidget {
       columns[index].startSeconds -
       (index == 0 ? 0 : columns[index - 1].endSeconds);
 
+  /// The dive time at [dx]: the plot runs linearly from 0 to the last
+  /// column's end.
+  double _secondsAt(double plotWidth, double dx) =>
+      (dx / plotWidth).clamp(0.0, 1.0) * columns.last.endSeconds;
+
   /// The column at [dx], or the next one when [dx] falls in a gap.
   int _indexAt(double plotWidth, double dx) {
-    final fraction = (dx / plotWidth).clamp(0.0, 1.0);
-    final seconds = fraction * columns.last.endSeconds;
+    final seconds = _secondsAt(plotWidth, dx);
     final index = columns.indexWhere((c) => seconds <= c.endSeconds);
     return index < 0 ? columns.length - 1 : index;
+  }
+
+  void _hoverAt(double plotWidth, double dx) {
+    onHover(_indexAt(plotWidth, dx));
+    onCursorSeconds?.call(_secondsAt(plotWidth, dx).round());
+  }
+
+  void _scrubAt(double plotWidth, double dx) {
+    onScrub(_indexAt(plotWidth, dx));
+    onCursorSeconds?.call(_secondsAt(plotWidth, dx).round());
   }
 
   @override
@@ -206,19 +232,36 @@ class SacTimeColumns extends StatelessWidget {
     );
   }
 
+  /// The fill of the column at [index]: full strength when it is picked or
+  /// nothing is, faded while another column is picked.
+  Color _fill(ColorScheme colorScheme, int index) {
+    final color = columns[index].color ?? colorScheme.primary;
+    final faded = activeIndex != null && index != activeIndex;
+    return faded ? color.withValues(alpha: unpickedAlpha) : color;
+  }
+
   Widget _plot(ThemeData theme, double width) {
     final colorScheme = theme.colorScheme;
     return MouseRegion(
-      onHover: (event) => onHover(_indexAt(width, event.localPosition.dx)),
-      onExit: (_) => onHover(null),
+      onHover: (event) => _hoverAt(width, event.localPosition.dx),
+      onExit: (event) {
+        onHover(null);
+        // A scrub that strays off the plot goes on until its drag ends,
+        // which clears the cursor (issue #4611).
+        if (!isDragCrossing(event)) onCursorSeconds?.call(null);
+      },
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         excludeFromSemantics: true,
         onTapUp: (details) => onTap(_indexAt(width, details.localPosition.dx)),
         onHorizontalDragStart: (details) =>
-            onScrub(_indexAt(width, details.localPosition.dx)),
+            _scrubAt(width, details.localPosition.dx),
         onHorizontalDragUpdate: (details) =>
-            onScrub(_indexAt(width, details.localPosition.dx)),
+            _scrubAt(width, details.localPosition.dx),
+        // Lifting clears the profile cursor, as it does on the profile chart;
+        // the scrubbed column stays pinned in the card.
+        onHorizontalDragEnd: (_) => onCursorSeconds?.call(null),
+        onHorizontalDragCancel: () => onCursorSeconds?.call(null),
         child: Stack(
           fit: StackFit.expand,
           children: [
@@ -251,12 +294,16 @@ class SacTimeColumns extends StatelessWidget {
                           ),
                           child: DecoratedBox(
                             decoration: BoxDecoration(
-                              color:
-                                  columns[i].color ?? theme.colorScheme.primary,
+                              color: _fill(colorScheme, i),
                               border: i == activeIndex
                                   ? Border.all(
-                                      color: theme.colorScheme.onSurface,
+                                      color: colorScheme.onSurface,
                                       width: _selectedOutlineWidth,
+                                      // Centered on the edge: half inside, so
+                                      // a short column keeps its color, and
+                                      // half in the 1 px gap, so no neighbour
+                                      // paints over it.
+                                      strokeAlign: BorderSide.strokeAlignCenter,
                                     )
                                   : null,
                               borderRadius: const BorderRadius.vertical(

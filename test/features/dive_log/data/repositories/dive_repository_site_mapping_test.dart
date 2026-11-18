@@ -34,6 +34,7 @@ void main() {
     difficulty: SiteDifficulty.advanced,
     waterType: WaterType.fresh,
     country: 'Switzerland',
+    countryCode: 'CH',
     region: 'Lucerne',
     city: 'Weggis',
     island: 'None',
@@ -48,6 +49,7 @@ void main() {
     entryMethods: [EntryMethod.shore],
     exitMethods: [EntryMethod.ladder],
     isShared: true,
+    catalogueId: 'osm_node_1',
   );
 
   Dive diveAt(DiveSite site) => Dive(

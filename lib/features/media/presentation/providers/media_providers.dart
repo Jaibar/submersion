@@ -40,16 +40,15 @@ final diveMediaEnricherProvider = Provider<DiveMediaEnricher>((ref) {
     loadDive: diveRepo.getDiveById,
     loadMediaForDive: mediaRepo.getMediaForDive,
     saveEnrichments: mediaRepo.saveEnrichments,
+    loadPrimarySourceEntry: diveRepo.getPrimarySourceEntry,
   );
 });
 
-/// Applies the Set-time dialog's choice (issue #1090): one media-row write
-/// plus one enrichment pass, so the new position lands on the next tick.
+/// What the Set-time dialog needs to offer (issue #1090); the choice is
+/// held in the photo's sitting and written by its Save (issue #4527).
+// no-tick: a service rather than a cached query result.
 final mediaTimePinnerProvider = Provider<MediaTimePinner>((ref) {
-  return MediaTimePinner(
-    repository: ref.watch(mediaRepositoryProvider),
-    enricher: ref.watch(diveMediaEnricherProvider),
-  );
+  return MediaTimePinner(enricher: ref.watch(diveMediaEnricherProvider));
 });
 
 /// The one implementation of "unlink from a dive", shared by the Media
@@ -181,17 +180,6 @@ class MediaListNotifier extends StateNotifier<AsyncValue<List<MediaItem>>> {
   Future<void> deleteMultipleMedia(List<String> ids) async {
     await _ref.read(mediaDeletionCoordinatorProvider).deleteMultipleMedia(ids);
     await refresh();
-  }
-
-  /// Unlinks from the dive: the rows leave the library, along with their
-  /// cloud proxies and thumbnails, unless a dive site still needs them.
-  /// Original source files are never touched. See [MediaUnlinkService].
-  Future<UnlinkOutcome> unlinkMultipleMedia(List<String> ids) async {
-    final outcome = await _ref
-        .read(mediaUnlinkServiceProvider)
-        .unlinkFromDive(ids);
-    await refresh();
-    return outcome;
   }
 
   /// Mark a media item as orphaned (photo deleted from gallery)

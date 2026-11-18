@@ -5,6 +5,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'package:submersion/core/providers/provider.dart';
+import 'package:submersion/core/utils/number_display.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_type_badge_row.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/environment_enum_display.dart';
@@ -26,15 +27,17 @@ import 'package:submersion/shared/selection/selection_leading.dart';
 import 'package:submersion/shared/widgets/entity_card/card_slot_resolver.dart';
 import 'package:submersion/shared/widgets/entity_card/entity_card_extra_fields.dart';
 import 'package:submersion/shared/widgets/entity_card/entity_card_stat.dart';
+import 'package:submersion/shared/widgets/country_flag.dart';
 import 'package:submersion/shared/widgets/feature_accent.dart';
 import 'package:submersion/features/shared_library/presentation/widgets/library_site_badge.dart';
+import 'package:submersion/shared/widgets/record_list_chevron.dart';
 
 /// Detailed list card for one dive site.
 ///
 /// Configurable slots (title, subtitle, stat1, stat2, extra fields) come from
 /// [siteDetailedCardConfigProvider]; the rating, shared badge, site type
-/// badges (at the end of the stat line), water type and feature chips are
-/// fixed identity elements. Hand-rolled
+/// badges (at the end of the stat line), water type chip (after the stats on
+/// that line) and feature chips are fixed identity elements. Hand-rolled
 /// rather than a ListTile so the title keeps its font role under every theme
 /// preset and nothing text-bearing sits in the trailing slot.
 class SiteListTile extends ConsumerStatefulWidget {
@@ -114,6 +117,8 @@ class _SiteListTileState extends ConsumerState<SiteListTile> {
 
     final title = slotText(titleField) ?? site.name;
     final subtitle = slotText(subtitleField);
+    // A flag only beside a line that names the place.
+    final flagSite = showsPlace(subtitleField) ? site : null;
 
     String formatStat(SiteField field, dynamic value) {
       if (field == SiteField.diveCount) {
@@ -122,12 +127,21 @@ class _SiteListTileState extends ConsumerState<SiteListTile> {
       return adapter.formatValue(field, value, units);
     }
 
-    Widget stat(SiteField field) {
+    // Null, not an empty box, for a stat with nothing to show: the stat line
+    // is a Wrap, which spaces even a zero-width child, so an empty stat
+    // before the water type chip would leave a double gap (issue #4469).
+    Widget? stat(SiteField field) {
       // A count of zero reads as noise on a card; the site simply has no
       // dives yet, and the empty card already says so.
-      if (field == SiteField.diveCount && entry.diveCount == 0) {
-        return const SizedBox.shrink();
-      }
+      if (field == SiteField.diveCount && entry.diveCount == 0) return null;
+      final text = EntityCardStat.displayText(
+        adapter: adapter,
+        entity: entry,
+        field: field,
+        units: units,
+        formatter: formatStat,
+      );
+      if (text == null) return null;
       return EntityCardStat<SiteWithDiveCount, SiteField>(
         adapter: adapter,
         entity: entry,
@@ -147,14 +161,21 @@ class _SiteListTileState extends ConsumerState<SiteListTile> {
     ];
     final shownTags = entry.tags.take(3).toList();
     final hiddenTagCount = entry.tags.length - shownTags.length;
-    final chips = <Widget>[
-      if (site.waterType != null)
+    final waterType = site.waterType;
+    // The water type follows the stats on their line rather than opening the
+    // chip row, so it costs the card no line of its own (issue #4469).
+    final statItems = <Widget>[
+      ?stat(stat1Field),
+      ?stat(stat2Field),
+      if (waterType != null)
         _SiteChip(
           icon: Icons.water_drop,
-          label: site.waterType!.localizedName(l10n),
+          label: waterType.localizedName(l10n),
           color: statColor,
           textColor: chipTextColor,
         ),
+    ];
+    final chips = <Widget>[
       // A wreck pin on a site typed wreck would read "Wreck Wreck".
       for (final typeName in entry.featureTypes)
         if (!(typeName == 'wreck' && typeIds.contains('wreck')))
@@ -179,131 +200,136 @@ class _SiteListTileState extends ConsumerState<SiteListTile> {
 
     Widget buildContent() {
       return Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                SelectionLeading(
-                  isSelectionMode: widget.isSelectionMode,
-                  isChecked: widget.isChecked,
-                  onChanged: (_) => widget.onTap?.call(),
-                  child: SizedBox(
-                    width: 40,
-                    height: 40,
-                    child: CircleAvatar(
-                      backgroundColor:
-                          accent?.withValues(alpha: 0.15) ??
-                          colorScheme.secondaryContainer,
-                      child: Icon(
-                        Icons.location_on,
-                        color: accent ?? colorScheme.onSecondaryContainer,
+        padding: const EdgeInsets.all(kRecordCardDetailedPadding),
+        child: RecordListChevronRow(
+          showChevron: !widget.isSelectionMode,
+          chevronColor: secondaryTextColor,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  SelectionLeading(
+                    isSelectionMode: widget.isSelectionMode,
+                    isChecked: widget.isChecked,
+                    onChanged: (_) => widget.onTap?.call(),
+                    child: SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: CircleAvatar(
+                        backgroundColor:
+                            accent?.withValues(alpha: 0.15) ??
+                            colorScheme.secondaryContainer,
+                        child: Icon(
+                          Icons.location_on,
+                          color: accent ?? colorScheme.onSecondaryContainer,
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          // No ellipsis: a long title wraps, like the trip
-                          // and equipment cards, so the full name is always
-                          // visible.
-                          Expanded(
-                            child: Text(
-                              title,
-                              style: Theme.of(context).textTheme.titleMedium
-                                  ?.copyWith(
-                                    fontWeight: FontWeight.w600,
-                                    color: primaryTextColor,
-                                  ),
-                            ),
-                          ),
-                          if (site.rating != null) ...[
-                            const SizedBox(width: 6),
-                            const Icon(
-                              Icons.star,
-                              color: Colors.amber,
-                              size: 16,
-                            ),
-                            const SizedBox(width: 2),
-                            Text(
-                              site.rating!.toStringAsFixed(1),
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: primaryTextColor),
-                            ),
-                          ],
-                          if (widget.showSharedBadge) ...[
-                            const SizedBox(width: 6),
-                            Tooltip(
-                              message:
-                                  l10n.accessibility_label_sharedWithProfiles,
-                              child: Icon(
-                                Icons.people_outline,
-                                size: 16,
-                                color: primaryTextColor ?? colorScheme.primary,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            // No ellipsis: a long title wraps, like the trip
+                            // and equipment cards, so the full name is always
+                            // visible.
+                            Expanded(
+                              child: Text(
+                                title,
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                      color: primaryTextColor,
+                                    ),
                               ),
                             ),
+                            if (site.rating != null) ...[
+                              const SizedBox(width: 6),
+                              const Icon(
+                                Icons.star,
+                                color: Colors.amber,
+                                size: 16,
+                              ),
+                              const SizedBox(width: 2),
+                              Text(
+                                formatRatingForDisplay(site.rating!),
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(color: primaryTextColor),
+                              ),
+                            ],
+                            if (widget.showSharedBadge) ...[
+                              const SizedBox(width: 6),
+                              Tooltip(
+                                message:
+                                    l10n.accessibility_label_sharedWithProfiles,
+                                child: Icon(
+                                  Icons.people_outline,
+                                  size: 16,
+                                  color:
+                                      primaryTextColor ?? colorScheme.primary,
+                                ),
+                              ),
+                            ],
+                            LibrarySiteBadge(site: widget.entry.site),
                           ],
-                          LibrarySiteBadge(site: widget.entry.site),
-                        ],
-                      ),
-                      if (subtitle != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          subtitle,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(color: secondaryTextColor),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
                         ),
+                        if (subtitle != null) ...[
+                          const SizedBox(height: 2),
+                          LocationWithFlag(
+                            country: flagSite?.country,
+                            countryCode: flagSite?.countryCode,
+                            text: Text(
+                              subtitle,
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(color: secondaryTextColor),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-                if (!widget.isSelectionMode)
-                  ExcludeSemantics(
-                    child: Icon(Icons.chevron_right, color: secondaryTextColor),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            SelectionInset(
-              isSelectionMode: widget.isSelectionMode,
-              start: _contentInset,
-              child: _SiteStatRow(
-                stats: [stat(stat1Field), stat(stat2Field)],
-                siteTypeLabels: siteTypeLabels,
+                ],
               ),
-            ),
-            if (chips.isNotEmpty) ...[
               const SizedBox(height: 6),
               SelectionInset(
                 isSelectionMode: widget.isSelectionMode,
                 start: _contentInset,
-                child: Wrap(spacing: 6, runSpacing: 4, children: chips),
-              ),
-            ],
-            if (config.extraFields.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              SelectionInset(
-                isSelectionMode: widget.isSelectionMode,
-                start: _contentInset,
-                child: EntityCardExtraFields<SiteWithDiveCount, SiteField>(
-                  adapter: adapter,
-                  entity: entry,
-                  fields: config.extraFields,
-                  units: units,
-                  labelColor: secondaryTextColor,
-                  valueColor: primaryTextColor ?? colorScheme.onSurface,
+                child: _SiteStatRow(
+                  stats: statItems,
+                  siteTypeLabels: siteTypeLabels,
                 ),
               ),
+              if (chips.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                SelectionInset(
+                  isSelectionMode: widget.isSelectionMode,
+                  start: _contentInset,
+                  child: Wrap(spacing: 6, runSpacing: 4, children: chips),
+                ),
+              ],
+              if (config.extraFields.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                SelectionInset(
+                  isSelectionMode: widget.isSelectionMode,
+                  start: _contentInset,
+                  child: EntityCardExtraFields<SiteWithDiveCount, SiteField>(
+                    adapter: adapter,
+                    entity: entry,
+                    fields: config.extraFields,
+                    units: units,
+                    labelColor: secondaryTextColor,
+                    valueColor: primaryTextColor ?? colorScheme.onSurface,
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       );
     }
@@ -399,9 +425,9 @@ class _SiteListTileState extends ConsumerState<SiteListTile> {
   }
 }
 
-/// The card's stat line: the stat slots on the start side and the site type
-/// badges right-aligned on the same line, where a dive card puts its dive
-/// type badges (issue #4353).
+/// The card's stat line: the stat slots and water type chip on the start
+/// side (issue #4469) and the site type badges right-aligned on the same
+/// line, where a dive card puts its dive type badges (issue #4353).
 ///
 /// The badges' narrowest width (every type collapsed into "+N") is reserved
 /// first, so the stats keep their natural width up to the remainder and wrap
@@ -459,8 +485,8 @@ class _SiteStatRow extends StatelessWidget {
   }
 }
 
-/// A small outlined chip with an icon, used for the fixed identity row
-/// (water type, feature pins and the hidden-tag count).
+/// A small outlined chip with an icon, used for the water type on the stat
+/// line and for the identity row (feature pins and the hidden-tag count).
 ///
 /// The outline uses the muted outlineVariant tone a dive card's type badges
 /// use, not the accent: the icon already carries the chip's colour, and an

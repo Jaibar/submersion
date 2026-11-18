@@ -39,6 +39,11 @@ const demoCoverageExclusions = <String, String>{
       'found by scanning this device\'s photo library; sealed in demo mode',
   // Computed by the app as it runs.
   'equipment_service_status': 'a local cache the app rebuilds from the gear',
+  'dive_deco_status': 'a local cache the app rebuilds from dive analysis',
+  'media_identification_runs':
+      'made on this device by the marine life model, never synced',
+  'media_identifications':
+      'made on this device by the marine life model, never synced',
   'dive_safety_reviews': 'computed by the app when a dive is opened',
   'dive_safety_findings': 'computed by the app when a dive is opened',
 };

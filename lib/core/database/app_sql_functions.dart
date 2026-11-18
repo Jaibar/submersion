@@ -25,12 +25,22 @@ import 'package:sqlite3/common.dart'
     show AllowedArgumentCount, CommonDatabase, SqliteArguments;
 import 'package:submersion/core/constants/app_enums.dart';
 import 'package:submersion/core/deco/entities/dive_environment.dart';
+import 'package:submersion/core/text/fuzzy_match.dart' show foldForSearch;
+import 'package:submersion/features/dive_sites/domain/catalogue_gaps/catalogue_name_key.dart';
 import 'package:submersion/features/insights/data/tank_configuration_sql.dart';
 
 /// `unicode_lower(text)`: [text] lower-cased by Dart's `toLowerCase`, the
 /// same folding the Dart side of a comparison uses. NULL stays NULL and a
 /// number renders as text, as with `LOWER()`.
 const String kUnicodeLowerFunction = 'unicode_lower';
+
+/// `search_fold(text)`: [text] lower-cased with common accents stripped, by
+/// [foldForSearch], so a search for "jeremie" finds "Jérémie" (#4498). For a
+/// search's `LIKE` only, with the needle folded by [foldForSearch] too: an
+/// exact match (`=`, `IN`, find-or-create) folds case alone, with
+/// [kUnicodeLowerFunction], because "José" and "Jose" can be two people.
+/// NULL stays NULL and a number renders as text, as with `LOWER()`.
+const String kSearchFoldFunction = 'search_fold';
 
 /// `row_digest(value, ...)`: a hash of its arguments, for telling whether a
 /// row changed without carrying the row out of the worker isolate (#3815).
@@ -47,11 +57,24 @@ const String kRowDigestFunction = 'row_digest';
 /// `diveAmbientBarSql`, which resolves the dive's effective water type.
 const String kDiveAmbientBarFunction = 'dive_ambient_bar';
 
+/// `catalogue_name_key(text)`: a site name reduced to what tells one name
+/// from another, by [catalogueNameKey]. It lets one statement find the
+/// built-in catalogue's records for many of the diver's site names at once,
+/// with the folding done on the worker isolate and not row by row on the
+/// UI's. NULL stays NULL.
+const String kCatalogueNameKeyFunction = 'catalogue_name_key';
+
 /// Registers the app's SQL functions on [db].
 void registerAppSqlFunctions(CommonDatabase db) {
   db.createFunction(
     functionName: kUnicodeLowerFunction,
     function: _unicodeLower,
+    argumentCount: const AllowedArgumentCount(1),
+    deterministic: true,
+  );
+  db.createFunction(
+    functionName: kSearchFoldFunction,
+    function: _searchFold,
     argumentCount: const AllowedArgumentCount(1),
     deterministic: true,
   );
@@ -63,11 +86,22 @@ void registerAppSqlFunctions(CommonDatabase db) {
   );
   registerTankConfigurationFunctions(db);
   db.createFunction(
+    functionName: kCatalogueNameKeyFunction,
+    function: _catalogueNameKey,
+    argumentCount: const AllowedArgumentCount(1),
+    deterministic: true,
+  );
+  db.createFunction(
     functionName: kDiveAmbientBarFunction,
     function: _diveAmbientBar,
     argumentCount: const AllowedArgumentCount(4),
     deterministic: true,
   );
+}
+
+Object? _catalogueNameKey(SqliteArguments arguments) {
+  final value = arguments[0];
+  return value == null ? null : catalogueNameKey(value.toString());
 }
 
 /// Held once: [_diveAmbientBar] runs for every row of a statement.
@@ -88,11 +122,15 @@ Object? _diveAmbientBar(SqliteArguments arguments) {
   return environment.pressureAtDepth(depth);
 }
 
-Object? _unicodeLower(SqliteArguments arguments) {
-  final value = arguments[0];
+Object? _unicodeLower(SqliteArguments arguments) =>
+    _foldText(arguments[0], (s) => s.toLowerCase());
+
+/// [value] through [fold] when it is text, the way `LOWER()` treats its
+/// argument: NULL stays NULL and a number renders as text, unfolded.
+Object? _foldText(Object? value, String Function(String text) fold) {
   return switch (value) {
     null => null,
-    final String s => s.toLowerCase(),
+    final String s => fold(s),
     final num n => n.toString(),
     // A blob is returned unchanged: no text column here holds one, and
     // guessing at its encoding would be worse than leaving it alone.
@@ -100,9 +138,17 @@ Object? _unicodeLower(SqliteArguments arguments) {
   };
 }
 
+Object? _searchFold(SqliteArguments arguments) =>
+    _foldText(arguments[0], foldForSearch);
+
 extension UnicodeLowerExpression on Expression<String> {
   /// This text lower-cased by [kUnicodeLowerFunction]; the Unicode-aware
   /// replacement for drift's `lower()`, which compiles to `LOWER()`.
   Expression<String> unicodeLower() =>
       FunctionCallExpression<String>(kUnicodeLowerFunction, [this]);
+
+  /// This text folded by [kSearchFoldFunction]: case and accents, for a
+  /// search's `LIKE`. Match it against a needle folded by [foldForSearch].
+  Expression<String> searchFold() =>
+      FunctionCallExpression<String>(kSearchFoldFunction, [this]);
 }

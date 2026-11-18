@@ -7,36 +7,85 @@ import 'package:submersion/core/buoyancy/twin_analyzer.dart';
 import 'package:submersion/core/buoyancy/weight_prediction_engine.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/dive_log/data/services/buoyancy_twin_assembler.dart';
+import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/presentation/info/buoyancy_info.dart';
+import 'package:submersion/features/dive_log/presentation/providers/active_source_provider.dart';
 import 'package:submersion/features/dive_log/presentation/providers/buoyancy_twin_provider.dart';
-import 'package:submersion/features/dive_log/presentation/widgets/buoyancy_chart.dart';
-import 'package:submersion/features/dive_log/presentation/widgets/buoyancy_history_strip.dart';
+import 'package:submersion/features/dive_log/presentation/providers/profile_tracking_provider.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/buoyancy_lead_block.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/buoyancy_safety_rows.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/buoyancy_through_dive.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/buoyancy_what_if_sheet.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/info_sheet/info_button.dart';
 import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
-import 'package:submersion/shared/widgets/twin_summary_rows.dart';
 
-/// Dive-detail section presenting the modeled net buoyancy through the dive:
-/// a plain-language final-stop verdict, an expandable term breakdown, and
-/// summary metrics. Self-suppresses (renders nothing) until it has an outcome,
-/// or when the dive is unmodelable.
+/// Dive-detail section presenting the modeled net buoyancy of a dive in the
+/// order a diver asks about it: what buoyancy did through the dive and why
+/// (readout, chart and the balance of parts under the cursor), the term
+/// breakdown, the lead for next time, then the safety checks.
+/// Self-suppresses (renders nothing) until it has an outcome, or when the
+/// dive is unmodelable.
 class BuoyancySection extends ConsumerWidget {
   final String diveId;
   final UnitFormatter units;
 
-  const BuoyancySection({super.key, required this.diveId, required this.units});
+  /// The dive whose profile cursor the card follows, both ways (#4423).
+  /// Without it the card follows its own chart's touch.
+  final Dive? dive;
+
+  const BuoyancySection({
+    super.key,
+    required this.diveId,
+    required this.units,
+    this.dive,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // AsyncValue.value keeps the last outcome while the provider reloads, as
     // it does behind every refresh of the dive, so the card stays on screen.
     final outcome = ref.watch(buoyancyTwinProvider(diveId)).value;
-    return outcome == null ? const SizedBox.shrink() : _card(context, outcome);
+    if (outcome == null) return const SizedBox.shrink();
+    final synced = dive;
+    if (synced == null) {
+      return _card(
+        context,
+        outcome,
+        BuoyancyThroughDive(outcome: outcome, units: units),
+      );
+    }
+    // The cursor is watched by this part alone, so scrubbing anywhere on the
+    // dive rebuilds the readout, chart and balance rather than the whole card.
+    return _card(
+      context,
+      outcome,
+      Consumer(
+        builder: (context, ref, _) {
+          // The shared cursor indexes the series the profile chart draws
+          // (#543), so it converts to and from seconds against that series.
+          final profile = watchChartProfile(ref, synced);
+          final cursor = ref.watch(profileTrackingIndexProvider(diveId));
+          return BuoyancyThroughDive(
+            outcome: outcome,
+            units: units,
+            cursorSeconds:
+                cursor != null && cursor >= 0 && cursor < profile.length
+                ? profile[cursor].timestamp
+                : null,
+            onCursorSeconds: (seconds) =>
+                setProfileCursorSeconds(ref, diveId, profile, seconds),
+          );
+        },
+      ),
+    );
   }
 
-  Widget _card(BuildContext context, BuoyancyTwinOutcome outcome) {
-    final theme = Theme.of(context);
+  Widget _card(
+    BuildContext context,
+    BuoyancyTwinOutcome outcome,
+    Widget throughDive,
+  ) {
     final o = outcome.outputs;
     return Card(
       child: Padding(
@@ -44,67 +93,20 @@ class BuoyancySection extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Icon(Icons.waves, color: theme.colorScheme.primary),
-                const SizedBox(width: 8),
-                // Expanded rather than a Spacer after it: on a narrow card
-                // (half of a paired row) the title gives way to the button.
-                Expanded(
-                  child: Text(
-                    context.l10n.diveDetailSection_buoyancy_name.toUpperCase(),
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      letterSpacing: 0.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: () => showBuoyancyWhatIfSheet(
-                    context,
-                    baseInput: outcome.result.input,
-                    units: units,
-                  ),
-                  icon: const Icon(Icons.tune, size: 16),
-                  label: Text(context.l10n.buoyancy_adjust),
-                ),
-                HeaderInfoButton(
-                  title: context.l10n.diveDetailSection_buoyancy_name,
-                  height: 40,
-                  content: (context) => buoyancyInfo(
-                    context.l10n,
-                    infoUnits(context),
-                    hasDrysuitGas: o.drysuitGasLiters > 0,
-                    canAdjust: true,
-                  ),
-                ),
-              ],
-            ),
+            _header(context, outcome),
             const SizedBox(height: 12),
-            _verdict(context, o),
-            if (o.verdict.anchor.kind == TwinAnchorKind.convention) ...[
-              const SizedBox(height: 4),
-              Text(
-                context.l10n.buoyancy_verdictConvention,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.outline,
-                ),
-              ),
-            ],
-            const SizedBox(height: 12),
-            BuoyancyChart(result: outcome.result, units: units),
-            const SizedBox(height: 12),
+            throughDive,
+            const SizedBox(height: 4),
             _breakdown(context, o),
-            const SizedBox(height: 12),
-            TwinSummaryRows(
+            const Divider(height: 24),
+            BuoyancyLeadBlock(diveId: diveId, outcome: outcome, units: units),
+            const Divider(height: 24),
+            BuoyancySafetyRows(
               outputs: o,
               units: units,
               wingLiftCapacityKg: outcome.wingLiftCapacityKg,
+              leadRecorded: outcome.result.input.leadKg > 0,
             ),
-            const SizedBox(height: 16),
-            BuoyancyHistoryStrip(diveId: diveId, units: units),
             ..._hints(context, outcome),
           ],
         ),
@@ -112,20 +114,97 @@ class BuoyancySection extends ConsumerWidget {
     );
   }
 
-  Widget _verdict(BuildContext context, TwinOutputs o) {
+  /// The title row. When the What if? label cannot fit beside the title
+  /// and the info icon (a narrow half-row card, a long translation or a
+  /// large text scale), the button keeps only its icon and carries the label
+  /// as its tooltip, rather than overflowing the row.
+  Widget _header(BuildContext context, BuoyancyTwinOutcome outcome) {
+    final theme = Theme.of(context);
     final l10n = context.l10n;
-    final net = o.verdict.netKg;
-    final amount = units.formatWeight(net.abs());
-    final depth = units.formatDepth(o.verdict.anchor.depthM);
-    final String text;
-    if (net.abs() <= 0.5) {
-      text = l10n.buoyancy_verdictNeutral;
-    } else if (net > 0) {
-      text = l10n.buoyancy_verdictBuoyant(depth, amount);
-    } else {
-      text = l10n.buoyancy_verdictHeavy(depth, amount);
-    }
-    return Text(text, style: Theme.of(context).textTheme.titleMedium);
+    final label = l10n.buoyancy_whatIfButton;
+    void openWhatIf() => showBuoyancyWhatIfSheet(
+      context,
+      baseInput: outcome.result.input,
+      units: units,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact =
+            constraints.maxWidth <
+            _whatIfLabelWidth(context, label) + _headerChromeWidth;
+        return Row(
+          children: [
+            Icon(Icons.waves, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            // Expanded rather than a Spacer after it: on a narrow card
+            // (half of a paired row) the title gives way to the button.
+            Expanded(
+              child: Text(
+                l10n.diveDetailSection_buoyancy_name.toUpperCase(),
+                style: theme.textTheme.titleSmall?.copyWith(
+                  letterSpacing: 0.5,
+                  fontWeight: FontWeight.w600,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            // A what-if, not an edit: the sheet saves nothing, so an editing
+            // verb here read as changing the dive (#4585).
+            if (compact)
+              IconButton(
+                onPressed: openWhatIf,
+                tooltip: label,
+                icon: const Icon(Icons.tune, size: 20),
+              )
+            else
+              TextButton.icon(
+                onPressed: openWhatIf,
+                icon: const Icon(Icons.tune, size: 16),
+                label: Text(label, maxLines: 1),
+              ),
+            HeaderInfoButton(
+              title: l10n.diveDetailSection_buoyancy_name,
+              height: 40,
+              width: _infoSlotWidth,
+              content: (context) => buoyancyInfo(
+                context.l10n,
+                infoUnits(context),
+                hasDrysuitGas: outcome.outputs.drysuitGasLiters > 0,
+                canTryWhatIf: true,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// The info icon's slot in the header row.
+  static const double _infoSlotWidth = 48;
+
+  /// Everything in the header row besides the button's label: the waves
+  /// icon and its gap (32), the text button's icon, gap and padding at
+  /// standard density (52), and the info slot. The title may shrink to
+  /// nothing, as it always could. Compact density trims the button's
+  /// padding, so this errs toward collapsing a few pixels early, never
+  /// toward overflowing.
+  static const double _headerChromeWidth = 32 + 52 + _infoSlotWidth;
+
+  /// The rendered width of [label] in the text button's style.
+  static double _whatIfLabelWidth(BuildContext context, String label) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: Theme.of(context).textTheme.labelLarge,
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
   }
 
   Widget _breakdown(BuildContext context, TwinOutputs o) {
@@ -150,12 +229,15 @@ class BuoyancySection extends ConsumerWidget {
       child: Row(
         children: [
           Expanded(child: Text(_termLabel(context, term.label))),
-          Text(
-            '(${_sourceLabel(context, term.source)})',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.outline,
+          // A body fat the diver entered names its own source in its label
+          // (issue #4525).
+          if (term.label != BodyComposition.measuredTermLabel)
+            Text(
+              '(${_sourceLabel(context, term.source)})',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.outline,
+              ),
             ),
-          ),
           const SizedBox(width: 12),
           Text(
             units.formatWeight(term.kg),
@@ -218,6 +300,7 @@ class BuoyancySection extends ConsumerWidget {
       'personal' => l10n.tools_weight_personalTerm,
       'water' => l10n.tools_weight_waterTerm,
       BodyComposition.termLabel => l10n.tools_weight_bmiTerm,
+      BodyComposition.measuredTermLabel => l10n.tools_weight_bodyFatTerm,
       'suit' => l10n.buoyancy_suitTerm,
       'lead' => l10n.buoyancy_leadTerm,
       // Fallback for a tank with no preset/user name (see the assembler and

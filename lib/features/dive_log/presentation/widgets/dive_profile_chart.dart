@@ -11,6 +11,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/core/constants/enums.dart';
 import 'package:submersion/core/constants/profile_metrics.dart';
 import 'package:submersion/features/dive_log/presentation/info/dive_profile_info.dart';
+import 'package:submersion/features/dive_log/presentation/utils/chart_drag_crossing.dart';
 import 'package:submersion/features/dive_log/presentation/utils/gas_switch_format.dart';
 import 'package:submersion/features/dive_log/presentation/utils/profile_time_domain.dart';
 import 'package:submersion/features/dive_log/presentation/utils/gtr_format.dart';
@@ -19,6 +20,8 @@ import 'package:submersion/core/deco/entities/dive_environment.dart';
 import 'package:submersion/core/deco/gas_switch/gas_switch_efficiency.dart';
 import 'package:submersion/core/utils/minutes_seconds.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/gas_calculators/presentation/providers/icd_calculator_providers.dart'
+    show icdWarningsEnabledProvider;
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/dive_log/data/services/gas_usage_segments_service.dart';
 import 'package:submersion/features/dive_log/data/services/profile_analysis_service.dart'
@@ -37,7 +40,10 @@ import 'package:submersion/features/dive_log/presentation/widgets/chart_series_c
 import 'package:submersion/features/dive_log/presentation/widgets/chart_touch_recognizer.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/deco_stop_band.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_profile_legend.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/legend_candidates.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/profile_decimator.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/profile_plot_frame.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/profile_buoyancy_line.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/profile_metric_band.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/profile_metric_bands.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/profile_bar_window.dart';
@@ -64,10 +70,13 @@ import 'package:submersion/features/dive_log/presentation/widgets/photo_marker_o
 import 'package:submersion/features/dive_log/presentation/widgets/profile_cursor_tooltip.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/profile_line_hover.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/safety_findings_overlay.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/core/ui/chart_viewport.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/profile_event_labels.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/profile_highlight_range.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/counterdiffusion_overlay.dart';
+import 'package:submersion/features/dive_log/domain/entities/counterdiffusion_analysis.dart';
 import 'package:submersion/core/ui/trackpad_zoom_recognizer.dart';
 import 'package:submersion/features/dive_log/presentation/formatters/profile_event_label.dart';
 
@@ -269,6 +278,19 @@ class DiveProfileChart extends ConsumerStatefulWidget {
   final bool showTemperature;
   final bool showPressure;
   final void Function(int? index)? onPointSelected;
+
+  /// Where the plot sits and what it spans, reported after a frame whenever
+  /// it changes (issue #4423).
+  final ValueChanged<ProfilePlotFrame>? onPlotFrame;
+
+  /// A zoom window to show, set from outside in place of the reader's own
+  /// zooming, which the chart then ignores: the pinned profile's copy of the
+  /// card is handed one that eases from the full card's window out to the
+  /// whole dive (issue #4423).
+  final ChartViewport? viewport;
+
+  /// The zoom window, reported whenever the reader zooms or pans.
+  final ValueChanged<ChartViewport>? onViewportChanged;
 
   /// Dive time in seconds under the cursor, reported with every
   /// [onPointSelected]: the selected sample's timestamp, or 0 on the surface
@@ -528,6 +550,14 @@ class DiveProfileChart extends ConsumerStatefulWidget {
   /// Gas density curve in g/L
   final List<double>? densityCurve;
 
+  /// Net buoyancy in kg for each sample of [profile] (issue #4593); a null
+  /// entry is a gap. Null while the model is loading or the line is off.
+  final List<double?>? buoyancyCurve;
+
+  /// The dive can be modelled, so the buoyancy line is offered in the
+  /// legend and chart options (issue #4593).
+  final bool buoyancyAvailable;
+
   /// Gradient Factor % curve (0-100+)
   final List<double>? gfCurve;
 
@@ -542,6 +572,10 @@ class DiveProfileChart extends ConsumerStatefulWidget {
 
   /// Late and missed gas switches to shade (#2939); null hides the overlay.
   final GasSwitchEfficiency? gasSwitchEfficiency;
+
+  /// Isobaric counterdiffusion bands and rule-of-fifths switch markers
+  /// (#4530); null hides the overlay.
+  final CounterdiffusionAnalysis? counterdiffusion;
 
   /// Gas time remaining curve in seconds; a null sample is a blank (the
   /// line breaks there rather than dropping to zero)
@@ -619,13 +653,21 @@ class DiveProfileChart extends ConsumerStatefulWidget {
   /// appending the gas type when the tank is known, e.g. "Tank 1 (EAN32)".
   ///
   /// [fallbackLabel] is used when the tank has no custom name; callers pass a
-  /// localized default (e.g. "Tank 1") so labeling stays translatable.
-  @visibleForTesting
+  /// localized default (e.g. "Tank 1") so labeling stays translatable. The
+  /// pinned profile strip names its tank rows with it too.
   static String tankTooltipLabel(DiveTank? tank, String fallbackLabel) {
     final base = tank?.name ?? fallbackLabel;
     if (tank == null) return base;
     return '$base (${tank.gasMix.name})';
   }
+
+  /// The [tankTooltipLabel] fallback for [tank], the [index]th cylinder
+  /// (from 0), as the legend names it: see [tankFallbackTitle].
+  static String tankDefaultLabel(
+    AppLocalizations l10n,
+    DiveTank? tank,
+    int index,
+  ) => tankFallbackTitle(l10n, tank, index + 1);
 
   /// Column widths for [tooltipRowText], used by this widget's own native
   /// bubble ([TooltipPresentation.nativeBubble]) to align its monospace
@@ -815,6 +857,9 @@ class DiveProfileChart extends ConsumerStatefulWidget {
     this.showTemperature = true,
     this.showPressure = false,
     this.onPointSelected,
+    this.onPlotFrame,
+    this.viewport,
+    this.onViewportChanged,
     this.onTimeSelected,
     this.onTimeChosen,
     this.depthAndPressureOnly = false,
@@ -872,11 +917,14 @@ class DiveProfileChart extends ConsumerStatefulWidget {
     this.ppHeCurve,
     this.modCurve,
     this.densityCurve,
+    this.buoyancyCurve,
+    this.buoyancyAvailable = false,
     this.gfCurve,
     this.surfaceGfCurve,
     this.meanDepthCurve,
     this.ttsCurve,
     this.gasSwitchEfficiency,
+    this.counterdiffusion,
     this.gtrCurve,
     this.cnsCurve,
     this.otuCurve,
@@ -896,6 +944,9 @@ class DiveProfileChart extends ConsumerStatefulWidget {
 class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
   /// Where this chart last published its legend for the card's info icon.
   ProfileLegendSnapshot? _legendSnapshot;
+
+  /// Reports the plot to [DiveProfileChart.onPlotFrame].
+  final ProfilePlotFrameReporter _plotFrames = ProfilePlotFrameReporter();
 
   /// The diver's metric colours (issue #3012), resolved at the top of
   /// every build so tooltip and gesture code reads the same palette.
@@ -971,12 +1022,16 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
   O2CellUnit _o2CellUnit = O2CellUnit.ppO2;
   bool _showMod = false;
   bool _showDensity = false;
+  bool _showBuoyancy = false;
   bool _showGf = false;
   bool _showSurfaceGf = false;
   bool _showMeanDepth = false;
   bool _showTts = false;
   bool _showGtr = false;
   bool _showLateGasSwitches = true;
+  bool _showCounterdiffusion = false;
+  bool _counterdiffusionShowAll = false;
+  bool _icdWarningsEnabled = true;
   bool _showCns = false;
   bool _showOtu = false;
 
@@ -1237,8 +1292,14 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     // ChartViewport has no ==, and a pan held against the plot's edge clamps
     // to a new instance of the same window.
     if (value.sameWindowAs(_viewport)) return;
+    // A chart handed its window from outside (the pinned copy, which
+    // follows the page's scroll) shows only that window: a zoom or pan of
+    // its own would be put back on the next scroll frame.
+    final given = widget.viewport;
+    if (given != null && !value.sameWindowAs(given)) return;
     _viewportNotifier.value = value;
     _zoomNotifier.value = value.zoom;
+    widget.onViewportChanged?.call(value);
   }
 
   // The zoom level alone, for what sits outside the plot (the legend's zoom
@@ -1444,6 +1505,21 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       (_hoveredAscentRateTimestamp != null
           ? ProfileRightAxisMetric.ascentRate
           : null);
+
+  /// The mouse has left the chart: drop the hover fallback's selection and
+  /// every hover-driven overlay.
+  void _onMouseLeft() {
+    if (_lastHoverIndex != null) {
+      _lastHoverIndex = null;
+      _lastHoverOnLeadIn = false;
+      _reportSelection(null);
+    }
+    // The mouse leaving the chart entirely (not just panning off the touched
+    // sample) must also drop the in-chart tooltip and the hover-driven
+    // highlight/axis-override; otherwise they freeze at their last position
+    // instead of disappearing (issue #2228 follow-up).
+    _clearCursorHoverState();
+  }
 
   /// Drops the cursor-following tooltip and the hover-driven highlight/axis
   /// override. Called from every place a pointer stops actively hovering the
@@ -1749,6 +1825,11 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     _showEvents = widget.showEvents;
     _scheduleComputedEventsSeed();
     _zoomNotifier.addListener(_scheduleLegendMeasure);
+    final given = widget.viewport;
+    if (given != null) {
+      _viewportNotifier.value = given;
+      _zoomNotifier.value = given.zoom;
+    }
   }
 
   @override
@@ -1772,6 +1853,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     if (oldWidget.events != widget.events) {
       _scheduleComputedEventsSeed();
     }
+    final given = widget.viewport;
+    if (given != null) _viewport = given;
     // The external cursor reports when it moves, and again when the profile
     // under a stationary cursor is replaced: switching source keeps the
     // timestamp but changes which reading it names, so the card would
@@ -2498,6 +2581,30 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       );
     }
 
+    // Net buoyancy (issue #4593): the value, its sign and its side in words,
+    // with the bullet in that side's colour.
+    if (_showBuoyancy && widget.buoyancyCurve != null) {
+      final raw = _curveValueAt(widget.buoyancyCurve, spot.spotIndex);
+      final kg = raw != null && raw.isFinite ? raw : null;
+      rows.add(
+        TooltipRow(
+          label: l10n.diveLog_tooltip_buoyancy,
+          value: kg == null
+              ? '-'
+              : formatBuoyancyReadout(
+                  kg,
+                  units,
+                  l10n,
+                  direction: Directionality.of(context),
+                ),
+          bulletColor: kg != null && kg < 0
+              ? ProfileMetricColors.buoyancyHeavy
+              : ProfileMetricColors.buoyancyBuoyant,
+          metric: ProfileRightAxisMetric.buoyancy,
+        ),
+      );
+    }
+
     // GF% (always shown once enabled; see the Ceiling row comment).
     if (_showGf) {
       final gf = _curveValueAt(widget.gfCurve, spot.spotIndex);
@@ -2723,7 +2830,7 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
         final tankLabel =
             DiveProfileChart.tankTooltipLabel(
               tank,
-              l10n.diveLog_tank_title(i + 1),
+              DiveProfileChart.tankDefaultLabel(l10n, tank, i),
             ) +
             _tankSourceSuffix(
               tankId,
@@ -2767,6 +2874,24 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
           ),
         ]);
       }
+    }
+
+    // Counterdiffusion span under the cursor (#4530).
+    if (_showCounterdiffusion) {
+      rows.addAll([
+        for (final row in counterdiffusionTooltip(
+          widget.counterdiffusion,
+          point.timestamp,
+          showAll: _counterdiffusionShowAll,
+          l10n: l10n,
+          scheme: Theme.of(context).colorScheme,
+        ))
+          TooltipRow(
+            label: row.label,
+            value: row.value,
+            bulletColor: row.bulletColor,
+          ),
+      ]);
     }
 
     // Marker info (if touching near a marker)
@@ -2975,6 +3100,7 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     _showPressureMarkersLocal = false;
     _showGasSwitchMarkers = true;
     _showLateGasSwitches = false;
+    _showCounterdiffusion = false;
     _showPhotoMarkers = false;
     _showNdl = false;
     _showPpO2 = false;
@@ -2983,6 +3109,7 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     _showO2Cells = false;
     _showMod = false;
     _showDensity = false;
+    _showBuoyancy = false;
     _showGf = false;
     _showSurfaceGf = false;
     _showMeanDepth = false;
@@ -3041,6 +3168,10 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     final profileMetricColors = ref.watch(
       settingsProvider.select((s) => s.profileMetricColors),
     );
+    // The ICD warnings setting is the master switch for the rule-of-fifths
+    // switch markers, as it is for the ICD calculator (#4530): read through
+    // the calculator's own provider so both follow it the same way.
+    _icdWarningsEnabled = ref.watch(icdWarningsEnabledProvider);
     _palette = ProfileMetricPalette(
       overrides: profileMetricColors,
       temperatureAuto: Theme.of(context).colorScheme.tertiary,
@@ -3080,6 +3211,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     _showPressureMarkersLocal = legendState.showPressureMarkers;
     _showGasSwitchMarkers = legendState.showGasSwitchMarkers;
     _showLateGasSwitches = legendState.showLateGasSwitches;
+    _showCounterdiffusion = legendState.showCounterdiffusion;
+    _counterdiffusionShowAll = legendState.counterdiffusionShowAll;
     _showPhotoMarkers = legendState.showPhotoMarkers;
     // Must be synced before _metricBand() is read for the cache signatures
     // (see _syncBarSignatures), or a mode flip would key bars on the outgoing
@@ -3094,6 +3227,7 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     _o2CellUnit = legendState.o2CellUnit;
     _showMod = legendState.showMod;
     _showDensity = legendState.showDensity;
+    _showBuoyancy = legendState.showBuoyancy;
     _showGf = legendState.showGf;
     _showSurfaceGf = legendState.showSurfaceGf;
     _showMeanDepth = legendState.showMeanDepth;
@@ -3167,6 +3301,7 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
           widget.gasSwitches != null && widget.gasSwitches!.isNotEmpty,
       hasLateGasSwitches:
           widget.gasSwitchEfficiency?.windows.isNotEmpty ?? false,
+      hasCounterdiffusion: widget.counterdiffusion?.heliumPresent ?? false,
       hasPhotoMarkers:
           widget.photoMarkers != null && widget.photoMarkers!.isNotEmpty,
       hasMultiTankPressure: _hasMultiTankPressure,
@@ -3186,6 +3321,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       hasBothO2CellUnits: hasBothO2CellUnits,
       hasModData: hasModData,
       hasDensityData: hasDensityData,
+      hasBuoyancy: widget.buoyancyAvailable,
+      hasBuoyancyLine: _hasDataForMetric(ProfileRightAxisMetric.buoyancy),
       hasGfData: hasGfData,
       hasSurfaceGfData: hasSurfaceGfData,
       hasMeanDepthData: hasMeanDepthData,
@@ -3350,13 +3487,17 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
           label: context.l10n.diveLog_profile_semantics_chart,
           child: RawGestureDetector(
             gestures: {
-              TrackpadZoomGestureRecognizer:
-                  GestureRecognizerFactoryWithHandlers<
-                    TrackpadZoomGestureRecognizer
-                  >(
-                    () => TrackpadZoomGestureRecognizer(debugOwner: this),
-                    (recognizer) => recognizer.onZoom = zoomAt,
-                  ),
+              // Not while the window is set from outside (the pinned copy):
+              // its zoom would be put straight back, and winning the arena
+              // would stop a two-finger scroll over it reaching the page.
+              if (widget.viewport == null)
+                TrackpadZoomGestureRecognizer:
+                    GestureRecognizerFactoryWithHandlers<
+                      TrackpadZoomGestureRecognizer
+                    >(
+                      () => TrackpadZoomGestureRecognizer(debugOwner: this),
+                      (recognizer) => recognizer.onZoom = zoomAt,
+                    ),
             },
             child: Listener(
               onPointerDown: (event) {
@@ -3454,7 +3595,16 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
               },
               onPointerUp: (event) {
                 if (_activePointerCount > 0) _activePointerCount--;
-                _clearCursorHoverState();
+                // A mouse drag released off the chart skipped its exit (see
+                // the MouseRegion below), so the mouse leaves now. Not every
+                // drag is fl_chart's scrub, whose end clears the selection:
+                // one begun in an axis gutter would leave the hover's stuck.
+                if (event.kind != PointerDeviceKind.touch &&
+                    !constraints.biggest.contains(event.localPosition)) {
+                  _onMouseLeft();
+                } else {
+                  _clearCursorHoverState();
+                }
                 if (event.kind == PointerDeviceKind.touch) {
                   _touchPositions.remove(event.pointer);
                   if (_pinchPointers.contains(event.pointer)) {
@@ -3576,18 +3726,11 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
                 }
               },
               child: MouseRegion(
-                onExit: (_) {
-                  if (_lastHoverIndex != null) {
-                    _lastHoverIndex = null;
-                    _lastHoverOnLeadIn = false;
-                    _reportSelection(null);
-                  }
-                  // The mouse leaving the chart entirely (not just panning
-                  // off the touched sample) must also drop the in-chart
-                  // tooltip and the hover-driven highlight/axis-override --
-                  // otherwise they freeze at their last position instead of
-                  // disappearing (issue #2228 follow-up).
-                  _clearCursorHoverState();
+                onExit: (event) {
+                  // Mid-drag, not a hover leaving: onPointerUp lets the mouse
+                  // leave once the button is released (issue #4611).
+                  if (isDragCrossing(event)) return;
+                  _onMouseLeft();
                 },
                 // The only part a pan, zoom or hover frame rebuilds. Everything
                 // above it, the gesture handling included, stays mounted.
@@ -3927,6 +4070,7 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       identityHashCode(widget.ppHeCurve),
       identityHashCode(widget.modCurve),
       identityHashCode(widget.densityCurve),
+      identityHashCode(widget.buoyancyCurve),
       identityHashCode(widget.gfCurve),
       identityHashCode(widget.surfaceGfCurve),
       identityHashCode(widget.meanDepthCurve),
@@ -3937,6 +4081,10 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       identityHashCode(widget.o2SensorCurves),
       identityHashCode(widget.o2CellMvCurves),
       vpBucket,
+      // The buoyancy neutral rule spans the time axis, which an overlaid
+      // computer can widen without touching the profile (#4593).
+      bounds.totalMinTime,
+      bounds.totalMaxTime,
     ]);
     _markersSig = _sigOf([
       commonSig,
@@ -3990,6 +4138,30 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     // they all have to agree with fl_chart's own axis reservations, so they
     // all read them from here.
     final plotInsets = _plotInsets(availableWidth, units);
+
+    // The axis is in the diver's depth unit; the frame is in meters. Only
+    // built for a chart that reports it (the pinned copy).
+    if (widget.onPlotFrame != null) {
+      final metersPerDisplayUnit = 1 / units.convertDepth(1.0);
+      _plotFrames.report(
+        ProfilePlotFrame(
+          plotKey: _plotFrames.plotKey,
+          plotRect: Rect.fromLTRB(
+            plotInsets.left,
+            plotInsets.top,
+            availableWidth - plotInsets.right,
+            availableHeight - plotInsets.bottom,
+          ),
+          minSeconds: visibleMinX,
+          maxSeconds: visibleMaxX,
+          minDepthMeters: visibleMinDepth * metersPerDisplayUnit,
+          maxDepthMeters: visibleMaxDepth * metersPerDisplayUnit,
+          viewport: _viewport,
+        ),
+        widget.onPlotFrame,
+        mounted: () => mounted,
+      );
+    }
 
     // Highlight band, inflated to a 12 px minimum so short/instant findings
     // stay visible (spec: safety-findings-lane). Computed once and shared by
@@ -4228,6 +4400,18 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
               ? [_buildOtuLine(metricBand)]
               : const <LineChartBarData>[];
 
+          // Net buoyancy (if showing): one bar per run on one side of
+          // neutral, plus the dashed neutral rule (issue #4593).
+          final buoyancyRange = (_showBuoyancy && widget.buoyancyCurve != null)
+              ? buoyancyAxisRange(widget.buoyancyCurve!)
+              : null;
+          final buoyancyLines = buoyancyRange == null
+              ? const <LineChartBarData>[]
+              : _buildBuoyancyLines(metricBand, buoyancyRange);
+          final neutralRule = buoyancyRange == null
+              ? const <LineChartBarData>[]
+              : [_buildNeutralRule(metricBand, buoyancyRange)];
+
           return [
             ..._tagAll(decoStopBand, ChartOnlyMetric.decoStop),
             ..._tagAll(ceilingLines, ChartOnlyMetric.ceiling),
@@ -4247,6 +4431,8 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
             ..._tagAll(gtrLines, ProfileRightAxisMetric.gtr),
             ..._tagAll(cnsLines, ProfileRightAxisMetric.cns),
             ..._tagAll(otuLines, ProfileRightAxisMetric.otu),
+            ..._tagAll(neutralRule, null),
+            ..._tagAll(buoyancyLines, ProfileRightAxisMetric.buoyancy),
           ];
         }),
         ..._barsCache.series('markers', _markersSig, () {
@@ -4369,7 +4555,7 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
               DiveProfileChart._bottomTickReservedSize,
           units: units,
           onFindingTap: widget.onSafetyFindingTap!,
-          onFindingDismiss: widget.onSafetyFindingDismiss ?? (_) {},
+          onFindingDismiss: widget.onSafetyFindingDismiss,
           onFindingDetails: widget.onSafetyFindingDetails,
           showLane: lane,
           showCallout: !lane,
@@ -4385,6 +4571,17 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       // cursor (issue #2228 follow-up).
       clipBehavior: Clip.none,
       children: [
+        // An empty box exactly over the plot, so the pinned profile strip
+        // can find where the depth line is drawn (issue #4423).
+        Positioned(
+          left: plotInsets.left,
+          top: plotInsets.top,
+          right: plotInsets.right,
+          bottom: plotInsets.bottom,
+          child: IgnorePointer(
+            child: SizedBox.expand(key: _plotFrames.plotKey),
+          ),
+        ),
         LineChart(
           LineChartData(
             minX: visibleMinX,
@@ -4557,6 +4754,10 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
                           context,
                         ).textTheme.labelSmall?.copyWith(color: metricColor),
                         maxLines: 1,
+                        // A number reads left to right in every locale: in
+                        // RTL text a signed tick ("-4.1") would otherwise
+                        // draw its sign at the far end ("4.1-").
+                        textDirection: TextDirection.ltr,
                       ),
                     );
                   },
@@ -4599,6 +4800,14 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
                   highlightSpan,
                   widget.highlightRange?.color,
                 ),
+                if (_showCounterdiffusion)
+                  ...icdSwitchMarkerLines(
+                    widget.counterdiffusion,
+                    warningsEnabled: _icdWarningsEnabled,
+                    scheme: colorScheme,
+                    visibleMinX: visibleMinX,
+                    visibleMaxX: visibleMaxX,
+                  ),
                 if (widget.events != null && (_showEvents || _showAnnotations))
                   ..._buildEventVerticalLines(
                     colorScheme,
@@ -4665,6 +4874,9 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
                 // the pinch owns the interaction, so ignore its events. The
                 // same applies while a one-finger pan drag is claimed.
                 if (_activePointerCount >= 2 || _touchDragClaimed) return;
+                // A mouse drag that strays off the chart is still a scrub: its
+                // pan updates and end carry the selection (issue #4611).
+                if (crossesChartEdgeMidDrag(event)) return;
                 final isTouchEnd =
                     event is FlPointerExitEvent ||
                     event is FlLongPressEnd ||
@@ -6447,7 +6659,7 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
       preventCurveOverShooting:
           startIndex == 0 && shouldDrawSurfaceLeadIn(widget.profile),
       color: color,
-      barWidth: 1,
+      barWidth: kProfileDepthLineWidth,
       isStrokeCapRound: true,
       dotData: const FlDotData(show: false),
       belowBarData: showFill
@@ -7285,6 +7497,70 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
     _seriesGetsLeadIn,
   );
 
+  /// [widget.buoyancyCurve] with its gaps as 0, for choosing which samples
+  /// to draw only; the gaps themselves are kept from the real curve. Memoized
+  /// on the curve's identity, which is what the decimation cache keys on.
+  List<double> _buoyancyForDecimation() {
+    final curve = widget.buoyancyCurve!;
+    if (!identical(_buoyancyFilledFor, curve)) {
+      _buoyancyFilledFor = curve;
+      _buoyancyFilled = [
+        for (final v in curve) v != null && v.isFinite ? v : 0.0,
+      ];
+    }
+    return _buoyancyFilled!;
+  }
+
+  List<double?>? _buoyancyFilledFor;
+  List<double>? _buoyancyFilled;
+
+  /// The net buoyancy line (issue #4593): runs of one sign, buoyant and
+  /// heavy in their own colours, starting flat from the surface like GF.
+  List<LineChartBarData> _buildBuoyancyLines(
+    MetricBand band,
+    ({double min, double max}) range,
+  ) {
+    final curve = widget.buoyancyCurve!;
+    final indices = keepBuoyancyGaps(
+      _decimatedCurveIndices(_buoyancyForDecimation()),
+      curve,
+      length: widget.profile.length,
+    );
+    final kgs = <double?>[for (final i in indices) curve[i]];
+    final timestamps = <int>[
+      for (final i in indices) widget.profile[i].timestamp,
+    ];
+    if (indices.isNotEmpty &&
+        indices.first == 0 &&
+        kgs.first != null &&
+        shouldDrawSurfaceLeadIn(widget.profile)) {
+      kgs.insert(0, kgs.first);
+      timestamps.insert(0, 0);
+    }
+    return buildBuoyancyLines(
+      runs: buoyancySignRuns(kgs, timestamps),
+      band: band,
+      range: range,
+      buoyant: ProfileMetricColors.buoyancyBuoyant,
+      heavy: ProfileMetricColors.buoyancyHeavy,
+    );
+  }
+
+  /// The dashed neutral (0 kg) rule drawn with the buoyancy line.
+  LineChartBarData _buildNeutralRule(
+    MetricBand band,
+    ({double min, double max}) range,
+  ) {
+    final domain = _timeDomain();
+    return buildNeutralRule(
+      band: band,
+      range: range,
+      minX: domain.min.toDouble(),
+      maxX: domain.max.toDouble(),
+      color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.7),
+    );
+  }
+
   /// Translucent band for the externally highlighted time range. [span] is
   /// precomputed by [_buildChart] via [highlightBandSpan]: clamped to the
   /// visible window and inflated to the 12 px minimum, so instants and short
@@ -7325,6 +7601,19 @@ class _DiveProfileChartState extends ConsumerState<DiveProfileChart> {
           ),
         );
       }
+    }
+    // Isobaric counterdiffusion (#4530): between the late switches and the
+    // O2 cell runs, so a selected finding still paints over it.
+    if (_showCounterdiffusion) {
+      annotations.addAll(
+        counterdiffusionBands(
+          widget.counterdiffusion,
+          showAll: _counterdiffusionShowAll,
+          scheme: Theme.of(context).colorScheme,
+          visibleMinX: visibleMinX,
+          visibleMaxX: visibleMaxX,
+        ),
+      );
     }
     if (_showO2Cells) {
       for (final range in widget.secondaryRanges) {

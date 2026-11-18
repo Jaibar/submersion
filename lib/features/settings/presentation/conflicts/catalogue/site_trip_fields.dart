@@ -88,6 +88,21 @@ final Map<String, ConflictField> siteTripFields = {
     (l) => l.settings_conflict_field_completedAt,
     FieldKind.dateTime,
   ),
+  // The built-in catalogue record a site was adopted from.
+  'catalogueId': ConflictField(
+    (l) => l.settings_conflict_field_catalogueId,
+    FieldKind.shortText,
+  ),
+  // What a diver settled about catalogue records for a site.
+  'catalogueAnswers': ConflictField(
+    (l) => l.settings_conflict_field_catalogueAnswers,
+    FieldKind.shortText,
+  ),
+  // A site's ISO country code (issue #4426).
+  'countryCode': ConflictField(
+    (l) => l.settings_conflict_field_countryCode,
+    FieldKind.shortText,
+  ),
   'cost': ConflictField(
     (l) => l.settings_conflict_field_cost,
     FieldKind.number,
@@ -262,7 +277,8 @@ final Map<String, ConflictField> siteTripFields = {
   ),
   'linkMode': ConflictField(
     (l) => l.settings_conflict_field_linkMode,
-    FieldKind.shortText,
+    FieldKind.enumValue,
+    enumLabel: navTrackLinkModeLabeler,
   ),
   'liveaboardName': ConflictField(
     (l) => TripField.liveaboardName.localizedDisplayName(l),
@@ -271,6 +287,10 @@ final Map<String, ConflictField> siteTripFields = {
   'location': ConflictField(
     (l) => TripField.location.localizedDisplayName(l),
     FieldKind.shortText,
+  ),
+  'logo': ConflictField(
+    (l) => l.settings_conflict_field_logo,
+    FieldKind.opaque,
   ),
   'lowTideHeight': ConflictField(
     (l) => l.settings_conflict_field_lowTideHeight,

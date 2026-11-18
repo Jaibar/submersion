@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
@@ -20,6 +22,7 @@ import 'package:submersion/features/dive_log/data/repositories/depth_bucket_sql.
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_times_sql.dart';
 import 'package:submersion/features/dive_log/data/repositories/profile_series_repository.dart';
+import 'package:submersion/features/dive_log/data/repositories/series_id_chunks.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
 import 'package:submersion/features/dive_log/data/services/gas_analysis_service.dart';
 import 'package:submersion/features/dive_log/data/sql/dive_weight_sql.dart';
@@ -30,7 +33,9 @@ import 'package:submersion/features/dive_log/domain/models/dive_filter_state.dar
 import 'package:submersion/features/dive_log/domain/entities/dive.dart'
     show DiveProfilePoint;
 import 'package:submersion/features/dive_log/domain/services/ccr_cylinder_use.dart';
+import 'package:submersion/features/dive_log/data/sql/analysis_inputs_stamp_sql.dart';
 import 'package:submersion/features/dive_log/query/dive_filter_query.dart';
+import 'package:submersion/features/dive_roles/data/diver_role_set_sql.dart';
 import 'package:submersion/features/dive_roles/domain/entities/dive_role.dart';
 import 'package:submersion/features/dive_sites/domain/entities/site_dive_statistics.dart';
 import 'package:submersion/features/dive_sites/query/site_query_entity.dart'
@@ -38,7 +43,9 @@ import 'package:submersion/features/dive_sites/query/site_query_entity.dart'
 import 'package:submersion/features/equipment/data/repositories/dive_gear_usage_sql.dart';
 import 'package:submersion/features/insights/data/repositories/site_entry_method_sql.dart';
 import 'package:submersion/features/insights/data/repositories/visibility_band_sql.dart';
+import 'package:submersion/features/insights/data/depth_band_scale.dart';
 import 'package:submersion/features/insights/data/dive_filter_sql.dart';
+import 'package:submersion/features/insights/data/repositories/vertical_distance_cache.dart';
 import 'package:submersion/features/insights/data/series_profile_aggregates.dart';
 import 'package:submersion/features/insights/data/tank_configuration_sql.dart';
 import 'package:submersion/features/insights/domain/calendar_day_matrix.dart';
@@ -49,10 +56,13 @@ import 'package:submersion/features/insights/domain/focus/focus_factor_row.dart'
 import 'package:submersion/features/insights/domain/logbook_dive_counts.dart';
 import 'package:submersion/features/insights/domain/role_consumption.dart';
 import 'package:submersion/features/insights/domain/role_consumption_trend.dart';
-import 'package:submersion/features/insights/domain/suit_thickness_stats.dart';
+import 'package:submersion/features/insights/domain/suit_type.dart';
+import 'package:submersion/features/insights/domain/counted_cylinders.dart';
 import 'package:submersion/features/insights/domain/tank_configuration/tank_configuration.dart';
 import 'package:submersion/features/insights/domain/time_of_day_bucket.dart';
 import 'package:submersion/features/insights/domain/trend_aggregation.dart';
+import 'package:submersion/features/insights/domain/vertical_distance/vertical_distance.dart';
+import 'package:submersion/features/insights/domain/vertical_distance/vertical_distance_timeline.dart';
 import 'package:submersion/features/insights/domain/water_temp_bands.dart';
 import 'package:submersion/features/trips/data/side_trip_sql.dart';
 
@@ -66,9 +76,11 @@ part 'insights_repository_conditions.dart';
 part 'insights_repository_focus.dart';
 part 'insights_repository_focus_series.dart';
 part 'insights_repository_role_consumption.dart';
+part 'insights_repository_roles.dart';
 part 'insights_repository_tank_configuration.dart';
 part 'insights_repository_time_of_day.dart';
 part 'insights_repository_twin_set_candidates.dart';
+part 'insights_repository_vertical_distance.dart';
 
 /// Per-dive outcome of the recorded (non-computed) deco classification.
 ///
@@ -162,6 +174,13 @@ class EntryExitPairCount {
   final String? exitMethod;
   final int count;
 }
+
+/// One chunk of [InsightsRepository.getTimeAtDepthRanges] for the worker
+/// isolate: `compute` takes a single argument, so the blobs and the band
+/// scale travel together.
+Map<int, double> _timeAtDepthJob(
+  ({List<SeriesBlob> blobs, DepthBandScale scale}) job,
+) => timeAtDepthSecondsFromBlobs(job.blobs, scale: job.scale);
 
 /// Repository for all advanced statistics queries.
 ///
@@ -290,7 +309,7 @@ class InsightsRepository with InsightsChartDives {
           TableUpdateQuery.onTable(_db.diveEquipment),
           TableUpdateQuery.onTable(_db.equipment),
           // The equipment-attribute filter axis (#1805) and the suit
-          // thickness chart read attribute rows; saveAttributes and a sync
+          // type chart read attribute rows; saveAttributes and a sync
           // pull write only this table.
           TableUpdateQuery.onTable(_db.equipmentAttributes),
           TableUpdateQuery.onTable(_db.diveWeights),
@@ -300,6 +319,9 @@ class InsightsRepository with InsightsChartDives {
           // Role sets (#1221); solo detection reads the primary, which a
           // junction-only write can still accompany through sync.
           TableUpdateQuery.onTable(_db.diveDiverRoles),
+          // The My role card joins the role rows (#4409); a custom role can
+          // sync in after the dives that hold it.
+          TableUpdateQuery.onTable(_db.diveRoles),
           TableUpdateQuery.onTable(_db.diveBuddyRoles),
           TableUpdateQuery.onTable(_db.sightings),
           TableUpdateQuery.onTable(_db.species),
@@ -352,14 +374,19 @@ class InsightsRepository with InsightsChartDives {
       gas: gas,
       consumptionRate: consumptionRate,
     );
+    final view = _viewFilterOnly(filter, alias: alias);
+    return (clause: '$scope${view.clause}', params: view.params);
+  }
+
+  /// [_diveFilter] without [DiveStatsScope]: the view filter alone, as an
+  /// ` AND ...` clause (empty when it keeps every dive).
+  ({String clause, List<Object?> params}) _viewFilterOnly(
+    DiveFilterState filter, {
+    required String alias,
+  }) {
     final f = buildFilteredDiveIdSubquery(filter);
-    if (f.subquery.isEmpty) {
-      return (clause: scope, params: const <Object?>[]);
-    }
-    return (
-      clause: '$scope AND $alias.id IN (${f.subquery})',
-      params: f.params,
-    );
+    if (f.subquery.isEmpty) return (clause: '', params: const <Object?>[]);
+    return (clause: ' AND $alias.id IN (${f.subquery})', params: f.params);
   }
 
   /// The ids of the dives [filter] keeps, or null when it keeps them all.
@@ -411,6 +438,7 @@ class InsightsRepository with InsightsChartDives {
         FROM dives d
         JOIN dive_tanks t ON t.dive_id = d.id AND ${breathingTankSql('t')}
         WHERE 1 = 1 $diverFilter ${df.clause}
+          AND NOT ${diveBreathesUnmeasuredTankSql('d')}
           AND ${measuredRuntimeSecondsSql('d')} > 0
           AND d.avg_depth > 0
           AND t.start_pressure > t.end_pressure
@@ -623,7 +651,8 @@ class InsightsRepository with InsightsChartDives {
         FROM dives d
         JOIN dive_tanks t ON t.dive_id = d.id AND ${breathingTankSql('t')}
         LEFT JOIN dive_sites ds ON ds.id = d.site_id
-        WHERE ${measuredRuntimeSecondsSql('d')} > 0
+        WHERE NOT ${diveBreathesUnmeasuredTankSql('d')}
+          AND ${measuredRuntimeSecondsSql('d')} > 0
           AND d.avg_depth > 0
           AND t.start_pressure > t.end_pressure
          
@@ -1006,13 +1035,11 @@ class InsightsRepository with InsightsChartDives {
     }
   }
 
-  /// Dives grouped by the exposure suits linked to them (issue #1824): a
-  /// bucket per wetsuit primary thickness, one for wetsuits with no numeric
-  /// thickness, and one for drysuits, which the attribute catalog gives no
-  /// thickness at all. The thickness join is a LEFT JOIN so a suit without
-  /// the attribute still reaches a bucket. COUNT(DISTINCT) so a dive with two
-  /// suits in the same bucket counts once there.
-  Future<SuitThicknessStats> getDivesBySuitThickness({
+  /// Dives grouped by the type of exposure suit linked to them (issues
+  /// #1824, #4490): a bucket per wetsuit thickness and style pair, either
+  /// of which may be missing, and one for every drysuit. COUNT(DISTINCT) so
+  /// a dive with two suits of the same type counts once there.
+  Future<SuitTypeStats> getDivesBySuitType({
     String? diverId,
     DiveFilterState filter = const DiveFilterState(),
   }) async {
@@ -1023,38 +1050,32 @@ class InsightsRepository with InsightsChartDives {
 
       final results = await _db.customSelect('''
         SELECT
-          $_suitBucketSql AS bucket,
+          e.type = 'drysuit' AS is_drysuit,
           ea.value_num AS mm,
+          TRIM(es.value_text) AS style,
           COUNT(DISTINCT d.id) AS count
         FROM dives d
         $_suitJoinsSql
         WHERE 1=1 $diverFilter ${df.clause}
-        GROUP BY bucket, ea.value_num
-        ORDER BY ea.value_num
+        GROUP BY is_drysuit, ea.value_num, TRIM(es.value_text)
         ''', variables: params.map((p) => Variable(p)).toList()).get();
 
-      final byThickness = <({double mm, int count})>[];
-      var unknownThicknessCount = 0;
-      var drysuitCount = 0;
-      for (final row in results) {
-        final count = row.read<int>('count');
-        switch (row.read<String>('bucket')) {
-          case 'drysuit':
-            drysuitCount = count;
-          case 'unknown':
-            unknownThicknessCount = count;
-          default:
-            byThickness.add((mm: row.read<double>('mm'), count: count));
-        }
-      }
-      return (
-        byThickness: List<({double mm, int count})>.unmodifiable(byThickness),
-        unknownThicknessCount: unknownThicknessCount,
-        drysuitCount: drysuitCount,
-      );
+      final stats = [
+        for (final row in results)
+          (
+            type: row.read<int>('is_drysuit') == 1
+                ? const SuitType.drysuit()
+                : SuitType.wetsuit(
+                    mm: row.read<double?>('mm'),
+                    style: row.read<String?>('style'),
+                  ),
+            count: row.read<int>('count'),
+          ),
+      ]..sort((a, b) => a.type.compareTo(b.type));
+      return List.unmodifiable(stats);
     } catch (e, stackTrace) {
       _log.error(
-        'Failed to get dives by suit thickness',
+        'Failed to get dives by suit type',
         error: e,
         stackTrace: stackTrace,
       );
@@ -2465,10 +2486,11 @@ class InsightsRepository with InsightsChartDives {
 
   /// Total lead carried on every dive in scope, in kilograms, ordered by date.
   ///
-  /// Sums the dive's weight rows, or reads the legacy scalar when it has none
-  /// ([recordedWeightKgSql]). The monthly version this replaced averaged
-  /// across rows, so a 4 kg belt plus 2 kg of trim weights was reported as
-  /// 3 kg rather than the 6 kg actually carried.
+  /// Sums the dive's weight rows, or reads the legacy scalar when it has none,
+  /// plus any lead carried as weights gear ([recordedWeightKgSql]). The
+  /// monthly version this replaced averaged across rows, so a 4 kg belt plus
+  /// 2 kg of trim weights was reported as 3 kg rather than the 6 kg actually
+  /// carried.
   Future<List<TrendDataPoint>> getWeightPerDive({
     String? diverId,
     DiveFilterState filter = const DiveFilterState(),
@@ -2650,10 +2672,12 @@ class InsightsRepository with InsightsChartDives {
 
   /// Get time spent in depth ranges.
   ///
-  /// Returns numeric bucket edges in meters (the canonical depth unit). The
-  /// display layer converts to the user's preferred depth unit so the chart's
-  /// axis label and bucket labels match the setting. The top bucket is
-  /// open-ended ([upperDepth] is null).
+  /// Returns numeric band edges in [depthUnit], the diver's own depth unit,
+  /// so the display layer labels them as they come: 10 m bands for meters and
+  /// 30 ft bands for feet, rather than meter bands relabelled as 0-33, 33-66
+  /// (issue #4600). The bands run from the surface to the deepest one holding
+  /// any time, capped as [bucketsFromSeconds] describes, where the last band
+  /// turns open-ended ([upperDepth] is null).
   ///
   /// The aggregation runs in Dart, on a worker isolate, over decoded primary
   /// series (see [timeAtDepthRanges] and [timeAtDepthRangesFromBlobs]), with
@@ -2689,12 +2713,13 @@ class InsightsRepository with InsightsChartDives {
   /// every bucket. Note that a dive left with no primary rows at all is
   /// skipped entirely -- see issue #1149, which tracks the promotion bug that
   /// can produce that state.
-  Future<List<({int lowerDepth, int? upperDepth, int minutes})>>
-  getTimeAtDepthRanges({
+  Future<List<DepthBucket>> getTimeAtDepthRanges({
     String? diverId,
     DiveFilterState filter = const DiveFilterState(),
+    DepthUnit depthUnit = DepthUnit.meters,
   }) async {
     try {
+      final scale = DepthBandScale.forUnit(depthUnit);
       final diverFilter = diverId != null ? 'AND d.diver_id = ?' : '';
       final df = _diveFilter(filter, alias: 'd');
       final params = diverId != null ? [diverId, ...df.params] : [...df.params];
@@ -2719,10 +2744,10 @@ class InsightsRepository with InsightsChartDives {
         if (blobs.isEmpty) continue;
         seconds = combineDepthSeconds(
           seconds,
-          await compute(timeAtDepthSecondsFromBlobs, blobs),
+          await compute(_timeAtDepthJob, (blobs: blobs, scale: scale)),
         );
       }
-      return bucketsFromSeconds(seconds);
+      return bucketsFromSeconds(seconds, scale: scale);
     } catch (e, stackTrace) {
       _log.error(
         'Failed to get time at depth ranges',
@@ -2754,20 +2779,45 @@ class InsightsRepository with InsightsChartDives {
   ///    evidence there is. It is also what the dive detail page displays.
   /// 5. A dive with no profile is unclassifiable and must not be counted as
   ///    no-deco.
+  ///
+  /// [statsScoped] keeps to the dives statistics count ([DiveStatsScope]),
+  /// as the deco card does. The `deco` search classifies every dive the
+  /// diver logged, so its cache writer turns it off (#4461): dives excluded
+  /// from statistics and drafts count then, a plan nobody has dived does
+  /// not ([diveUndivedSql]).
+  ///
+  /// [onlyDiveIds] narrows the scan to those dives, for a rule run over an
+  /// import's few dives that need not scan the whole logbook.
   Future<DecoSignalScan> scanRecordedDecoSignals({
     String? diverId,
     DiveFilterState filter = const DiveFilterState(),
+    bool statsScoped = true,
+    Set<String>? onlyDiveIds,
   }) async {
     try {
       final diverFilter = diverId != null ? 'AND d.diver_id = ?' : '';
-      final df = _diveFilter(filter, alias: 'd');
-      final params = diverId != null ? [diverId, ...df.params] : [...df.params];
+      final view = statsScoped ? null : _viewFilterOnly(filter, alias: 'd');
+      final df = view == null
+          ? _diveFilter(filter, alias: 'd')
+          : (
+              clause: ' AND NOT ${diveUndivedSql('d')}${view.clause}',
+              params: view.params,
+            );
+      // One bind for any number of ids, so no variable limit applies.
+      final idFilter = onlyDiveIds == null
+          ? ''
+          : 'AND d.id IN (SELECT value FROM json_each(?))';
+      final params = [
+        ?diverId,
+        ...df.params,
+        if (onlyDiveIds != null) jsonEncode(onlyDiveIds.toList()),
+      ];
 
       final results = await _db.customSelect('''
         WITH scoped AS (
           SELECT d.id AS dive_id
           FROM dives d
-          WHERE 1=1 $diverFilter ${df.clause}
+          WHERE 1=1 $diverFilter ${df.clause} $idFilter
         ),
         signals AS (
           SELECT
@@ -2805,7 +2855,9 @@ class InsightsRepository with InsightsChartDives {
           c.dive_id AS dive_id,
           c.classification AS classification,
           CASE WHEN c.classification = 'compute' THEN
-            ${diveSourceStampSql('d')} + ${earlierDivesRevisionSql('d')}
+            ${diveSourceStampSql('d')} + ${diveAnalysisInputsStampSql('d')} +
+            ${diveProfileEventsStampSql('d')} +
+            ${earlierDivesRevisionSql('d')}
           END AS revision
         FROM classified c
         JOIN dives d ON d.id = c.dive_id

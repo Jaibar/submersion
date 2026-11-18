@@ -94,7 +94,86 @@ class GeneratedAtCallSiteTest(unittest.TestCase):
             if isinstance(key, ast.Constant) and key.value == "generated_at"
         ]
 
-        self.assertEqual(stamps, ["utc_timestamp()"] * 3)
+        # The centres file and the raw dump.
+        self.assertEqual(stamps, ["utc_timestamp()"] * 2)
+
+
+class CatalogueOutputTest(unittest.TestCase):
+    """The site catalogue is built by submersion-app/site-catalogue, not here.
+
+    A source scan: this script must never write the catalogue again, or a
+    centres-only run would replace the merged catalogue with OpenStreetMap
+    alone.
+    """
+
+    def setUp(self):
+        with open(_SOURCE, encoding="utf-8") as f:
+            self.source = f.read()
+            self.tree = ast.parse(self.source)
+
+    def test_the_legacy_site_file_is_no_longer_written(self):
+        names = [
+            node.value
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith("dive_sites")
+            and node.value.endswith(".json")
+            and "raw" not in node.value
+        ]
+
+        self.assertEqual(names, [])
+
+    def test_the_site_catalogue_is_not_written_here(self):
+        calls = [
+            ast.unparse(node.func)
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+        ]
+        imported = [
+            node.module
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.ImportFrom)
+        ]
+
+        self.assertNotIn("write_catalogue", calls)
+        self.assertNotIn("site_catalogue_format", imported)
+        self.assertNotIn("curated_sites", imported)
+
+    def test_only_dive_centres_are_asked_for(self):
+        tags = next(
+            ast.literal_eval(node.value)
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "DIVE_TAGS"
+                for target in node.targets
+            )
+        )
+
+        self.assertEqual(
+            tags,
+            [
+                ("amenity", "dive_centre"),
+                ("shop", "scuba_diving"),
+                ("club", "scuba_diving"),
+            ],
+        )
+
+
+@unittest.skipUnless(_HAS_DEPS, "the harvester's dependencies are not installed")
+class ClientNameTest(unittest.TestCase):
+    def test_overpass_is_asked_under_the_generic_client_name(self):
+        # The Overpass library sends Python's default client name unless
+        # it is handed a request that carries one.
+        harvester = dive_site_harvester.DiveSiteHarvester()
+        request = harvester.api.url
+        self.assertEqual(
+            request.full_url, dive_site_harvester.OVERPASS_ENDPOINT
+        )
+        self.assertEqual(
+            request.get_header("User-agent"), "dive-site-harvester/1.0"
+        )
 
 
 if __name__ == "__main__":

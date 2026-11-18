@@ -34,7 +34,9 @@ List<DiveEditorColumn> diveEditorColumns({
   textColumn(DiveField.diveOperator, (d) => d.diveOperator),
   textColumn(DiveField.boatName, (d) => d.boatName),
   textColumn(DiveField.boatCaptain, (d) => d.boatCaptain),
-  integerColumn(DiveField.ratingStars, (d) => d.rating, min: 0, max: 5),
+  // 1 to 5 stars; an empty cell is unrated. A 0 would show as a rating of 0
+  // and read as out of scale, as the v358 rung found it (issue #4415).
+  integerColumn(DiveField.ratingStars, (d) => d.rating, min: 1, max: 5),
   toggleColumn(DiveField.isFavorite, (d) => d.isFavorite),
   toggleColumn(DiveField.excludedFromStats, (d) => d.excludedFromStats),
   toggleColumn(DiveField.excludedFromGasStats, (d) => d.excludedFromGasStats),
@@ -192,10 +194,15 @@ DiveEditorColumn _depth(DiveField field, double? Function(Dive) get) =>
 DiveEditorColumn _setpoint(DiveField field, double? Function(Dive) get) =>
     plainNumberColumn(field, get, symbol: 'bar', min: 0, max: 2);
 
-/// The single weight row's amount. The row's weights must be loaded (the
-/// editor's dives provider merges them in), or every dive looks weightless.
+/// The single weight row's amount. The row's weights and gear must be loaded
+/// (the dive list loads both), or every dive looks weightless.
+///
+/// The cell edits only while that row is the dive's whole total: not with
+/// several rows, and not with lead carried as weights gear, which the cell's
+/// total adds (issue #4442) and a typed total would count twice.
 DiveEditorColumn _weight() {
   int rowsOf(Dive d) => d.weights.length;
+  bool carriesGearLead(Dive d) => d.leadGear.isNotEmpty;
   return numberColumn(
     DiveField.totalWeight,
     (d) => d.weights.length == 1 ? d.weights.single.amountKg : null,
@@ -203,9 +210,12 @@ DiveEditorColumn _weight() {
     toStored: (u, v) => u.weightToKg(v),
     symbol: (u) => u.weightSymbol,
     min: 0,
-    isEditable: (d) => rowsOf(d) <= 1,
-    readOnlyReason: (d, l) =>
-        rowsOf(d) <= 1 ? null : l.tableEditor_weightRows(rowsOf(d)),
+    isEditable: (d) => rowsOf(d) <= 1 && !carriesGearLead(d),
+    readOnlyReason: (d, l) => rowsOf(d) > 1
+        ? l.tableEditor_weightRows(rowsOf(d))
+        : carriesGearLead(d)
+        ? l.tableEditor_weightGear
+        : null,
   );
 }
 

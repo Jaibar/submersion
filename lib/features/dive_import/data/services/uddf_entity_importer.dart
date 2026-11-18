@@ -39,6 +39,7 @@ import 'package:submersion/features/pre_dive/data/services/checklist_dive_linker
 import 'package:submersion/core/services/images/profile_photo_codec.dart';
 import 'package:submersion/core/services/location_service.dart';
 import 'package:submersion/core/services/logger_service.dart';
+import 'package:submersion/core/utils/dive_rating_scale.dart';
 import 'package:submersion/core/utils/geo_math.dart';
 import 'package:submersion/core/utils/number_utils.dart';
 import 'package:submersion/features/buddies/data/repositories/buddy_repository.dart';
@@ -63,6 +64,7 @@ import 'package:submersion/features/dive_log/domain/entities/dive_custom_field.d
 import 'package:submersion/features/dive_log/domain/entities/dive_weight.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
+import 'package:submersion/features/dive_sites/domain/entities/site_catalogue_answers.dart';
 import 'package:submersion/features/dive_types/data/repositories/dive_type_repository.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_classification_repository.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_feature_repository.dart';
@@ -99,6 +101,7 @@ import 'package:submersion/features/trips/domain/services/trip_for_dive_date.dar
 import 'package:submersion/features/tank_presets/domain/entities/tank_preset_entity.dart';
 import 'package:submersion/core/text/blank_text.dart';
 import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
+import 'package:submersion/features/marine_life/data/services/species_catalogue_restorer.dart';
 import 'package:submersion/features/marine_life/data/services/imported_species_resolver.dart';
 import 'package:submersion/features/universal_import/data/models/import_enums.dart';
 import 'package:submersion/features/universal_import/data/services/payload_merger.dart';
@@ -110,6 +113,8 @@ import 'package:uuid/uuid.dart';
 import 'package:submersion/features/certification_agencies/data/repositories/custom_certification_repository.dart';
 import 'package:submersion/features/certification_agencies/data/services/certification_import_resolver.dart';
 import 'package:submersion/features/dive_sites/domain/entry_method_list.dart';
+import 'package:submersion/features/dive_sites/domain/services/site_country_code.dart';
+import 'package:submersion/features/equipment/data/services/dive_set_bundle_applier.dart';
 
 /// Bundles all repositories needed for UDDF import.
 class ImportRepositories {
@@ -420,6 +425,26 @@ class UddfEntityImporter {
        _defaultPurchaseCurrency = defaultPurchaseCurrency,
        _placeNameLanguage = placeNameLanguage,
        _importedFiles = importedFiles ?? ImportedFileRepository();
+
+  /// A payload site's link to the built-in catalogue record it was adopted
+  /// from, or null when the file carries none.
+  static String? _catalogueIdOf(Map<String, dynamic> siteData) {
+    final value = siteData['catalogueId'];
+    if (value is! String) return null;
+    final trimmed = value.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  /// What the file says the diver settled about catalogue records for a
+  /// payload site. Text that cannot be read is no answers.
+  static SiteCatalogueAnswers _catalogueAnswersOf(
+    Map<String, dynamic> siteData,
+  ) {
+    final value = siteData['catalogueAnswers'];
+    return value is String
+        ? SiteCatalogueAnswers.decode(value)
+        : SiteCatalogueAnswers.empty;
+  }
 
   /// Parse a value that may be either an enum instance or a string matching
   /// an enum name. Returns null if the value is null or unrecognised.
@@ -893,6 +918,14 @@ class UddfEntityImporter {
             certResolver,
           );
 
+    // The species catalogue (issue #4578) restores with no selection step,
+    // like the currency rules: a species no dive sighted has no other way
+    // back. Before the dives, so their sightings link to the restored rows.
+    final speciesRepository = repositories.speciesRepository;
+    if (speciesRepository != null && !stopped()) {
+      await restoreSpeciesCatalogue(data.species, speciesRepository);
+    }
+
     // Skipped as a whole rather than left to its own loop, which registers
     // the batch's computers before it reaches its first dive.
     final divesResult = stopped()
@@ -1277,6 +1310,8 @@ class UddfEntityImporter {
         name: name,
         email: buddyData['email'] as String?,
         phone: buddyData['phone'] as String?,
+        // The repository reads the country code from the text.
+        country: buddyData['country'] as String?,
         photo: await importedImage(buddyData['photo'], ImageEncodeSpec.avatar),
         notes: buddyData['notes'] as String? ?? '',
         createdAt: now,
@@ -1480,15 +1515,9 @@ class UddfEntityImporter {
       final existing = await repository.getTagByName(name, diverId: diverId);
       if (existing != null) {
         if (uddfId != null) idMapping[uddfId] = existing.id;
-        // Keep every use the file gives the tag.
-        for (final scope in scopes) {
-          if (!existing.appliesTo(scope)) {
-            await repository.getOrCreateTag(
-              name,
-              diverId: diverId,
-              scope: scope,
-            );
-          }
+        // Keep every use the file gives the tag, in one write.
+        if (!existing.scopes.containsAll(scopes)) {
+          await repository.widenTag(existing, scopes);
         }
         continue;
       }
@@ -1504,11 +1533,16 @@ class UddfEntityImporter {
         colorHex: tagData['colorHex'] as String? ?? tagData['color'] as String?,
         createdAt: now,
         updatedAt: now,
-        scopes: scopes,
+        // A backup's stated scopes, or everywhere for a tag the source
+        // gives no scopes for (issue #4407).
+        scopes: importedNewTagScopes(tagData),
       );
 
-      await repository.createTag(tag);
-      if (uddfId != null) idMapping[uddfId] = newId;
+      // One that took the name meanwhile is widened only as an existing
+      // tag is above.
+      final created = await repository.createTag(tag, widenExistingTo: scopes);
+      // The incumbent's id when one took the name meanwhile, not [newId].
+      if (uddfId != null) idMapping[uddfId] = created.id;
       count++;
       onProgress?.call(ImportPhase.tags, count, selected.length);
     }
@@ -1711,7 +1745,7 @@ class UddfEntityImporter {
         ?tagIdMapping[ref],
     ];
     // The sites CSV's plain tag names (issue #2201): reuse this diver's tag
-    // of that name or create it, scoped to sites either way.
+    // of that name, widened to sites, or create it for every scope (#4407).
     final tagNames = siteData['siteTagNames'];
     for (final name
         in tagNames is List ? tagNames.whereType<String>() : const <String>[]) {
@@ -2030,6 +2064,12 @@ class UddfEntityImporter {
 
       String? country = siteData['country'] as String?;
       String? region = siteData['region'] as String?;
+      // The code that came with the country (issue #4426): the site's own,
+      // or the geocoder's when it fills the country in.
+      KnownCountryCode knownCode = (
+        country: existing.country,
+        code: existing.countryCode,
+      );
 
       // Auto-lookup country/region if coordinates exist but fields are empty.
       if (lat != null && lon != null && (country == null || region == null)) {
@@ -2039,6 +2079,12 @@ class UddfEntityImporter {
             lon,
             languageCode: _placeNameLanguage,
           );
+          if (country == null && geocodeResult.country != null) {
+            knownCode = (
+              country: geocodeResult.country,
+              code: geocodeResult.countryCode,
+            );
+          }
           country ??= geocodeResult.country;
           region ??= geocodeResult.region;
         } catch (_) {
@@ -2050,6 +2096,12 @@ class UddfEntityImporter {
       final difficulty = difficultyStr != null
           ? SiteDifficulty.fromString(difficultyStr)
           : null;
+
+      // A replaced country re-reads its code, so the flag never stays on
+      // the country it replaced; a kept one keeps the site's code.
+      final countryCode = country == null
+          ? existing.countryCode
+          : countryCodeOnSave(country: country, known: knownCode);
 
       // Every argument is nullable and copyWith treats null as "keep the
       // existing value", so absent payload fields are preserved.
@@ -2063,6 +2115,8 @@ class UddfEntityImporter {
         city: siteData['city'] as String?,
         island: siteData['island'] as String?,
         country: country,
+        countryCode: countryCode,
+        clearCountryCode: countryCode == null,
         region: region,
         rating: siteData['rating'] as double?,
         notes: siteData['notes'] as String?,
@@ -2081,6 +2135,8 @@ class UddfEntityImporter {
       // UPDATE so a failure can't leave the row half-overwritten.
       final waterType = siteData['waterType'] as String?;
       final bodyOfWater = siteData['bodyOfWater'] as String?;
+      final fileCatalogueId = _catalogueIdOf(siteData);
+      final fileAnswers = _catalogueAnswersOf(siteData);
       await repository.updateSiteWithImportedMetadata(
         overwrittenSite,
         DiveSitesCompanion(
@@ -2089,6 +2145,18 @@ class UddfEntityImporter {
               : const Value.absent(),
           bodyOfWater: bodyOfWater != null
               ? Value(bodyOfWater)
+              : const Value.absent(),
+          // An ordinary update never writes the catalogue link, so it goes
+          // through the patch: only onto a site that has none. A site
+          // already linked keeps its own record.
+          catalogueId: existing.catalogueId == null && fileCatalogueId != null
+              ? Value(fileCatalogueId)
+              : const Value.absent(),
+          // The answers follow the same rule: a site that has settled
+          // something keeps its own.
+          catalogueAnswers:
+              existing.catalogueAnswers.isEmpty && !fileAnswers.isEmpty
+              ? Value(fileAnswers.encode())
               : const Value.absent(),
         ),
       );
@@ -2120,6 +2188,9 @@ class UddfEntityImporter {
 
       String? country = siteData['country'] as String?;
       String? region = siteData['region'] as String?;
+      // The geocoder's code when it fills the country in (issue #4426), so a
+      // name the table cannot read ("Korea") still gets its flag.
+      KnownCountryCode knownCode = (country: null, code: null);
 
       // Auto-lookup country/region if coordinates exist but fields are empty
       if (lat != null && lon != null && (country == null || region == null)) {
@@ -2129,6 +2200,12 @@ class UddfEntityImporter {
             lon,
             languageCode: _placeNameLanguage,
           );
+          if (country == null && geocodeResult.country != null) {
+            knownCode = (
+              country: geocodeResult.country,
+              code: geocodeResult.countryCode,
+            );
+          }
           country ??= geocodeResult.country;
           region ??= geocodeResult.region;
         } catch (_) {
@@ -2154,6 +2231,7 @@ class UddfEntityImporter {
         city: siteData['city'] as String?,
         island: siteData['island'] as String?,
         country: country,
+        countryCode: countryCodeOnSave(country: country, known: knownCode),
         region: region,
         rating: siteData['rating'] as double?,
         notes: siteData['notes'] as String? ?? '',
@@ -2166,6 +2244,9 @@ class UddfEntityImporter {
         // A site's typical way out (issue #2201); null means the
         // same as the entry, so an absent cell stays null.
         exitMethods: decodeEntryMethods(siteData['exitMethod'] as String?),
+        // The built-in catalogue record the site was adopted from.
+        catalogueId: _catalogueIdOf(siteData),
+        catalogueAnswers: _catalogueAnswersOf(siteData),
       );
 
       final createdSite = await repository.createSite(newSite);
@@ -2264,6 +2345,9 @@ class UddfEntityImporter {
     if (selected.isEmpty) return 0;
     onProgress?.call(ImportPhase.equipmentSets, 0, selected.length);
     var count = 0;
+    // The sets a set includes are linked once every set exists, since a
+    // file may list an outer set before the one it includes (issue #4525).
+    final includedRefs = <({EquipmentSet set, List<String> refs})>[];
 
     for (var i = 0; i < items.length; i++) {
       if (!selected.contains(i)) continue;
@@ -2294,13 +2378,35 @@ class UddfEntityImporter {
         updatedAt: now,
       );
 
-      await repository.createSet(equipmentSet);
+      final created = await repository.createSet(equipmentSet);
       // Gear links on dives name the set they came from (issue #1487).
       if (setData['uddfId'] case final String uddfId) {
         setIdMapping[uddfId] = newId;
       }
+      if (setData['includedSetRefs'] case final List refs) {
+        includedRefs.add((
+          set: created,
+          refs: refs.whereType<String>().toList(),
+        ));
+      }
       count++;
       onProgress?.call(ImportPhase.equipmentSets, count, selected.length);
+    }
+
+    for (final (:set, :refs) in includedRefs) {
+      // A set left out of the import, or missing from the file, is dropped.
+      final included = [
+        for (final ref in refs)
+          if (setIdMapping[ref] case final id? when id != set.id) id,
+      ];
+      if (included.isEmpty) continue;
+      try {
+        await repository.updateSet(set.copyWith(includedSetIds: included));
+      } on ArgumentError catch (e) {
+        // Untrusted input: a file may nest sets deeper than the one level
+        // the app allows. The set still lands, without those includes.
+        _log.warning('Set "${set.name}": included sets not restored ($e)');
+      }
     }
 
     return count;
@@ -3004,6 +3110,8 @@ class UddfEntityImporter {
       final excludedFromGasStats =
           diveData['excludedFromGasStats'] as bool? ?? false;
       final gasSwitchesEdited = diveData['gasSwitchesEdited'] as bool? ?? false;
+      final mediaTimeOffsetSeconds =
+          diveData['mediaTimeOffsetSeconds'] as int? ?? 0;
 
       // Build diluent gas mix (if present)
       final diluentO2 = diveData['diluentO2'] as double?;
@@ -3061,7 +3169,9 @@ class UddfEntityImporter {
         diveComputerFirmware: diveData['diveComputerFirmware'] as String?,
         buddy: diveData['buddy'] as String?,
         diveMaster: diveData['diveMaster'] as String?,
-        rating: diveData['rating'] as int?,
+        // Every importer's rating lands here, so one off the 1 to 5 star
+        // scale is fixed once for all of them (issue #4415).
+        rating: DiveRatingScale.normalize(diveData['rating'] as int?),
         notes: notes,
         visibility: _parseEnum(diveData['visibility'], Visibility.values),
         visibilityMeters: diveData['visibilityMeters'] as double?,
@@ -3117,6 +3227,7 @@ class UddfEntityImporter {
         excludedFromStats: excludedFromStats,
         excludedFromGasStats: excludedFromGasStats,
         gasSwitchesEdited: gasSwitchesEdited,
+        mediaTimeOffsetSeconds: mediaTimeOffsetSeconds,
         courseIds: linkedCourseIds,
         setpointLow: asDoubleOrNull(diveData['setpointLow']),
         setpointHigh: asDoubleOrNull(diveData['setpointHigh']),
@@ -3198,7 +3309,8 @@ class UddfEntityImporter {
         }
       }
 
-      await DiveEquipmentDefaulter().applyForImportedDive(dive);
+      final defaultSetId = await DiveEquipmentDefaulter()
+          .applySetForImportedDive(dive);
       await ChecklistDiveLinker().applyForImportedDive(dive);
       await altitudeEnricher.applyForImportedDive(dive);
       // After the defaulter, never before: the defaulter bails on a dive
@@ -3207,8 +3319,15 @@ class UddfEntityImporter {
       await DiveComputerGearLinker().linkComputerGearForDive(diveId: dive.id);
       // Apply every equipment set that lists this computer as a member
       // (issue #1020). Additive, independent of the defaulter above.
-      await EquipmentSetForComputerLinker().linkComputerSetsForDive(
+      final computerSetIds = await EquipmentSetForComputerLinker()
+          .linkComputerSets(diveId: dive.id);
+      // What those sets carry besides gear (issue #4525): weights only
+      // where the dive has none, and never a cylinder beside its own.
+      await DiveSetBundleApplier().applyTagged(
         diveId: dive.id,
+        leadSetId: defaultSetId,
+        alsoSetIds: computerSetIds,
+        retagAbsorbed: true,
       );
       importedDiveIds.add(diveId);
       diveIdByIndex[i] = diveId;

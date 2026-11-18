@@ -1,14 +1,21 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/core/accessibility/semantic_helpers.dart';
 import 'package:submersion/core/utils/unit_formatter.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/deco_analysis_progress.dart';
+import 'package:submersion/features/insights/data/dive_filter_sql.dart';
 import 'package:submersion/features/insights/presentation/open_chart_dives.dart';
+import 'package:submersion/features/insights/presentation/providers/dive_deco_status_providers.dart';
 import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
 import 'package:submersion/features/insights/presentation/widgets/chart_row_link.dart';
 import 'package:submersion/features/insights/presentation/widgets/insights_filtered_scaffold.dart';
 import 'package:submersion/features/insights/presentation/widgets/stat_charts.dart';
 import 'package:submersion/features/insights/presentation/widgets/stat_section_card.dart';
+import 'package:submersion/features/insights/presentation/widgets/time_at_depth_format.dart';
+import 'package:submersion/features/insights/presentation/widgets/vertical_distance/vertical_distance_cards.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/info_sheet/dive_terms.dart';
 import 'package:submersion/shared/widgets/info_sheet/info_units.dart';
@@ -19,6 +26,12 @@ typedef _OpenDeco =
       String row,
       List<String> Function(DecoDiveIds ids) pick,
     );
+
+/// A depth band label cut down to where the band starts: "120-150" becomes
+/// "120". The open-ended last band ("210+") is short already and keeps its
+/// plus, which is what says it has no lower neighbour.
+String _bandStart(String label) =>
+    label.endsWith('+') ? label : label.split('-').first;
 
 class InsightsProfilePage extends ConsumerWidget {
   final bool embedded;
@@ -35,6 +48,8 @@ class InsightsProfilePage extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildAscentDescentSection(context, ref, units),
+          const SizedBox(height: 16),
+          const VerticalDistanceCards(),
           const SizedBox(height: 16),
           _buildTimeAtDepthSection(context, ref, units),
           const SizedBox(height: 16),
@@ -181,22 +196,38 @@ class InsightsProfilePage extends ConsumerWidget {
               message: context.l10n.insights_profile_timeAtDepth_empty,
             );
           }
-          // The repository emits numeric bucket edges in meters; convert to
-          // the user's unit and put just the numbers on each tick. The shared
-          // unit ("m" or "ft") shows once on the x-axis label.
+          // The provider bands the samples in the diver's own depth unit, so
+          // the edges go on the ticks as they come. The shared unit ("m" or
+          // "ft") shows once on the x-axis label.
+          final l10n = context.l10n;
+          // A log big enough that its largest bar passes ten hours reads in
+          // hours, on the axis and in each bar's value (issue #4600).
+          final hours = timeAtDepthUsesHours(
+            data.map((d) => d.minutes).reduce(math.max),
+          );
           return CategoryBarChart(
-            data: data.map((d) {
-              final lo = units.convertDepth(d.lowerDepth.toDouble()).round();
-              final label = d.upperDepth == null
-                  ? '$lo+'
-                  : '$lo-${units.convertDepth(d.upperDepth!.toDouble()).round()}';
-              return (label: label, count: d.minutes);
-            }).toList(),
+            data: [
+              for (final d in data)
+                (
+                  label: d.upperDepth == null
+                      ? '${d.lowerDepth}+'
+                      : '${d.lowerDepth}-${d.upperDepth}',
+                  count: d.minutes,
+                ),
+            ],
             barColor: Colors.indigo,
             valueFormatter: (value) =>
-                context.l10n.insights_profile_timeAtDepth_valueFormat(value),
+                formatTimeAtDepth(l10n, value, hours: hours),
             xAxisLabel: units.depthSymbol,
-            yAxisLabel: context.l10n.units_profileMetric_min,
+            yAxisLabel: hours
+                ? l10n.units_profileMetric_h
+                : l10n.units_profileMetric_min,
+            yAxisScale: hours ? 60 : 1,
+            // Seven or eight bands on a phone leave no room for "120-150"
+            // under each bar, so crowded labels fall back to the depth each
+            // band starts at. A marked bar still names its whole range.
+            compactXLabelFormatter: _bandStart,
+            compactXLabelsToFit: true,
           );
         },
         loading: () => const SizedBox(
@@ -256,7 +287,28 @@ class InsightsProfilePage extends ConsumerWidget {
         // than the whole page, once per dive.
         loading: () => Consumer(
           builder: (context, ref, _) {
-            final progress = ref.watch(decoClassificationProgressProvider);
+            // The card's own pass, else the verdict cache's pass an Insights
+            // filter naming deco makes it wait for (#4461). That pass judges
+            // every dive the diver logged, not the card's, so it shows no
+            // counts. Only under such a filter: a pass run for the dive
+            // list's filter is not what this card is waiting for.
+            final waits = ref.watch(
+              insightsFilterTablesProvider.select(
+                (t) => t.contains(kDiveDecoStatusTable),
+              ),
+            );
+            final writer = waits
+                ? ref.watch(diveDecoStatusProgressProvider)
+                : null;
+            final progress =
+                ref.watch(decoClassificationProgressProvider) ??
+                (writer == null
+                    ? null
+                    : (
+                        stats: (decoCount: 0, noDecoCount: 0, unknownCount: 0),
+                        analyzed: writer.analyzed,
+                        total: writer.total,
+                      ));
             if (progress == null) {
               return const SizedBox(
                 height: 100,
@@ -288,17 +340,9 @@ class InsightsProfilePage extends ConsumerWidget {
           _buildDecoBreakdown(context, stats),
           const SizedBox(height: 16),
         ],
-        LinearProgressIndicator(value: progress.analyzed / progress.total),
-        const SizedBox(height: 8),
-        Text(
-          context.l10n.insights_profile_deco_analyzing(
-            progress.analyzed,
-            progress.total,
-          ),
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
+        DecoAnalysisProgressBar(
+          analyzed: progress.analyzed,
+          total: progress.total,
         ),
       ],
     );

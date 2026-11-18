@@ -35,6 +35,7 @@ List<DiveTerm> profileOverlayTerms(
     if (config.hasSurfaceGfData && state.showSurfaceGf) DiveTerm.surfaceGf,
     if (config.hasMeanDepthData && state.showMeanDepth) DiveTerm.meanDepth,
     if (config.hasSacCurve && state.showSac) DiveTerm.sac,
+    if (config.hasBuoyancyLine && state.showBuoyancy) DiveTerm.buoyancyProfile,
     if (config.hasAscentRates &&
         (state.showAscentRateColors || state.showAscentRateLine))
       DiveTerm.ascentRate,
@@ -42,6 +43,10 @@ List<DiveTerm> profileOverlayTerms(
       DiveTerm.gasSwitchMarkers,
     if (config.hasLateGasSwitches && state.showLateGasSwitches)
       DiveTerm.lateGasSwitch,
+    if (config.hasCounterdiffusion && state.showCounterdiffusion) ...[
+      DiveTerm.isobaricCounterdiffusion,
+      DiveTerm.counterdiffusionProfile,
+    ],
     if (config.hasComputedEvents && state.showComputedEvents)
       DiveTerm.computedEvents,
   ];

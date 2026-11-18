@@ -5,12 +5,14 @@ import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/equipment/domain/constants/equipment_attribute_catalog.dart';
 import 'package:submersion/features/equipment/domain/constants/focal_length.dart';
 import 'package:submersion/features/equipment/domain/entities/equipment_attribute.dart';
+import 'package:submersion/features/equipment/figure/domain/figure_inputs.dart';
+import 'package:submersion/features/equipment/figure/domain/figure_position.dart';
+import 'package:submersion/features/equipment/figure/domain/figure_zone.dart';
 import 'package:submersion/features/equipment/presentation/utils/equipment_attribute_l10n.dart';
-import 'package:submersion/features/equipment/presentation/utils/equipment_attribute_units.dart';
 import 'package:submersion/features/equipment/presentation/widgets/equipment_color_field.dart';
+import 'package:submersion/features/equipment/presentation/widgets/equipment_number_attribute_field.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/app_date_picker.dart';
-import 'package:submersion/shared/widgets/forms/number_input_validation.dart';
 
 /// Renders one input per catalog definition for [type] in [group]. Values are
 /// keyed by attrKey in [values]; edits emit whole EquipmentAttribute objects
@@ -46,14 +48,63 @@ class EquipmentAttributeFormSection extends StatelessWidget {
     final defs = EquipmentAttributeCatalog.attributesFor(
       type,
     ).where((d) => d.group == group).toList();
+    // The spots this item can be moved to on the figure, from the values
+    // being edited: a computer's mount, say, decides whether there is a
+    // choice at all (issue #4493).
+    final positions = group == AttributeGroup.appearance
+        ? pickableFigureZones(type, figureAttributesFrom(values.values))
+        : const <FigureZone>[];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final def in defs) ...[
-          _buildField(context, def),
-          const SizedBox(height: 16),
-        ],
+        for (final def in defs)
+          if (def.key != EquipmentAttrKeys.figurePosition) ...[
+            _buildField(context, def),
+            const SizedBox(height: 16),
+          ] else if (positions.isNotEmpty) ...[
+            _buildFigurePositionField(context, def, positions),
+            const SizedBox(height: 16),
+          ],
       ],
+    );
+  }
+
+  /// Where the item is drawn on the diver figure: Automatic, or one of the
+  /// spots that draw it differently. A stored spot this item no longer has
+  /// artwork for (its mount changed) reads as Automatic, which is what the
+  /// figure does with it.
+  Widget _buildFigurePositionField(
+    BuildContext context,
+    EquipmentAttributeDef def,
+    List<FigureZone> zones,
+  ) {
+    final l10n = context.l10n;
+    final options = [for (final zone in zones) figurePositionKeys[zone]!];
+    final stored = values[def.key]?.valueText;
+    return DropdownButtonFormField<String?>(
+      // Keyed by the options as well: a dropdown whose value stops being
+      // offered throws, and a change of mount or style changes them.
+      key: ValueKey('attr-field-${def.key}:${options.join(',')}'),
+      initialValue: options.contains(stored) ? stored : null,
+      decoration: InputDecoration(labelText: attributeLabel(l10n, def.key)),
+      items: [
+        DropdownMenuItem<String?>(
+          value: null,
+          child: Text(l10n.attr_figurePosition_automatic),
+        ),
+        for (final option in options)
+          DropdownMenuItem(
+            value: option,
+            child: Text(attributeChoiceLabel(l10n, def.key, option)),
+          ),
+      ],
+      onChanged: (option) {
+        if (option == null) {
+          onCleared(def.key);
+        } else {
+          onChanged(_base(def.key).copyWith(valueText: option));
+        }
+      },
     );
   }
 
@@ -176,54 +227,18 @@ class EquipmentAttributeFormSection extends StatelessWidget {
         );
 
       case AttributeKind.number:
-        final symbol = attributeUnitSymbol(def.dimension, units);
-        return TextFormField(
-          key: fieldKey,
-          initialValue: current?.valueNum == null
-              ? ''
-              : formatAttributeNumberForEditing(
-                  def.dimension,
-                  units,
-                  current!.valueNum!,
-                ),
-          decoration: InputDecoration(
-            labelText: symbol.isEmpty ? label : '$label ($symbol)',
-          ),
-          keyboardType: const TextInputType.numberWithOptions(
-            decimal: true,
-            signed: true,
-          ),
-          autovalidateMode: AutovalidateMode.onUserInteraction,
-          validator: numberValidator(context),
-          onChanged: (text) {
-            final trimmed = text.trim();
-            if (trimmed.isEmpty) {
-              onCleared(def.key);
-              return;
-            }
-            // Read in the diver's locale, matching how the field is seeded by
-            // formatAttributeNumberForEditing. A blanket replaceAll(',', '.')
-            // would misread the en_US thousands separator, turning "1,250"
-            // into 1.25.
-            final parsed = switch (readNumber(trimmed)) {
-              NumberValue(:final value) => value,
-              NumberBlank() || NumberInvalid() => null,
-            };
-            if (parsed != null) {
-              onChanged(
-                _base(def.key).copyWith(
-                  valueNum: attributeMetricFromDisplay(
-                    def.dimension,
-                    units,
-                    parsed,
-                  ),
-                ),
-              );
-            }
-            // Non-empty but unreadable (transient like "-", or invalid): keep
-            // the last pending value rather than dropping the field; the
-            // validator shows why (#1900).
-          },
+        // The inner text field carries `attr-field-<key>`, as every other
+        // kind's input does; this key only keeps the field's state per key.
+        return EquipmentNumberAttributeField(
+          key: ValueKey('attr-number-${def.key}'),
+          def: def,
+          current: current,
+          units: units,
+          workingPressureBar: def.key == EquipmentAttrKeys.volumeL
+              ? values[EquipmentAttrKeys.workingPressureBar]?.valueNum
+              : null,
+          onChanged: onChanged,
+          onCleared: () => onCleared(def.key),
         );
 
       case AttributeKind.choice:

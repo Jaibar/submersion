@@ -136,6 +136,21 @@ void main() {
     expect(container.read(settingsProvider).o2CellUnit, O2CellUnit.millivolts);
   });
 
+  test('a synced change keeps the device-local counterdiffusion choice '
+      '(issue #4530)', () async {
+    await container
+        .read(settingsProvider.notifier)
+        .setCounterdiffusionShowAll(true);
+    final prefs = container.read(sharedPreferencesProvider);
+    expect(prefs.getBool(SettingsKeys.counterdiffusionShowAll), isTrue);
+
+    await applyPeerRow(diverA, (row) => row.copyWith(gfHigh: 70));
+    await pumpEventQueue();
+
+    expect(container.read(settingsProvider).gfHigh, 70);
+    expect(container.read(settingsProvider).counterdiffusionShowAll, isTrue);
+  });
+
   test('a synced pSCR ratio and viewport choice show on this device '
       '(issue #2948)', () async {
     await applyPeerRow(
@@ -230,7 +245,7 @@ void main() {
   });
 
   test(
-    "a change made mid-switch never lands in the next diver's row",
+    "a change made mid-switch lands on the next diver's settings, not A's",
     () async {
       await applyPeerRow(diverB, (row) => row.copyWith(gfHigh: 70));
       final readB = settingsRepository.readGates[diverB] = Completer<void>();
@@ -241,16 +256,20 @@ void main() {
       // B's row is being read; [state] still holds A's settings.
       expect(container.read(settingsProvider).gfHigh, 85);
 
-      await container
+      // The setter waits for B's load (issue #4449), then applies the
+      // change to B's settings.
+      final saving = container
           .read(settingsProvider.notifier)
           .setDepthUnit(DepthUnit.feet);
       readB.complete();
-      await container.read(settingsProvider.notifier).settingsLoaded;
+      await saving;
       await pumpEventQueue();
 
       final stored = await storedSettings(diverB);
       expect(stored!.gfHigh, 70, reason: "A's settings overwrote B's row");
+      expect(stored.depthUnit, DepthUnit.feet);
       expect(container.read(settingsProvider).gfHigh, 70);
+      expect(container.read(settingsProvider).depthUnit, DepthUnit.feet);
     },
   );
 

@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -90,12 +91,15 @@ void main() {
     Color columnColor(WidgetTester tester, int index) =>
         columnDecoration(tester, index).color!;
 
-    Finder rowBars() => find.descendant(
-      of: find.descendant(
-        of: find.byType(SacSegmentTable),
-        matching: find.byType(FractionallySizedBox),
+    /// The color dot that keys each table row to the chart.
+    Finder rowDots() => find.descendant(
+      of: find.byType(SacSegmentTable),
+      matching: find.byWidgetPredicate(
+        (w) =>
+            w is DecoratedBox &&
+            w.decoration is BoxDecoration &&
+            (w.decoration as BoxDecoration).shape == BoxShape.circle,
       ),
-      matching: find.byType(DecoratedBox),
     );
 
     testWidgets('a column takes the color of the phase it mostly falls in', (
@@ -137,7 +141,7 @@ void main() {
       expect(columnColor(tester, 0), theme.colorScheme.primary);
     });
 
-    testWidgets('a phase row bar wears its full color under the label', (
+    testWidgets('a phase row dot wears its full color before the label', (
       tester,
     ) async {
       await pumpSacSegmentsView(tester, gases: const []);
@@ -145,31 +149,23 @@ void main() {
         tester.element(find.byType(SacTimeColumns)),
       ).brightness;
 
-      final bar = rowBars().first;
+      final dot = rowDots().first;
       expect(
-        (tester.widget<DecoratedBox>(bar).decoration as BoxDecoration).color,
+        (tester.widget<DecoratedBox>(dot).decoration as BoxDecoration).color,
         SacSegmentColors.forPhase(DivePhase.descent, brightness),
       );
       expect(
-        tester.getRect(bar).top,
-        greaterThanOrEqualTo(tester.getRect(find.text('Descent')).bottom),
+        tester.getRect(dot).right,
+        lessThanOrEqualTo(tester.getRect(find.text('Descent')).left),
       );
     });
 
-    testWidgets('a row with no color of its own gets a primary bar', (
-      tester,
-    ) async {
+    testWidgets('a row with no color of its own has no dot', (tester) async {
+      // The fixture's cylinders name no mix, so they have no color.
       await pumpSacSegmentsView(tester, phases: const []);
-      final scheme = Theme.of(
-        tester.element(find.byType(SacTimeColumns)),
-      ).colorScheme;
 
-      expect(
-        (tester.widget<DecoratedBox>(rowBars().first).decoration
-                as BoxDecoration)
-            .color,
-        scheme.primary,
-      );
+      expect(find.text('Back gas'), findsOneWidget);
+      expect(rowDots(), findsNothing);
     });
 
     testWidgets('a phase row uses the color of its columns', (tester) async {
@@ -261,7 +257,14 @@ void main() {
         rates: sacRates(lane: GasConsumptionLane.sac),
       );
 
-      expect(find.text('2.0 bar/min'), findsOneWidget);
+      // The summary also gives the peak; this is the axis's top label.
+      expect(
+        find.descendant(
+          of: find.byType(SacTimeColumns),
+          matching: find.text('2.0 bar/min'),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('follows the diver\'s units', (tester) async {
@@ -463,6 +466,73 @@ void main() {
       for (var i = 0; i < 10; i++) sacSegment(i * 5, (i + 1) * 5),
     ];
 
+    // Issue #4611: a scrub that strays off the plot with the button held
+    // reports a mouse exit. The drag goes on, so it must not drop the
+    // profile cursor; the hover highlight still goes, as no hover follows.
+    testWidgets('a mouse drag off the plot keeps the cursor until release', (
+      tester,
+    ) async {
+      final cursor = <int?>[];
+      final hovers = <int?>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: 342,
+                child: SacTimeColumns(
+                  columns: const [
+                    SacTimeColumn(
+                      startSeconds: 0,
+                      durationSeconds: 1500,
+                      heightFactor: 1,
+                      semanticLabel: 'first',
+                    ),
+                    SacTimeColumn(
+                      startSeconds: 1500,
+                      durationSeconds: 1500,
+                      heightFactor: 0.5,
+                      semanticLabel: 'second',
+                    ),
+                  ],
+                  averageFactor: 0.5,
+                  activeIndex: null,
+                  endLabel: (minutes) => '$minutes min',
+                  onTap: (_) {},
+                  onScrub: (_) {},
+                  onHover: hovers.add,
+                  onCursorSeconds: cursor.add,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      final plot = tester.getRect(find.byKey(SacTimeColumns.plotKey));
+      final start = Offset(plot.left + plot.width * 0.3, plot.center.dy);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(start);
+      await tester.pump();
+      await mouse.down(start);
+      await tester.pump();
+      await mouse.moveTo(start + const Offset(60, 0));
+      await tester.pump();
+      expect(cursor.last, isNotNull);
+
+      cursor.clear();
+      await mouse.moveTo(Offset(start.dx + 60, 500));
+      await tester.pump();
+      expect(cursor.where((c) => c == null), isEmpty);
+      expect(hovers.last, isNull);
+
+      await mouse.up();
+      await tester.pump();
+      expect(cursor.last, isNull, reason: 'releasing ends the scrub');
+    });
+
     testWidgets('measures once while only the selection changes', (
       tester,
     ) async {
@@ -548,7 +618,7 @@ void main() {
     });
 
     void widenWindow(WidgetTester tester) {
-      tester.view.physicalSize = const Size(4800, 1800);
+      tester.view.physicalSize = const Size(7200, 1800);
       addTearDown(tester.view.resetPhysicalSize);
     }
 
@@ -564,7 +634,8 @@ void main() {
 
     testWidgets('marks every column once there is room', (tester) async {
       widenWindow(tester);
-      await pumpSacSegmentsView(tester, time: fiftyMinutes, width: 1200);
+      // A wide card gives the chart half its width, beside the table.
+      await pumpSacSegmentsView(tester, time: fiftyMinutes, width: 2400);
 
       expect(axisLabels(tester).map((t) => t.data), [
         for (var minutes = 0; minutes < 50; minutes += 5) '$minutes',

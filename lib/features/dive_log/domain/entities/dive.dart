@@ -17,6 +17,7 @@ import 'package:submersion/features/dive_types/domain/entities/dive_type_entity.
 import 'package:submersion/features/equipment/domain/entities/equipment_item.dart';
 import 'package:submersion/features/equipment/domain/entities/gear_link.dart';
 import 'package:submersion/features/equipment/domain/entities/gear_provenance.dart';
+import 'package:submersion/features/equipment/domain/services/equipment_lead.dart';
 import 'package:submersion/features/marine_life/domain/entities/sighting_abundance.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
@@ -202,6 +203,13 @@ class Dive extends Equatable {
   /// by the gas switch writer; saving a dive never rewrites it. Carried by
   /// the UDDF backup so a restored dive keeps its list.
   final bool gasSwitchesEdited;
+
+  /// Seconds added to each photo's capture time before it is placed on this
+  /// dive (issue #4539): negative for a camera running ahead of the dive
+  /// computer, positive for one behind. Written on its own, by the Set-time
+  /// dialog or an agent; saving a dive never rewrites it. Carried by the UDDF
+  /// backup so a restored dive keeps its media where the diver put it.
+  final int mediaTimeOffsetSeconds;
   final List<Tag> tags;
 
   // Dive mode (v1.5) - OC, CCR, or SCR
@@ -341,6 +349,7 @@ class Dive extends Equatable {
     this.excludedFromStats = false,
     this.excludedFromGasStats = false,
     this.gasSwitchesEdited = false,
+    this.mediaTimeOffsetSeconds = 0,
     this.tags = const [],
     // CCR/SCR fields (v1.5)
     this.diveMode = DiveMode.oc,
@@ -522,16 +531,26 @@ class Dive extends Equatable {
     return span > Duration.zero ? span : null;
   }
 
-  /// Total weight from all weight entries
-  double get totalWeight => weights.fold(0.0, (sum, w) => sum + w.amountKg);
+  /// The weights gear on this dive that carries lead, with no part of its
+  /// own attached (an assembly counts through its parts), in link order.
+  List<EquipmentItem> get leadGear => EquipmentLead.carriers(gear);
 
-  /// The lead the detail page shows, or null when none is recorded: the weight
-  /// entries when there are any, else a positive legacy [weightAmount]. The
-  /// Dart spelling of `recordedWeightKgSql` (issue #3914).
+  /// Every kilogram of lead the diver carried, or null when none is
+  /// recorded: the lead typed in the Weights section (the weight entries
+  /// when there are any, else a positive legacy [weightAmount]) plus the lead
+  /// carried as [leadGear]. The two are different lead (a belt beside a
+  /// weighted backplate), so they add rather than one standing in for the
+  /// other (issue #4442). This is what the detail page, the buoyancy model,
+  /// Insights and the query language all read; the Dart spelling of
+  /// `recordedWeightKgSql` (issue #3914).
   double? get recordedWeightKg {
-    if (weights.isNotEmpty) return totalWeight;
     final legacy = weightAmount;
-    return legacy != null && legacy > 0 ? legacy : null;
+    final typed = weights.isNotEmpty
+        ? weights.fold(0.0, (sum, w) => sum + w.amountKg)
+        : (legacy != null && legacy > 0 ? legacy : null);
+    final gearKg = EquipmentLead.totalKg(leadGear);
+    if (typed == null && gearKg <= 0) return null;
+    return (typed ?? 0) + gearKg;
   }
 
   // CCR/SCR computed properties
@@ -580,6 +599,10 @@ class Dive extends Equatable {
   double? rmvFor(GasModel model) {
     final breathing = breathingTanks;
     if (breathing.isEmpty) return null;
+    // A breathed cylinder whose pressure is not the gas used (an Avelo
+    // Hydrotank, issue #4657) leaves the dive's total gas unknown: summing
+    // only the others would understate the rate, as [sac] does not either.
+    if (breathesUnmeasuredTank(breathing)) return null;
     // Entered surface minutes of the cylinders whose gas this rate sums.
     final basis = _consumptionBasis(
       _surfaceSecondsWhere((t) => consumptionVolume(t, breathing) != null),
@@ -747,6 +770,10 @@ class Dive extends Equatable {
   double? get sac {
     final reference = sacReferenceTank;
     if (reference == null) return null;
+    // A breathed Avelo Hydrotank leaves the dive's total gas unknown (issue
+    // #4657), whichever cylinder is the reference: back gas listed before it
+    // would otherwise give a SAC without the Hydrotank's gas, as [rmvFor].
+    if (breathesUnmeasuredTank(tanks)) return null;
     // Entered surface minutes of the cylinders [referencePressureDrop] sums.
     final basis = _consumptionBasis(
       _surfaceSecondsWhere(
@@ -849,8 +876,11 @@ class Dive extends Equatable {
     DiveSite? site,
     bool clearSite = false,
     DiveCenter? diveCenter,
+    bool clearDiveCenter = false,
     Trip? trip,
+    bool clearTrip = false,
     String? tripId,
+    bool clearTripId = false,
     List<DiveTank>? tanks,
     List<DiveProfilePoint>? profile,
     Duration? profileSpan,
@@ -862,29 +892,52 @@ class Dive extends Equatable {
     List<MarineSighting>? sightings,
     double? waterTemp,
     double? airTemp,
+    bool clearAirTemp = false,
     Visibility? visibility,
+    bool clearVisibility = false,
     double? visibilityMeters,
+    bool clearVisibilityMeters = false,
     double? visibilityMinMeters,
+    bool clearVisibilityMinMeters = false,
     double? visibilityMaxMeters,
+    bool clearVisibilityMaxMeters = false,
     List<String>? diveTypeIds,
     DiveTypeEntity? diveType,
     String? buddy,
     String? diveMaster,
     String? diveOperator,
+    bool clearDiveOperator = false,
     String? boatName,
+    bool clearBoatName = false,
     String? boatCaptain,
+    bool clearBoatCaptain = false,
     List<BuddyWithRole>? buddies,
     List<String>? diverRoleIds,
     int? rating,
     CurrentDirection? currentDirection,
+    bool clearCurrentDirection = false,
     CurrentStrength? currentStrength,
+    bool clearCurrentStrength = false,
     double? swellHeight,
+    bool clearSwellHeight = false,
     String? surfaceConditions,
+    bool clearSurfaceConditions = false,
     EntryMethod? entryMethod,
+    bool clearEntryMethod = false,
     EntryMethod? exitMethod,
+    bool clearExitMethod = false,
     WaterType? waterType,
+    bool clearWaterType = false,
     double? altitude,
+    bool clearAltitude = false,
     double? surfacePressure,
+    bool clearSurfacePressure = false,
+    bool clearDiveNumber = false,
+    bool clearBottomTime = false,
+    bool clearMaxDepth = false,
+    bool clearAvgDepth = false,
+    bool clearWaterTemp = false,
+    bool clearRating = false,
     Duration? surfaceInterval,
     int? gradientFactorLow,
     int? gradientFactorHigh,
@@ -904,6 +957,7 @@ class Dive extends Equatable {
     bool? excludedFromStats,
     bool? excludedFromGasStats,
     bool? gasSwitchesEdited,
+    int? mediaTimeOffsetSeconds,
     List<Tag>? tags,
     // CCR/SCR fields
     DiveMode? diveMode,
@@ -930,6 +984,23 @@ class Dive extends Equatable {
     bool clearRuntime = false,
     bool clearSetpoints = false,
     bool clearDiluentGas = false,
+    bool clearSetpointLow = false,
+    bool clearSetpointHigh = false,
+    bool clearSetpointDeco = false,
+    bool clearScrType = false,
+    bool clearScrInjectionRate = false,
+    bool clearScrAdditionRatio = false,
+    bool clearScrOrificeSize = false,
+    bool clearAssumedVo2 = false,
+    bool clearLoopO2Min = false,
+    bool clearLoopO2Max = false,
+    bool clearLoopO2Avg = false,
+    bool clearLoopVolume = false,
+    bool clearScrubber = false,
+    bool clearWeightingFeedback = false,
+    bool clearWeightingFeedbackKg = false,
+    bool clearWeightAmount = false,
+    bool clearWeightType = false,
     // Training courses
     List<String>? courseIds,
     // Import source tracking
@@ -939,33 +1010,42 @@ class Dive extends Equatable {
     List<DiveCustomField>? customFields,
     // Weather fields
     double? windSpeed,
+    bool clearWindSpeed = false,
     CurrentDirection? windDirection,
+    bool clearWindDirection = false,
     CloudCover? cloudCover,
+    bool clearCloudCover = false,
     Precipitation? precipitation,
+    bool clearPrecipitation = false,
     double? humidity,
+    bool clearHumidity = false,
     String? weatherDescription,
+    bool clearWeatherDescription = false,
     int? weatherCode,
+    bool clearWeatherCode = false,
     WeatherSource? weatherSource,
+    bool clearWeatherSource = false,
     DateTime? weatherFetchedAt,
+    bool clearWeatherFetchedAt = false,
   }) {
     return Dive(
       id: id ?? this.id,
       diverId: diverId ?? this.diverId,
-      diveNumber: diveNumber ?? this.diveNumber,
+      diveNumber: clearDiveNumber ? null : (diveNumber ?? this.diveNumber),
       name: clearName ? null : (name ?? this.name),
       dateTime: dateTime ?? this.dateTime,
       entryTime: entryTime ?? this.entryTime,
       exitTime: clearExitTime ? null : (exitTime ?? this.exitTime),
-      bottomTime: bottomTime ?? this.bottomTime,
+      bottomTime: clearBottomTime ? null : (bottomTime ?? this.bottomTime),
       runtime: clearRuntime ? null : (runtime ?? this.runtime),
-      maxDepth: maxDepth ?? this.maxDepth,
-      avgDepth: avgDepth ?? this.avgDepth,
+      maxDepth: clearMaxDepth ? null : (maxDepth ?? this.maxDepth),
+      avgDepth: clearAvgDepth ? null : (avgDepth ?? this.avgDepth),
       entryLocation: entryLocation ?? this.entryLocation,
       exitLocation: exitLocation ?? this.exitLocation,
       site: clearSite ? null : (site ?? this.site),
-      diveCenter: diveCenter ?? this.diveCenter,
-      trip: trip ?? this.trip,
-      tripId: tripId ?? this.tripId,
+      diveCenter: clearDiveCenter ? null : (diveCenter ?? this.diveCenter),
+      trip: clearTrip ? null : (trip ?? this.trip),
+      tripId: clearTripId ? null : (tripId ?? this.tripId),
       tanks: tanks ?? this.tanks,
       profile: profile ?? this.profile,
       profileSpan: profileSpan ?? this.profileSpan,
@@ -975,31 +1055,47 @@ class Dive extends Equatable {
       notes: notes ?? this.notes,
       photoIds: photoIds ?? this.photoIds,
       sightings: sightings ?? this.sightings,
-      waterTemp: waterTemp ?? this.waterTemp,
-      airTemp: airTemp ?? this.airTemp,
-      visibility: visibility ?? this.visibility,
-      visibilityMeters: visibilityMeters ?? this.visibilityMeters,
-      visibilityMinMeters: visibilityMinMeters ?? this.visibilityMinMeters,
-      visibilityMaxMeters: visibilityMaxMeters ?? this.visibilityMaxMeters,
+      waterTemp: clearWaterTemp ? null : (waterTemp ?? this.waterTemp),
+      airTemp: clearAirTemp ? null : (airTemp ?? this.airTemp),
+      visibility: clearVisibility ? null : (visibility ?? this.visibility),
+      visibilityMeters: clearVisibilityMeters
+          ? null
+          : (visibilityMeters ?? this.visibilityMeters),
+      visibilityMinMeters: clearVisibilityMinMeters
+          ? null
+          : (visibilityMinMeters ?? this.visibilityMinMeters),
+      visibilityMaxMeters: clearVisibilityMaxMeters
+          ? null
+          : (visibilityMaxMeters ?? this.visibilityMaxMeters),
       diveTypeIds: diveTypeIds ?? this.diveTypeIds,
       diveType: diveType ?? this.diveType,
       buddy: buddy ?? this.buddy,
       diveMaster: diveMaster ?? this.diveMaster,
-      diveOperator: diveOperator ?? this.diveOperator,
-      boatName: boatName ?? this.boatName,
-      boatCaptain: boatCaptain ?? this.boatCaptain,
+      diveOperator: clearDiveOperator
+          ? null
+          : (diveOperator ?? this.diveOperator),
+      boatName: clearBoatName ? null : (boatName ?? this.boatName),
+      boatCaptain: clearBoatCaptain ? null : (boatCaptain ?? this.boatCaptain),
       buddies: buddies ?? this.buddies,
       diverRoleIds: diverRoleIds ?? this.diverRoleIds,
-      rating: rating ?? this.rating,
-      currentDirection: currentDirection ?? this.currentDirection,
-      currentStrength: currentStrength ?? this.currentStrength,
-      swellHeight: swellHeight ?? this.swellHeight,
-      surfaceConditions: surfaceConditions ?? this.surfaceConditions,
-      entryMethod: entryMethod ?? this.entryMethod,
-      exitMethod: exitMethod ?? this.exitMethod,
-      waterType: waterType ?? this.waterType,
-      altitude: altitude ?? this.altitude,
-      surfacePressure: surfacePressure ?? this.surfacePressure,
+      rating: clearRating ? null : (rating ?? this.rating),
+      currentDirection: clearCurrentDirection
+          ? null
+          : (currentDirection ?? this.currentDirection),
+      currentStrength: clearCurrentStrength
+          ? null
+          : (currentStrength ?? this.currentStrength),
+      swellHeight: clearSwellHeight ? null : (swellHeight ?? this.swellHeight),
+      surfaceConditions: clearSurfaceConditions
+          ? null
+          : (surfaceConditions ?? this.surfaceConditions),
+      entryMethod: clearEntryMethod ? null : (entryMethod ?? this.entryMethod),
+      exitMethod: clearExitMethod ? null : (exitMethod ?? this.exitMethod),
+      waterType: clearWaterType ? null : (waterType ?? this.waterType),
+      altitude: clearAltitude ? null : (altitude ?? this.altitude),
+      surfacePressure: clearSurfacePressure
+          ? null
+          : (surfacePressure ?? this.surfacePressure),
       surfaceInterval: surfaceInterval ?? this.surfaceInterval,
       gradientFactorLow: gradientFactorLow ?? this.gradientFactorLow,
       gradientFactorHigh: gradientFactorHigh ?? this.gradientFactorHigh,
@@ -1010,32 +1106,52 @@ class Dive extends Equatable {
       diveComputerSerial: diveComputerSerial ?? this.diveComputerSerial,
       diveComputerFirmware: diveComputerFirmware ?? this.diveComputerFirmware,
       computerId: computerId ?? this.computerId,
-      weightAmount: weightAmount ?? this.weightAmount,
-      weightType: weightType ?? this.weightType,
+      weightAmount: clearWeightAmount
+          ? null
+          : (weightAmount ?? this.weightAmount),
+      weightType: clearWeightType ? null : (weightType ?? this.weightType),
       weights: weights ?? this.weights,
-      weightingFeedback: weightingFeedback ?? this.weightingFeedback,
-      weightingFeedbackKg: weightingFeedbackKg ?? this.weightingFeedbackKg,
+      weightingFeedback: clearWeightingFeedback
+          ? null
+          : (weightingFeedback ?? this.weightingFeedback),
+      weightingFeedbackKg: clearWeightingFeedbackKg
+          ? null
+          : (weightingFeedbackKg ?? this.weightingFeedbackKg),
       isFavorite: isFavorite ?? this.isFavorite,
       excludedFromStats: excludedFromStats ?? this.excludedFromStats,
       excludedFromGasStats: excludedFromGasStats ?? this.excludedFromGasStats,
       gasSwitchesEdited: gasSwitchesEdited ?? this.gasSwitchesEdited,
+      mediaTimeOffsetSeconds:
+          mediaTimeOffsetSeconds ?? this.mediaTimeOffsetSeconds,
       tags: tags ?? this.tags,
       // CCR/SCR fields
       diveMode: diveMode ?? this.diveMode,
-      setpointLow: clearSetpoints ? null : (setpointLow ?? this.setpointLow),
-      setpointHigh: clearSetpoints ? null : (setpointHigh ?? this.setpointHigh),
-      setpointDeco: setpointDeco ?? this.setpointDeco,
-      scrType: scrType ?? this.scrType,
-      scrInjectionRate: scrInjectionRate ?? this.scrInjectionRate,
-      scrAdditionRatio: scrAdditionRatio ?? this.scrAdditionRatio,
-      scrOrificeSize: scrOrificeSize ?? this.scrOrificeSize,
-      assumedVo2: assumedVo2 ?? this.assumedVo2,
+      setpointLow: clearSetpoints || clearSetpointLow
+          ? null
+          : (setpointLow ?? this.setpointLow),
+      setpointHigh: clearSetpoints || clearSetpointHigh
+          ? null
+          : (setpointHigh ?? this.setpointHigh),
+      setpointDeco: clearSetpointDeco
+          ? null
+          : (setpointDeco ?? this.setpointDeco),
+      scrType: clearScrType ? null : (scrType ?? this.scrType),
+      scrInjectionRate: clearScrInjectionRate
+          ? null
+          : (scrInjectionRate ?? this.scrInjectionRate),
+      scrAdditionRatio: clearScrAdditionRatio
+          ? null
+          : (scrAdditionRatio ?? this.scrAdditionRatio),
+      scrOrificeSize: clearScrOrificeSize
+          ? null
+          : (scrOrificeSize ?? this.scrOrificeSize),
+      assumedVo2: clearAssumedVo2 ? null : (assumedVo2 ?? this.assumedVo2),
       diluentGas: clearDiluentGas ? null : (diluentGas ?? this.diluentGas),
-      loopO2Min: loopO2Min ?? this.loopO2Min,
-      loopO2Max: loopO2Max ?? this.loopO2Max,
-      loopO2Avg: loopO2Avg ?? this.loopO2Avg,
-      loopVolume: loopVolume ?? this.loopVolume,
-      scrubber: scrubber ?? this.scrubber,
+      loopO2Min: clearLoopO2Min ? null : (loopO2Min ?? this.loopO2Min),
+      loopO2Max: clearLoopO2Max ? null : (loopO2Max ?? this.loopO2Max),
+      loopO2Avg: clearLoopO2Avg ? null : (loopO2Avg ?? this.loopO2Avg),
+      loopVolume: clearLoopVolume ? null : (loopVolume ?? this.loopVolume),
+      scrubber: clearScrubber ? null : (scrubber ?? this.scrubber),
       // Dive planner
       isPlanned: isPlanned ?? this.isPlanned,
       isDraft: isDraft ?? this.isDraft,
@@ -1048,15 +1164,25 @@ class Dive extends Equatable {
       // User-defined custom fields
       customFields: customFields ?? this.customFields,
       // Weather fields
-      windSpeed: windSpeed ?? this.windSpeed,
-      windDirection: windDirection ?? this.windDirection,
-      cloudCover: cloudCover ?? this.cloudCover,
-      precipitation: precipitation ?? this.precipitation,
-      humidity: humidity ?? this.humidity,
-      weatherDescription: weatherDescription ?? this.weatherDescription,
-      weatherCode: weatherCode ?? this.weatherCode,
-      weatherSource: weatherSource ?? this.weatherSource,
-      weatherFetchedAt: weatherFetchedAt ?? this.weatherFetchedAt,
+      windSpeed: clearWindSpeed ? null : (windSpeed ?? this.windSpeed),
+      windDirection: clearWindDirection
+          ? null
+          : (windDirection ?? this.windDirection),
+      cloudCover: clearCloudCover ? null : (cloudCover ?? this.cloudCover),
+      precipitation: clearPrecipitation
+          ? null
+          : (precipitation ?? this.precipitation),
+      humidity: clearHumidity ? null : (humidity ?? this.humidity),
+      weatherDescription: clearWeatherDescription
+          ? null
+          : (weatherDescription ?? this.weatherDescription),
+      weatherCode: clearWeatherCode ? null : (weatherCode ?? this.weatherCode),
+      weatherSource: clearWeatherSource
+          ? null
+          : (weatherSource ?? this.weatherSource),
+      weatherFetchedAt: clearWeatherFetchedAt
+          ? null
+          : (weatherFetchedAt ?? this.weatherFetchedAt),
     );
   }
 
@@ -1132,6 +1258,7 @@ class Dive extends Equatable {
     excludedFromStats,
     excludedFromGasStats,
     gasSwitchesEdited,
+    mediaTimeOffsetSeconds,
     tags,
     // CCR/SCR fields
     diveMode,
