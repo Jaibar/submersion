@@ -555,8 +555,12 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
         ? curve[selected]
         : null;
 
+    // This panel's own run, handed to the chart as a value: both charts show
+    // the same dive id, so anything looked up by id is shared between them
+    // (the logged chart followed the what-if sliders that way).
     final chart = DiveProfileChartHost(
       dive: dive,
+      analysisOverride: analysis,
       tooltipPresentation: TooltipPresentation.nativeBubble,
     );
 
@@ -582,24 +586,7 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
       children: [
         Text(label, style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 8),
-        // The chart reads its analysis through sourceProfileAnalysisProvider;
-        // inside this scope that is this panel's own run (the logged one with
-        // no overrides, the what-if one with the sliders), so every overlay
-        // (ceiling, NDL, ppO2, GF, tissue-derived curves) follows this panel
-        // only. The analysis is handed in as a value rather than re-derived
-        // from a shared overrides provider: with that, the logged chart
-        // followed the what-if sliders too. The override callback only runs
-        // when a provider instance is first created, so the scope is keyed on
-        // the analysis and rebuilt whenever a new run arrives.
-        ProviderScope(
-          key: ObjectKey(analysis),
-          overrides: [
-            sourceProfileAnalysisProvider.overrideWith(
-              (ref, key) async => analysis,
-            ),
-          ],
-          child: chart,
-        ),
+        chart,
         const SizedBox(height: 8),
         if (status != null)
           CompactDecoStatusCard(

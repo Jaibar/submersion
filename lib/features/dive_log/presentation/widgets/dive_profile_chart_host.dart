@@ -127,6 +127,7 @@ class DiveProfileChartHost extends ConsumerWidget {
     this.onPlotFrame,
     this.viewport,
     this.onViewportChanged,
+    this.analysisOverride,
   });
 
   /// Told where the chart's plot is after each layout that moves it. Only
@@ -139,6 +140,11 @@ class DiveProfileChartHost extends ConsumerWidget {
   /// pinned copy pass these (#4423).
   final ChartViewport? viewport;
   final ValueChanged<ChartViewport>? onViewportChanged;
+
+  /// A finished analysis to draw instead of the dive's own, for a page that
+  /// charts a what-if run next to the logged one. Read as given, never looked
+  /// up by dive id, so two charts of one dive cannot see each other's curves.
+  final ProfileAnalysis? analysisOverride;
 
   /// The hydrated dive: tanks and profile samples included. A dive loaded for
   /// a list view carries neither, and would draw an empty chart.
@@ -194,12 +200,14 @@ class DiveProfileChartHost extends ConsumerWidget {
     // through: the host only rebuilds, and rebuilds the chart, for a value
     // that differs. A list compares by identity, so one read again differs.
     final activeSourceId = ref.watch(activeDiveSourceProvider(diveId));
-    final analysis = ref.watch(
-      sourceProfileAnalysisProvider((
-        diveId: diveId,
-        sourceId: activeSourceId,
-      )).select((a) => a.value),
-    );
+    final analysis =
+        analysisOverride ??
+        ref.watch(
+          sourceProfileAnalysisProvider((
+            diveId: diveId,
+            sourceId: activeSourceId,
+          )).select((a) => a.value),
+        );
 
     final showMaxDepthMarker = ref.watch(showMaxDepthMarkerProvider);
     final showPressureThresholdMarkers = ref.watch(
