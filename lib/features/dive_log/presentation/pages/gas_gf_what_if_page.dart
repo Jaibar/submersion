@@ -501,7 +501,6 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
       dive: dive,
       analysis: loggedAnalysis,
       points: points,
-      overrides: const GasGfOverrides(),
       weeklyOtu: weeklyOtu,
     );
     final whatIf = _panel(
@@ -510,7 +509,6 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
       dive: applyGasGfOverrides(dive, _overrides),
       analysis: whatIfAnalysis,
       points: points,
-      overrides: _overrides,
       // The weekly total counts this dive in full, so swap the logged dive's
       // OTU for the what-if one; earlier dives of the week stay as logged.
       weeklyOtu: weeklyOtu == null
@@ -542,7 +540,6 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
     required Dive dive,
     required ProfileAnalysis analysis,
     required List<DiveProfilePoint> points,
-    required GasGfOverrides overrides,
     required double? weeklyOtu,
   }) {
     final selected = ref.watch(profileTrackingIndexProvider(dive.id));
@@ -586,21 +583,19 @@ class _GasGfWhatIfPageState extends ConsumerState<GasGfWhatIfPage> {
         Text(label, style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 8),
         // The chart reads its analysis through sourceProfileAnalysisProvider;
-        // inside this scope that is the what-if run, so every overlay (ceiling,
-        // NDL, ppO2, GF, tissue-derived curves) follows the changed gas/GF.
-        // Both panels go through this scope (the logged one with no overrides)
-        // so the two charts are fed by the same code path and offer the same
-        // curves and legend entries.
+        // inside this scope that is this panel's own run (the logged one with
+        // no overrides, the what-if one with the sliders), so every overlay
+        // (ceiling, NDL, ppO2, GF, tissue-derived curves) follows this panel
+        // only. The analysis is handed in as a value rather than re-derived
+        // from a shared overrides provider: with that, the logged chart
+        // followed the what-if sliders too. The override callback only runs
+        // when a provider instance is first created, so the scope is keyed on
+        // the analysis and rebuilt whenever a new run arrives.
         ProviderScope(
+          key: ObjectKey(analysis),
           overrides: [
-            whatIfPanelOverridesProvider.overrideWithValue(overrides),
             sourceProfileAnalysisProvider.overrideWith(
-              (ref, key) => ref.watch(
-                gasGfWhatIfAnalysisProvider((
-                  diveId: key.diveId,
-                  overrides: ref.watch(whatIfPanelOverridesProvider),
-                )).future,
-              ),
+              (ref, key) async => analysis,
             ),
           ],
           child: chart,
